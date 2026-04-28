@@ -21,7 +21,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
-    output::{OutputPaths, dedup::SinkId, run_output},
+    output::{EssidFilterConfig, OutputPaths, dedup::SinkId, run_output},
     pair::combos::PairConfig,
     stats::Stats,
     store::{
@@ -226,6 +226,39 @@ struct Cli {
     /// still leak. See `ARCHITECTURE.md §9`.
     #[arg(long = "wordlist-scan-ies")]
     scan_ies: bool,
+
+    /// [output filter] gate the multi-ESSID inflation collapse on AP fanout
+    ///
+    /// The collapse only fires on APs whose `EssidMap` fanout strictly exceeds this
+    /// value -- APs with `<=` this many recorded SSIDs are passed through unchanged.
+    /// Default 3 was tuned against 1,780 captures: 49 of 56 multi-SSID hash-producing
+    /// APs in that corpus had exactly 2 SSIDs and 2 more had 3, so a threshold of 3
+    /// preserves every legit dual-band / 3-SSID setup while letting the filter act
+    /// on genuine RF-rotted captures (4+ SSIDs from one physical AP, 90%+ of them
+    /// bit-flipped variants of one real broadcast).
+    ///
+    /// Increase to keep more SSIDs (e.g. `--essid-fanout-threshold 16` lets through
+    /// captures with up to 16 distinct SSIDs per AP unfiltered). Set to a very large
+    /// number to effectively disable the gate; combine with
+    /// `--essid-dominance-ratio 0` to disable the collapse entirely.
+    #[arg(long = "essid-fanout-threshold", value_name = "N", default_value_t = 3)]
+    essid_fanout_threshold: usize,
+
+    /// [output filter] minimum primary/second SSID count ratio to trigger collapse
+    ///
+    /// When an AP exceeds the fanout threshold, the most-frequently-observed SSID's
+    /// observation count is compared to the second-most-frequent's. If the primary
+    /// count is at least N times the second count, every secondary SSID is dropped
+    /// (the surviving line ships only the dominant SSID); otherwise all recorded
+    /// SSIDs are emitted.
+    ///
+    /// Default 10. The empirical RF-rot pattern is primary count 10^3-10^4 with
+    /// rot variants at count 1-10, a ratio well above 10x. Legit multi-network APs
+    /// (e.g. a CTF AP advertising 11 distinct named SSIDs) show ratios within an
+    /// order of magnitude of 1 and are unaffected. A value < 2 disables the
+    /// collapse entirely (the filter degenerates to a passthrough).
+    #[arg(long = "essid-dominance-ratio", value_name = "N", default_value_t = 10)]
+    essid_dominance_ratio: u64,
 
     /// [output filter] deduplicate equivalent N#E# hash combos within each session
     ///
@@ -603,6 +636,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
     stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
 
+    let essid_filter =
+        EssidFilterConfig { fanout_threshold: cli.essid_fanout_threshold, dominance_ratio: cli.essid_dominance_ratio };
+
     let output_stats = run_output(
         &message_store,
         &pmkid_store,
@@ -617,6 +653,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         &pair_config,
         &paths,
         thread_count,
+        essid_filter,
         &mut logger,
     )?;
 

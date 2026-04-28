@@ -31,6 +31,34 @@ use self::device_info::write_device_info;
 use self::hashcat::{format_eapol_ft_line, format_eapol_line, format_pmkid_ft_line, format_pmkid_line};
 use self::wordlists::{write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist};
 
+// --- EssidFilterConfig ---
+
+/// Tunables for the multi-ESSID inflation filter applied at hash emit time.
+///
+/// See `EssidMap::ssids_for_emit` for the full algorithm. Both fields originate
+/// in CLI flags (`--essid-fanout-threshold`, `--essid-dominance-ratio`) with
+/// defaults that pass through ~99.98% of hash-producing APs untouched and only
+/// collapse the small set of RF-corrupted APs that produce 4+ bit-flipped SSID
+/// variants of the same real broadcast.
+#[derive(Debug, Clone, Copy)]
+pub struct EssidFilterConfig {
+    /// Filter only triggers on APs whose `EssidMap` fanout strictly exceeds this
+    /// value. Default 3 -- preserves singleton-SSID APs (small captures with
+    /// 1 beacon + a handshake), 2-SSID dual-band routers, and 3-SSID setups.
+    pub fanout_threshold: usize,
+    /// Primary SSID's observation count must be at least this many times the
+    /// second-most-frequent SSID's count to trigger the collapse to primary-only.
+    /// Default 10. A value below 2 disables the filter (every recorded SSID is
+    /// emitted, matching pre-filter behaviour).
+    pub dominance_ratio: u64,
+}
+
+impl Default for EssidFilterConfig {
+    fn default() -> Self {
+        Self { fanout_threshold: 3, dominance_ratio: 10 }
+    }
+}
+
 // --- OutputPaths ---
 
 /// Paths for all optional output files.
@@ -344,6 +372,7 @@ pub fn run_output(
     pair_config: &PairConfig,
     paths: &OutputPaths,
     thread_count: usize,
+    essid_filter: EssidFilterConfig,
     logger: &mut Logger,
 ) -> Result<OutputStats> {
     let mut stats = OutputStats::default();
@@ -379,7 +408,8 @@ pub fn run_output(
                     entry.akm
                 };
             let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
-            let ssids = essid_map.all_for_ap(&entry.ap);
+            let ssids =
+                essid_map.ssids_for_emit(&entry.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
             let is_ft = ht.is_ft();
 
             // For FT-PSK PMKIDs, only write when we have complete FT context (R0KH-ID required).
@@ -398,11 +428,8 @@ pub fn run_output(
             // for this AP, so the hash line ships with a NULL ESSID. Only credit the
             // counter to a *line that actually shipped*: a dedup-dropped line must not
             // be billed as an unresolved emission.
-            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) = if ssids.is_empty() {
-                (vec![&[]], true)
-            } else {
-                (ssids.iter().map(|e| e.essid.as_slice()).collect(), false)
-            };
+            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) =
+                if ssids.is_empty() { (vec![&[]], true) } else { (ssids, false) };
 
             for essid in essid_list {
                 let item = FanItem::Pmkid { entry, ft: ft_ctx, essid };
@@ -432,7 +459,7 @@ pub fn run_output(
     if any_sink {
         for pair in &all_pairs {
             let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
-            let ssids = essid_map.all_for_ap(&pair.ap);
+            let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
             let is_ft = ht.is_ft();
 
             // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
@@ -448,11 +475,8 @@ pub fn run_output(
 
             // See pipeline 1 comment: bill `essid_unresolved_emissions` only to lines
             // that actually shipped, not to dedup-dropped duplicates.
-            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) = if ssids.is_empty() {
-                (vec![&[]], true)
-            } else {
-                (ssids.iter().map(|e| e.essid.as_slice()).collect(), false)
-            };
+            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) =
+                if ssids.is_empty() { (vec![&[]], true) } else { (ssids, false) };
 
             for essid in essid_list {
                 let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
@@ -591,6 +615,7 @@ mod tests {
             &pair_config,
             &paths,
             1,
+            EssidFilterConfig::default(),
             &mut logger,
         )
         .unwrap();

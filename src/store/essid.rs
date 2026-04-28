@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::store::auxiliary::passes_hcx_essid_filter;
 use crate::types::MacAddr;
 
-/// A single ESSID observation with its first-seen timestamp.
+/// A single ESSID observation with its first-seen timestamp and observation count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EssidEntry {
     /// Raw SSID bytes (0-32 bytes). Not required to be valid UTF-8.
@@ -22,6 +22,13 @@ pub struct EssidEntry {
     pub essid: Vec<u8>,
     /// Capture timestamp (microseconds) when this SSID was first observed for this AP.
     pub timestamp: u64,
+    /// Number of frames in which this (AP, SSID) pair was observed.
+    ///
+    /// Real broadcasts accumulate hundreds-to-thousands of observations across Beacon
+    /// and Probe-Response frames; bit-flipped variants typically appear once or twice.
+    /// The frequency gap is the discriminator used by the multi-ESSID inflation filter
+    /// in `EssidMap::ssids_for_emit`.
+    pub count: u64,
 }
 
 /// Maps AP MAC addresses to their SSID history with timestamp-nearest resolution.
@@ -73,12 +80,15 @@ impl EssidMap {
         }
         let entries = self.map.entry(ap).or_default();
         if let Some(existing) = entries.iter_mut().find(|e| e.essid == essid) {
-            // Preserve the earliest observation for this SSID.
+            // Preserve the earliest observation for this SSID; bump the count
+            // so frequency-weighted filters in `ssids_for_emit` can distinguish
+            // bit-flip noise (count == 1) from genuine broadcasts (count >> 1).
             if timestamp < existing.timestamp {
                 existing.timestamp = timestamp;
             }
+            existing.count = existing.count.saturating_add(1);
         } else {
-            entries.push(EssidEntry { essid, timestamp });
+            entries.push(EssidEntry { essid, timestamp, count: 1 });
         }
     }
 
@@ -100,9 +110,73 @@ impl EssidMap {
     /// Used by the output pipeline to emit one hash line per observed SSID when an AP
     /// has been seen advertising multiple SSIDs over the capture lifetime. Most APs
     /// return a single-element slice; the multi-SSID case is handled uniformly.
+    ///
+    /// Callers that route the result into hash emission should prefer
+    /// [`EssidMap::ssids_for_emit`], which applies the frequency-weighted multi-ESSID
+    /// inflation filter; this raw accessor is kept for diagnostic / tooling use.
     #[must_use]
     pub fn all_for_ap(&self, ap: &MacAddr) -> &[EssidEntry] {
         self.map.get(ap).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Returns the SSID byte strings to emit for `ap`, with the multi-ESSID
+    /// inflation filter applied.
+    ///
+    /// The filter targets RF-corrupted captures where one physical AP appears in the
+    /// store with many bit-flipped SSID variants of one real broadcast (e.g. an AP
+    /// observed 44,865 times as `iPhone` plus 108 single-byte-flip variants observed
+    /// 1-6 times each). Without the filter, every variant produces an independent
+    /// hashcat line during emit, blowing up output by 100x or more for affected APs.
+    ///
+    /// Algorithm (matching the pseudocode reviewed against `/root/ALL_CAPS`):
+    ///
+    /// ```text
+    /// if num_ssids <= fanout_threshold:
+    ///     keep all SSIDs                           # singletons + small captures
+    /// elif dominance_ratio < 2:
+    ///     keep all SSIDs                           # filter disabled
+    /// elif primary.count >= dominance_ratio * second.count:
+    ///     keep only primary                        # RF-rot collapse
+    /// else:
+    ///     keep all SSIDs                           # legit multi-network AP
+    /// ```
+    ///
+    /// `fanout_threshold` (default 3) is the gate -- APs with `<=` that many SSIDs are
+    /// untouched. This preserves singleton-SSID APs (small captures with 1 beacon
+    /// plus a handshake) and the long tail of legit dual-band / 3-SSID setups.
+    ///
+    /// `dominance_ratio` (default 10) is the trigger -- the primary SSID's observation
+    /// count must be at least `N x` the second-most-frequent's count. Empirical
+    /// finding from the reference corpus: real RF-rot APs show ratios of 10^2 to 10^4,
+    /// while legit multi-network APs (e.g. a CTF AP advertising 11 distinct SSIDs)
+    /// show ratios within an order of magnitude of 1. A ratio `< 2` disables the
+    /// filter -- a useful escape hatch for operators who want every recorded SSID
+    /// to enter hash output regardless of frequency.
+    ///
+    /// Returns an empty `Vec` when no SSIDs are recorded for `ap` (the caller is
+    /// expected to fall back to an empty-ESSID hash line and log
+    /// `essid_not_found`).
+    #[must_use]
+    pub fn ssids_for_emit(&self, ap: &MacAddr, fanout_threshold: usize, dominance_ratio: u64) -> Vec<&[u8]> {
+        let Some(entries) = self.map.get(ap) else { return Vec::new() };
+        if entries.len() <= fanout_threshold || dominance_ratio < 2 {
+            return entries.iter().map(|e| e.essid.as_slice()).collect();
+        }
+        let mut sorted: Vec<&EssidEntry> = entries.iter().collect();
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.count));
+        // entries.len() > fanout_threshold guarantees fanout >= 2 for any
+        // non-zero threshold; the bounds-checked accessors below also cover
+        // the threshold == 0 case where fanout could be 1 (still safe -- a
+        // 1-entry vec returns at the .get(1) None branch and falls through
+        // to "keep all").
+        let (Some(primary), Some(second)) = (sorted.first().copied(), sorted.get(1).copied()) else {
+            return sorted.iter().map(|e| e.essid.as_slice()).collect();
+        };
+        if primary.count >= dominance_ratio.saturating_mul(second.count) {
+            vec![primary.essid.as_slice()]
+        } else {
+            sorted.iter().map(|e| e.essid.as_slice()).collect()
+        }
     }
 
     /// Returns `true` if at least one ESSID has been recorded for `ap`.
@@ -247,6 +321,139 @@ mod tests {
         let ap = mac(0xAB);
         m.insert(ap, vec![b'X'], 100);
         assert_eq!(m.resolve(&ap, 100), Some(b"X".as_slice()));
+    }
+
+    #[test]
+    fn insert_increments_count_on_duplicate() {
+        // Repeated insert of the same (AP, SSID) bumps the observation count;
+        // count is the discriminator the multi-ESSID inflation filter relies on.
+        let mut m = EssidMap::new();
+        let ap = mac(0x12);
+        m.insert(ap, b"Home".to_vec(), 1000);
+        m.insert(ap, b"Home".to_vec(), 1100);
+        m.insert(ap, b"Home".to_vec(), 1200);
+        let entries = m.all_for_ap(&ap);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].count, 3);
+    }
+
+    #[test]
+    fn ssids_for_emit_empty_when_unknown_ap() {
+        let m = EssidMap::new();
+        assert!(m.ssids_for_emit(&mac(0xCC), 3, 10).is_empty());
+    }
+
+    #[test]
+    fn ssids_for_emit_passthrough_at_or_below_fanout_threshold() {
+        // 3 SSIDs is the default threshold; even with extreme dominance the
+        // filter must not collapse this AP (it's the legit-multi-network case).
+        let mut m = EssidMap::new();
+        let ap = mac(0x21);
+        // primary 1000-fold dominance over secondary, which would collapse if
+        // the fanout gate were not active.
+        m.insert(ap, b"primary".to_vec(), 1);
+        for _ in 0..1000 {
+            m.insert(ap, b"primary".to_vec(), 1);
+        }
+        m.insert(ap, b"second".to_vec(), 1);
+        m.insert(ap, b"third".to_vec(), 1);
+        let kept = m.ssids_for_emit(&ap, 3, 10);
+        assert_eq!(kept.len(), 3, "fanout 3 == threshold 3, must pass through");
+    }
+
+    #[test]
+    fn ssids_for_emit_collapses_under_dominance() {
+        // 4 SSIDs: primary count 100 + 3 secondaries count 1. Dominance ratio
+        // 100/1 = 100x >= 10x, so collapse to primary-only.
+        let mut m = EssidMap::new();
+        let ap = mac(0x22);
+        for _ in 0..100 {
+            m.insert(ap, b"real".to_vec(), 1);
+        }
+        m.insert(ap, b"rot1".to_vec(), 1);
+        m.insert(ap, b"rot2".to_vec(), 1);
+        m.insert(ap, b"rot3".to_vec(), 1);
+        let kept = m.ssids_for_emit(&ap, 3, 10);
+        assert_eq!(kept, vec![b"real".as_slice()], "primary alone must survive");
+    }
+
+    #[test]
+    fn ssids_for_emit_keeps_all_when_no_dominance() {
+        // 4 SSIDs with comparable counts (worst dominance 5/4 = 1.25x, well below
+        // the 10x trigger). All four must survive -- this is the legit
+        // multi-network AP shape (CTF AP / school multi-SSID router).
+        let mut m = EssidMap::new();
+        let ap = mac(0x23);
+        for _ in 0..5 {
+            m.insert(ap, b"a".to_vec(), 1);
+        }
+        for _ in 0..5 {
+            m.insert(ap, b"b".to_vec(), 1);
+        }
+        for _ in 0..4 {
+            m.insert(ap, b"c".to_vec(), 1);
+        }
+        for _ in 0..4 {
+            m.insert(ap, b"d".to_vec(), 1);
+        }
+        let kept = m.ssids_for_emit(&ap, 3, 10);
+        assert_eq!(kept.len(), 4);
+    }
+
+    #[test]
+    fn ssids_for_emit_disabled_when_ratio_below_two() {
+        // Operator escape hatch: ratio = 0 disables the filter, every SSID is
+        // emitted regardless of dominance (matches pre-filter behaviour).
+        let mut m = EssidMap::new();
+        let ap = mac(0x24);
+        for _ in 0..100 {
+            m.insert(ap, b"primary".to_vec(), 1);
+        }
+        m.insert(ap, b"a".to_vec(), 1);
+        m.insert(ap, b"b".to_vec(), 1);
+        m.insert(ap, b"c".to_vec(), 1);
+        let kept = m.ssids_for_emit(&ap, 3, 0);
+        assert_eq!(kept.len(), 4, "ratio < 2 disables the collapse");
+        let kept = m.ssids_for_emit(&ap, 3, 1);
+        assert_eq!(kept.len(), 4, "ratio = 1 is degenerate, also disables");
+    }
+
+    #[test]
+    fn ssids_for_emit_singleton_passthrough() {
+        // 1 SSID -> always kept; no fanout, nothing to filter. This is the
+        // small-capture safety case (1 beacon + handshake).
+        let mut m = EssidMap::new();
+        let ap = mac(0x25);
+        m.insert(ap, b"only".to_vec(), 1);
+        assert_eq!(m.ssids_for_emit(&ap, 3, 10), vec![b"only".as_slice()]);
+    }
+
+    #[test]
+    fn ssids_for_emit_dominance_check_at_boundary() {
+        // 4 SSIDs: primary count 10, second count 1. Ratio = 10x exactly,
+        // which the >= test triggers. Collapse expected.
+        let mut m = EssidMap::new();
+        let ap = mac(0x26);
+        for _ in 0..10 {
+            m.insert(ap, b"p".to_vec(), 1);
+        }
+        m.insert(ap, b"s1".to_vec(), 1);
+        m.insert(ap, b"s2".to_vec(), 1);
+        m.insert(ap, b"s3".to_vec(), 1);
+        let kept = m.ssids_for_emit(&ap, 3, 10);
+        assert_eq!(kept, vec![b"p".as_slice()]);
+
+        // Same shape, ratio 11x (just under): no collapse.
+        let mut m2 = EssidMap::new();
+        let ap = mac(0x27);
+        for _ in 0..10 {
+            m2.insert(ap, b"p".to_vec(), 1);
+        }
+        m2.insert(ap, b"s1".to_vec(), 1);
+        m2.insert(ap, b"s2".to_vec(), 1);
+        m2.insert(ap, b"s3".to_vec(), 1);
+        let kept = m2.ssids_for_emit(&ap, 3, 11);
+        assert_eq!(kept.len(), 4, "ratio 11x not met by 10x dominance");
     }
 
     #[test]
