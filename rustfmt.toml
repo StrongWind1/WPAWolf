@@ -1,0 +1,16 @@
+# rustfmt -- strictest stable settings.
+# Nightly-only options live in rustfmt.nightly.toml and are applied via `make fmt-nightly`.
+edition = "2024"
+max_width = 120
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Max"
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+merge_derives = true
+use_try_shorthand = true
+use_field_init_shorthand = true
+force_explicit_abi = true
+match_block_trailing_comma = true

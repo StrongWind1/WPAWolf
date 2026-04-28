@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-commit hook: format check, lint, and file hygiene.
+# Install via: make hooks
+
+echo "==> pre-commit: checking formatting (stable)..."
+cargo fmt --all -- --check
+
+echo "==> pre-commit: running clippy..."
+# Run clippy without -D warnings so accumulated warning debt does not block commits.
+# Real errors (clippy::deny lints) still fail; warnings do not.
+RUSTFLAGS="" cargo clippy --all-targets --all-features
+
+echo "==> pre-commit: checking for non-ASCII in source files..."
+# Check staged non-md text files for non-ASCII bytes.
+non_ascii_files=()
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  # Skip markdown and Rust source files: markdown may contain unicode intentionally,
+  # and Rust source files legitimately use the section sign for IEEE 802.11 spec
+  # section references (project-wide convention; see CONTRIBUTING.md).
+  case "${file}" in
+    *.md | *.rs) continue ;;
+  esac
+  # Skip binary files (numstat reports "-" for binary).
+  if git diff --cached --numstat -- "${file}" | grep -q "^-"; then
+    continue
+  fi
+  # Check for non-ASCII bytes.
+  if git show :"${file}" 2>/dev/null | LC_ALL=C grep -Pn '[^\x00-\x7F]' > /dev/null 2>&1; then
+    non_ascii_files+=("${file}")
+  fi
+done
+if [[ ${#non_ascii_files[@]} -gt 0 ]]; then
+  echo "ERROR: non-ASCII characters found in staged files:"
+  printf "  %s\n" "${non_ascii_files[@]}"
+  exit 1
+fi
+
+echo "==> pre-commit: checking for CRLF line endings..."
+crlf_files=()
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  # Skip binary files (numstat reports "-" for binary).
+  if git diff --cached --numstat -- "${file}" | grep -q "^-"; then
+    continue
+  fi
+  if git show :"${file}" 2>/dev/null | grep -Pq '\r$'; then
+    crlf_files+=("${file}")
+  fi
+done
+if [[ ${#crlf_files[@]} -gt 0 ]]; then
+  echo "ERROR: CRLF line endings found in staged files:"
+  printf "  %s\n" "${crlf_files[@]}"
+  exit 1
+fi
+
+echo "==> pre-commit: all checks passed."

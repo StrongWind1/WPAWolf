@@ -1,0 +1,28 @@
+# Clippy configuration  --  strictest settings.
+#
+# Lint levels are declared in Cargo.toml [lints.*]. This file only tunes
+# per-lint thresholds and the small set of test-only relaxations that keep
+# integration test files readable without loosening production-code rules.
+
+# --- Complexity thresholds (tight on purpose) ----------------------------------
+# Keeps parser functions small enough to reason about at a glance. If a
+# function legitimately exceeds these, prefer splitting into spec-section-named
+# helpers (`parse_rsn_ie`, `parse_ft_subelement_r0khid`, ...) over raising the
+# threshold.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold   = 12
+too-many-lines-threshold       = 200
+type-complexity-threshold      = 500
+
+# --- Test-only relaxations -----------------------------------------------------
+# Tests deliberately panic on invariant violations  --  that's the assertion.
+# Suppressing these in production while permitting them in tests is the right
+# split. Requires Clippy >= 1.82; wpawolf MSRV is 1.85 so safe.
+allow-expect-in-tests           = true
+allow-unwrap-in-tests           = true
+# Test fixtures build slices of known length from byte literals; `slice.get(..)`
+# gymnastics add noise without catching any real bug.
+allow-indexing-slicing-in-tests = true
+# Tests that craft protocol headers routinely panic on malformed input; that
+# is how the property "this parser rejects garbage" is expressed.
+allow-panic-in-tests            = true

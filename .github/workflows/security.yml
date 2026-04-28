@@ -1,0 +1,127 @@
+# =============================================================================
+# security.yml -- supply-chain checks. Separated from ci.yml so a transient
+# advisory-database outage cannot block pull requests, and so the daily
+# scheduled scan surfaces newly disclosed vulnerabilities against pinned
+# transitive dependencies without requiring any commit.
+#
+# WHEN THINGS RUN
+#   push to main      -> every job runs (catches security-relevant edits).
+#   pull request      -> every job runs (gate for merges).
+#   daily at 06:00 UTC -> every job runs against the latest RustSec advisory
+#                         database, even with no code changes.
+#   workflow_dispatch -> manual re-trigger from the Actions tab.
+#
+# GLOSSARY
+#   cargo-deny  -- inspects Cargo.lock against policies for licenses,
+#                  source registries, banned crates, and the RustSec
+#                  advisory DB. Configuration is in the repo's deny.toml.
+#   advisory DB -- a public list of known CVEs in Rust crates maintained
+#                  by the RustSec project.
+# =============================================================================
+
+name: Security
+
+# Label each run with the workflow name so CI / Security / Release are easy
+# to tell apart in the Actions tab. Scheduled runs have no head_commit;
+# fall back to the ref name in that case.
+run-name: "Security -- ${{ github.event.head_commit.message || github.ref_name }}"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Cron uses UTC. 06:00 UTC roughly matches start-of-business in Europe,
+    # late-evening in the Americas, so newly opened issues from an overnight
+    # scan land on the maintainer's morning.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # deny -- runs cargo-deny with all four checks enabled:
+  #   advisories  -- any dependency with a known CVE fails the job.
+  #   bans        -- crates explicitly denied in deny.toml fail.
+  #   licenses    -- dependencies must have an allowlisted license.
+  #   sources     -- dependencies must come from an allowlisted registry/git.
+  # ---------------------------------------------------------------------------
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # Cache cargo-deny's binary + the advisory DB. Without this, every run
+      # recompiles cargo-deny (90+ seconds) and re-fetches the DB from
+      # GitHub. With it, a warm run is well under a minute.
+      - name: Cache cargo-deny binary and advisory DB
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/advisory-db/
+          key: ubuntu-cargo-deny-v1
+
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-deny > /dev/null 2>&1; then
+            cargo install cargo-deny --locked
+          fi
+
+      - name: cargo deny check
+        run: cargo deny check
+
+  # ---------------------------------------------------------------------------
+  # audit -- cargo-audit is a lighter, faster scan than cargo-deny. Runs the
+  # advisory-DB check only. Redundant with cargo deny's `advisories` check
+  # but catches the case where deny.toml misconfiguration masks a finding.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo-audit binary
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db/
+          key: ubuntu-cargo-audit-v1
+
+      - name: Install cargo-audit
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-audit > /dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+
+      - name: cargo audit
+        run: cargo audit --deny warnings

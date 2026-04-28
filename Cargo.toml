@@ -1,0 +1,189 @@
+[workspace]
+# The repository is a Cargo workspace so the `wpawolf` binary crate and the
+# `wpawolf-fixturegen` test-capture generator can share a single Cargo.lock,
+# a single `[workspace.lints.*]` policy, and a single target/ directory. Add
+# a new tool here (e.g. tools/another-tool) by appending to `members` below
+# and pointing the new crate's `[lints]` block at `workspace = true`.
+members = [".", "tools/fixturegen"]
+resolver = "3"
+
+[package]
+name = "wpawolf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100)"
+license = "MIT"
+repository = "https://github.com/StrongWind1/WPAWolf"
+homepage = "https://github.com/StrongWind1/WPAWolf"
+documentation = "https://github.com/StrongWind1/WPAWolf"
+readme = "README.md"
+keywords = ["wifi", "security", "802.11", "wpa", "hashcat"]
+categories = ["command-line-utilities", "network-programming"]
+include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[[test]]
+name = "superset"
+path = "tests/integration/superset_test.rs"
+
+[[test]]
+name = "pmkid_coverage"
+path = "tests/integration/pmkid_coverage.rs"
+
+[[test]]
+name = "malformed_frame_log"
+path = "tests/integration/malformed_frame_log.rs"
+
+[[test]]
+name = "wordlist_scan_ies"
+path = "tests/integration/wordlist_scan_ies.rs"
+
+[[test]]
+name = "anqp_parse"
+path = "tests/integration/anqp_parse.rs"
+
+[[test]]
+name = "taxonomy_outputs_per_akm"
+path = "tests/integration/taxonomy_outputs_per_akm.rs"
+
+[[test]]
+name = "taxonomy_combined_o"
+path = "tests/integration/taxonomy_combined_o.rs"
+
+[[test]]
+name = "taxonomy_dedup_per_sink"
+path = "tests/integration/taxonomy_dedup_per_sink.rs"
+
+[[test]]
+name = "log_categories_coverage"
+path = "tests/integration/log_categories_coverage.rs"
+
+[[test]]
+name = "fragment_reassembly"
+path = "tests/integration/fragment_reassembly.rs"
+
+[[test]]
+name = "cross_file_pairing"
+path = "tests/integration/cross_file_pairing.rs"
+
+[[test]]
+name = "per_type_fixtures"
+path = "tests/integration/per_type_fixtures.rs"
+
+[[test]]
+name = "extraction_coverage"
+path = "tests/integration/extraction_coverage.rs"
+
+[[test]]
+name = "eapol_transport_vectors"
+path = "tests/integration/eapol_transport_vectors.rs"
+
+[[test]]
+name = "generated_corpus"
+path = "tests/integration/generated_corpus.rs"
+
+[dependencies]
+# Gzip decompression for .pcap.gz / .pcapng.gz inputs. Pure-Rust backend so we
+# avoid a C dependency and keep the `cargo deny` supply-chain gate tight.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# CLI argument parsing. Minimal feature set: no env, no yaml, no suggestions.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
+
+# --- Lint policy ---
+[profile.dev]
+# Catch integer overflows in debug builds rather than wrapping silently.
+overflow-checks = true
+
+[profile.release]
+# Full link-time optimisation for maximum performance and smaller binary.
+lto = true
+# Single codegen unit forces cross-crate inlining; required for full LTO.
+codegen-units = 1
+# Abort on panic -- no unwinding machinery in the binary.
+panic = "abort"
+# Catch overflows in release too; remove only if profiling proves the cost.
+overflow-checks = true
+# Strip debug symbols from the release binary.
+strip = "symbols"
+
+[profile.test]
+# Overflow checks in tests to catch arithmetic bugs.
+overflow-checks = true
+
+[lints]
+# Both the wpawolf crate and tools/fixturegen inherit the workspace lint
+# policy below. Update lints in one place.
+workspace = true
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_import_braces = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+keyword_idents = { level = "deny", priority = 1 }
+macro_use_extern_crate = "deny"
+non_ascii_idents = "forbid"
+single_use_lifetimes = "warn"
+unused_crate_dependencies = "warn"
+unused_extern_crates = "warn"
+variant_size_differences = "warn"
+
+[workspace.lints.clippy]
+# Lint groups -- enable everything, then allow specific false-positive-prone lints below.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# --- Restriction lints (cherry-picked, not the whole group) ---
+# Each must be justified; the restriction group contains contradictory lints.
+# No #[allow(...)] without a reason string.
+allow_attributes_without_reason = "warn"
+# No dbg!() in committed code.
+dbg_macro = "deny"
+# No todo!() / unimplemented!() -- use proper error handling.
+todo = "deny"
+unimplemented = "deny"
+# Prefer .clone() / .to_owned() over .to_string() for non-Display conversions.
+str_to_string = "warn"
+# No std::mem::forget -- almost always a bug.
+mem_forget = "deny"
+# No indexing into slices -- use .get() for safe access.
+indexing_slicing = "warn"
+# No unwrap/expect in library code -- force proper error propagation.
+unwrap_used = "warn"
+expect_used = "warn"
+# No panic! -- handle errors properly.
+panic = "warn"
+# Detect lossy float-to-int or int-to-float casts.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_precision_loss = "warn"
+cast_possible_wrap = "warn"
+# Warn on large enum variant size differences (consider Box).
+large_enum_variant = "warn"
+# No .unwrap() on mutex locks -- can panic on poisoning.
+mutex_atomic = "warn"
+# Explicit iteration: prefer .iter() / .iter_mut() over implicit deref.
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+# Require `Self` in impl blocks where possible.
+use_self = "warn"
+# Warn on needlessly borrowed references.
+needless_borrow = "warn"
+needless_pass_by_value = "warn"
+
+# --- Allow list (justify every entry) ---
+# module_name_repetitions: common in idiomatic Rust (e.g. error::Error).
+module_name_repetitions = "allow"
+# multiple_crate_versions: transitive dependency version conflicts are not actionable.
+multiple_crate_versions = "allow"
+# wildcard_imports: deny everywhere; selectively #[allow] in test modules.
+wildcard_imports = "deny"

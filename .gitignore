@@ -1,0 +1,232 @@
+dist/
+ref/
+docs/
+
+# Top-level tools/ holds local-only scratch space. The wpawolf-fixturegen
+# crate (a workspace member, see tools/fixturegen/Cargo.toml) is committed.
+tools/*
+!tools/fixturegen/
+
+# =============================================================================
+# .gitignore -- Rust/Cargo / VS Code / Linux / macOS / Windows
+# =============================================================================
+
+# =============================================================================
+# Universal
+# =============================================================================
+
+*.log
+*.tmp
+*.bak
+
+# Environment / secrets
+.env
+*.env
+.env.*
+
+# Local-only configuration
+*.local
+
+
+# =============================================================================
+# Rust / Cargo
+# =============================================================================
+
+# Compiled output. Cargo.lock is committed for this binary crate per:
+# https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
+debug/
+target/
+
+# rustfmt backup files
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Compiled library artifacts
+*.rlib
+*.rmeta
+
+# rust-analyzer (non-Cargo build systems e.g. rules_rust)
+rust-project.json
+
+# Cargo internals / cache. NOTE: project-local .cargo/config.toml is tracked;
+# only the cache directories below are ignored.
+.cargo-lock
+.cargo-ok
+.cargo-cache/
+cargo.toml.orig
+cargo.toml.bk
+cargo-timing*.html
+Cargo.lock.old
+.crates.toml
+.crates.toml.lock
+.crates2.json
+
+
+# =============================================================================
+# Visual Studio Code
+# =============================================================================
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Sensitive / machine-specific VS Code files
+.vscode/sftp.json
+.vscode/chrome
+.vscode/tags
+
+# Local file history
+.history/
+
+# Extensions and test tooling
+*.vsix
+*.code-workspace
+.ionide
+.vscode-test
+.vscodeignore
+.vscode-server/
+
+# Legacy Visual Studio
+.vs/
+
+# Dev containers (usually project-specific; remove negation if you commit these)
+.devcontainer/
+
+
+# =============================================================================
+# Linux
+# =============================================================================
+
+# Editor swap / backup files
+*~
+.swap
+*.swp
+.swo
+.swn
+.*.kate-swp
+.saves-*
+
+# Filesystem artifacts
+.fuse_hidden*
+.nfs*
+.directory
+.Trash-*
+lost+found/
+
+# Session / runtime files
+.bash_history
+.Xauthority
+.ICEauthority
+.recently-used
+.pid
+.lock
+.gvfs/
+.dbus/
+.thumbnails/
+
+# User data directories (typically not project files)
+.cache/
+.config/
+.local/
+
+# Core dumps
+core
+core.*
+
+
+# =============================================================================
+# macOS
+# =============================================================================
+
+# Finder metadata
+.DS_Store
+.DS_Store?
+.AppleDouble
+*.AppleDouble
+.LSOverride
+
+# Icon files (must end with two \r)
+Icon
+
+# Resource fork / thumbnail files
+._*
+
+# Volume root artifacts
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.Spotlight-V100/
+.TemporaryItems
+.Trashes
+.Trashes/
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# AFP share directories
+.AppleDB
+.AppleDB/
+*.AppleDB
+.AppleDesktop
+.AppleDesktop/
+Network Trash Folder
+Network Trash Folder/
+Temporary Items
+.apdisk
+
+# iCloud
+*.icloud
+
+
+# =============================================================================
+# Windows
+# =============================================================================
+
+# Thumbnail caches
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Crash dumps
+*.stackdump
+
+# Folder config
+[Dd]esktop.ini
+
+# Recycle Bin
+$RECYCLE.BIN/
+$Recycle.Bin/
+
+# Installer artifacts
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# Shortcuts
+*.lnk
+
+# Office temp files
+~$*
+
+# System files
+hiberfil.sys
+pagefile.sys
+ntuser.dat*
+System Volume Information/
+
+# Temp directory
+[Tt]emp/
+
+###############################################################################
+# wpawolf specifics
+###############################################################################
+
+# Local bench output
+/target/bench/

@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # The RustCrypto family ships coordinated minor releases (every
+      # 1-2 years all the *-0.x crates bump together). Pre-1.0 minor
+      # bumps are technically major in semver, so they fall outside the
+      # generic minor-and-patch group below. Group them by name pattern
+      # so the next family-wide bump lands as a single PR.
+      rustcrypto:
+        patterns:
+          - "pbkdf2"
+          - "hmac"
+          - "md-5"
+          - "sha1"
+          - "sha2"
+          - "aes"
+          - "cmac"
+          - "subtle"
+          - "digest"
+          - "crypto-common"
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]

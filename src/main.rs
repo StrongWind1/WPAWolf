@@ -1,0 +1,678 @@
+//! Shared -- binary entry point and Phase 1-5 orchestrator. See ARCHITECTURE.md §3.
+//!
+//! Parses command-line arguments via `clap`, then runs the two-phase pipeline:
+//! Phase 1 collects all EAPOL messages and PMKIDs from every input file into in-memory
+//! stores; Phase 2 pairs messages and writes output files. See `ARCHITECTURE.md §3`.
+//!
+//! Unfiltered by default: all 6 N#E# combinations, 10-minute session window, no
+//! replay-counter check. Add output filter flags (`--rc-drift`, `--dedup-hash-combos`) to
+//! narrow output to only well-validated hashes. See `ARCHITECTURE.md §8.8 (FR-CLI)`.
+
+#![forbid(unsafe_code)]
+
+// flate2 is used by the library (wpawolf::input::gzip). The binary does not import it
+// directly, so suppress the unused_crate_dependencies lint with the `as _` form.
+use flate2 as _;
+
+use clap::Parser;
+
+use wpawolf::{
+    extract::{ExtractConfig, process_data, process_mgmt, resolve_wds_eapol},
+    ieee80211::frame,
+    input, link,
+    log::Logger,
+    output::{OutputPaths, dedup::SinkId, run_output},
+    pair::combos::PairConfig,
+    stats::Stats,
+    store::{
+        AkmMap, MldStore,
+        auxiliary::{DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistStore},
+        essid::EssidMap,
+        fragments::FragmentStore,
+        messages::{MessageStore, PendingEapol},
+        pmkid::PmkidStore,
+    },
+};
+
+// --- CLI ---
+
+/// WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100).
+///
+/// Reads pcap, pcapng, and gzip-compressed captures. Unfiltered by default:
+/// all 6 N#E# combinations, 10-minute session window, no replay-counter check.
+/// Invalid nonce/MIC/PMKID values (all-zero or all-0xFF) are always rejected.
+/// Use output filter flags to further narrow the output.
+#[derive(Parser, Debug)]
+#[command(
+    name = "wpawolf",
+    version,
+    about,
+    long_about = None,
+    arg_required_else_help = true,
+)]
+#[allow(clippy::struct_excessive_bools, reason = "independent CLI flags, not a state machine")]
+struct Cli {
+    /// Input capture file(s) and/or director(ies)
+    ///
+    /// Each positional argument may be either a capture file (pcap, pcapng, or
+    /// gzip-compressed) or a directory. Directories are walked recursively and
+    /// every regular file is opened, its first 4 bytes inspected, and included
+    /// only if those bytes match a supported capture-file magic -- file
+    /// extensions are never consulted. Accepted magics: pcap microsecond
+    /// (`0xA1B2C3D4`), pcap nanosecond (`0xA1B23C4D`), pcap Kuznetzov
+    /// (`0xA1B2CD34`), IXIA `lcap` HW (`0x1C0001AC`, nanosecond), IXIA `lcap`
+    /// SW (`0x1C0001AB`, microsecond) -- each in either byte order; pcapng SHB
+    /// (`0x0A0D0D0A`, byte-order-independent palindrome); and gzip
+    /// (`0x1F 0x8B`). Within each directory, files are processed in sorted
+    /// order, then subdirectories are descended in sorted order; symlinks are
+    /// not followed.
+    #[arg(required = true, value_name = "INPUT")]
+    input_files: Vec<std::path::PathBuf>,
+
+    // --- Output files (hash sinks) ---
+    //
+    // The legacy hashcat-compatible sinks (`--22000-out`, `--37100-out`) emit the
+    // 4-prefix scheme `WPA*01*..WPA*04*` so the output remains drop-in for hashcat
+    // modes 22000 / 37100. The taxonomy sinks (`--wpa1-out`, `--wpa2-out`, ...,
+    // `-o`) emit the 11-type prefix scheme `WPA*01*..WPA*11*` from
+    // `ARCHITECTURE.md §2`. The same logical hash is fanned out to every
+    // configured sink with the appropriate per-sink prefix and per-sink dedup.
+    /// hashcat mode 22000 file (legacy WPA*01* PMKID, WPA*02* EAPOL)
+    ///
+    /// Receives every non-FT emitted hash. Hashcat-compatible.
+    #[arg(long = "22000-out", value_name = "FILE")]
+    out_22000: Option<std::path::PathBuf>,
+
+    /// hashcat mode 37100 file (legacy WPA*03* PMKID, WPA*04* EAPOL)
+    ///
+    /// Receives every FT emitted hash. Hashcat-compatible.
+    #[arg(long = "37100-out", value_name = "FILE")]
+    out_37100: Option<std::path::PathBuf>,
+
+    /// 11-type taxonomy combined output (every emitted hash, prefix WPA*01*..WPA*11*)
+    ///
+    /// Operator-facing format; not directly hashcat-readable today.
+    #[arg(short = 'o', long = "out", value_name = "FILE")]
+    out_combined: Option<std::path::PathBuf>,
+
+    /// type 1 only: WPA1-PSK-EAPOL (taxonomy format)
+    #[arg(long = "wpa1-out", value_name = "FILE")]
+    out_wpa1: Option<std::path::PathBuf>,
+
+    /// types 2 + 3: WPA2-PSK-PMKID and WPA2-PSK-EAPOL (taxonomy format)
+    #[arg(long = "wpa2-out", value_name = "FILE")]
+    out_wpa2: Option<std::path::PathBuf>,
+
+    /// types 4 + 5: PSK-SHA256-PMKID and PSK-SHA256-EAPOL (taxonomy format)
+    #[arg(long = "psk-sha256-out", value_name = "FILE")]
+    out_psk_sha256: Option<std::path::PathBuf>,
+
+    /// types 6 + 7: FT-PSK-PMKID and FT-PSK-EAPOL (taxonomy, with FT extra fields)
+    #[arg(long = "ft-out", value_name = "FILE")]
+    out_ft: Option<std::path::PathBuf>,
+
+    /// types 8 + 9: PSK-SHA384-PMKID and PSK-SHA384-EAPOL (taxonomy format)
+    #[arg(long = "psk-sha384-out", value_name = "FILE")]
+    out_psk_sha384: Option<std::path::PathBuf>,
+
+    /// types 10 + 11: FT-PSK-SHA384-PMKID and FT-PSK-SHA384-EAPOL (taxonomy, FT extras)
+    #[arg(long = "ft-psk-sha384-out", value_name = "FILE")]
+    out_ft_psk_sha384: Option<std::path::PathBuf>,
+
+    /// output ESSID wordlist (autohex) from all AP management frames
+    ///
+    /// Beacons, Probe Responses, Association/Reassociation Requests, FILS Discovery,
+    /// OWE Transition, Cisco CCX1, vendor AP names. Format: plain ASCII or $HEX[...].
+    #[arg(short = 'E', long)]
+    essid_output: Option<std::path::PathBuf>,
+
+    /// output ESSID wordlist (autohex) from Probe Request frames only
+    ///
+    /// Directed Probe Requests (IE#0 SSID), Probe Request SSID List IE (IE#84),
+    /// and Action Neighbor Report Request frames. Same format as -E.
+    #[arg(short = 'R', long)]
+    probe_output: Option<std::path::PathBuf>,
+
+    /// output combined wordlist: ESSIDs, Probe ESSIDs, WPS strings, EAP identities, and more
+    ///
+    /// Superset of -E and -R: also includes WPS device strings (manufacturer, model,
+    /// serial, device name from both AP and STA WPS IEs), EAP identity bytes,
+    /// country codes, time zones, mesh IDs, vendor AP names, OWE Transition SSIDs.
+    /// Useful as a targeted password candidate list for hashcat.
+    #[arg(short = 'W', long)]
+    wordlist_output: Option<std::path::PathBuf>,
+
+    /// output EAP identity list (autohex format, sorted)
+    ///
+    /// EAP-Response/Identity strings per RFC 3748 §5.1. Non-ASCII bytes are
+    /// hex-encoded as $HEX[...].
+    #[arg(short = 'I', long)]
+    identity_output: Option<std::path::PathBuf>,
+
+    /// output EAP username list (autohex format, sorted)
+    ///
+    /// EAP peer identity strings from inner methods (`MSCHAPv2`, `LEAP`, etc.).
+    /// Non-ASCII bytes are hex-encoded as `$HEX[...]`.
+    #[arg(short = 'U', long)]
+    username_output: Option<std::path::PathBuf>,
+
+    /// output WPS device info list
+    ///
+    /// Format (tab-separated): `MAC MANUFACTURER MODEL SERIAL DEVICENAME [UUID] ESSID`.
+    /// Sorted by manufacturer. Deduplicated by AP MAC.
+    #[arg(short = 'D', long)]
+    device_output: Option<std::path::PathBuf>,
+
+    /// output logfile (malformed frames, link-layer errors, sentinel rejections, ...)
+    ///
+    /// Nine categories: `malformed_frame` (truncated or structurally invalid 802.11 /
+    /// EAPOL data), `plcp_error` (link-layer header validation failed -- radiotap /
+    /// PPI / Prism / AVS error, or an unsupported DLT), `unknown_linktype` (pcapng
+    /// EPB referenced an `interface_id` with no preceding IDB), `unknown_akm`
+    /// (suite outside [IEEE 802.11-2024] Table 9-190), `essid_not_found` (hash line
+    /// emitted for an AP whose SSID was never observed), `capture_read_error`
+    /// (per-file ingest failure -- typically a truncated trailing packet),
+    /// `invalid_nonce` / `invalid_mic` / `invalid_pmkid` (NULL or all-`0xFF` sentinels
+    /// rejected at extract time). Per-category field layout matches `src/log.rs`:
+    /// frame-bearing categories lead with `timestamp_us`, others (e.g. `unknown_akm`,
+    /// `essid_not_found`) carry only the event-specific field(s).
+    #[arg(long)]
+    log: Option<std::path::PathBuf>,
+
+    // --- Output filters ---
+    /// [output filter] maximum EAPOL session window in seconds
+    ///
+    /// Three states with explicit semantics:
+    ///   * flag absent       -> unlimited (no time filter, the wpawolf default)
+    ///   * `--eapoltimeout`  -> 600-second window (10-minute default)
+    ///   * `--eapoltimeout=N` -> custom N-second window
+    ///
+    /// Two EAPOL messages more than this many seconds apart cannot form a pair and are
+    /// discarded. hcxpcapngtool default is ~3 seconds (`--eapoltimeout=3`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "600")]
+    eapoltimeout: Option<u64>,
+
+    /// [output filter] discard pairs whose replay-counter deviates by more than N
+    ///
+    /// Three states with explicit semantics:
+    ///   * flag absent     -> off (all pairs pass regardless of RC values, the wpawolf default)
+    ///   * `--rc-drift`    -> tolerance 8 (the bare-flag default)
+    ///   * `--rc-drift=N`  -> custom tolerance N
+    ///
+    /// The Replay Counter (RC) is a 64-bit sequence number the AP increments for each
+    /// EAPOL-Key frame to prevent message replay. In a clean handshake each message pair
+    /// has a predictable RC relationship: M1/M2 share the same RC, M3 is RC+1. RC drift
+    /// occurs when buggy AP firmware does not increment the counter correctly across frames.
+    /// When the filter is on, pairs where `|actual_delta - expected_delta| > N` are
+    /// discarded.
+    ///
+    /// Not to be confused with hashcat `--nonce-error-corrections`: that flag adjusts
+    /// the ANonce/SNonce *bytes* during cracking to compensate for firmware that mutates
+    /// the nonce between M1 and M3. RC drift is in the EAPOL-Key header sequence field
+    /// only -- it has no effect on the nonce bytes and is not used in key derivation.
+    #[arg(long, num_args = 0..=1, default_missing_value = "8")]
+    rc_drift: Option<u8>,
+
+    /// opt-in: sweep plaintext management-frame IE bodies for 8+ byte printable-ASCII runs
+    ///
+    /// When set alongside `-W`, every plaintext Beacon/Probe/Assoc/Reassoc/Action frame's
+    /// IE values are scanned for contiguous runs of `0x20..=0x7E` bytes of length >= 8,
+    /// and each run is inserted into the wordlist. Catches ASCII strings buried inside
+    /// vendor IE bodies wpawolf does not parse structurally (proprietary management
+    /// extensions, HS 2.0 elements, etc.). Data frames are never scanned.
+    ///
+    /// Off by default: the minimum length of 8 is tuned to suppress short-run noise but
+    /// vendor IE lengths and OUI bytes that happen to fall in the printable band can
+    /// still leak. See `ARCHITECTURE.md §9`.
+    #[arg(long = "wordlist-scan-ies")]
+    scan_ies: bool,
+
+    /// [output filter] deduplicate equivalent N#E# hash combos within each session
+    ///
+    /// Two states (boolean flag, no argument):
+    ///   * flag absent          -> off (all 6 combos written, the wpawolf default)
+    ///   * `--dedup-hash-combos` -> on (collapse to the 3 cryptographically unique combos)
+    ///
+    /// A complete 4-way handshake yields up to 6 hash combinations (N1E2, N1E4,
+    /// N3E2, N2E3, N4E3, N3E4), but at most 3 are cryptographically unique for
+    /// cracking: combos that share the same nonce bytes and EAPOL frame produce
+    /// identical hashcat lines and need only appear once.
+    ///
+    /// When set, combos are grouped by (nonce, EAPOL frame) and only the best is
+    /// kept per group. Survivor chosen by smallest RC gap (exact match preferred),
+    /// then authorized combo priority (N3E2 > N1E2, N2E3 > N4E3, N3E4 > N1E4).
+    /// Useful in noisy captures where one combo may survive a packet drop that
+    /// would eliminate another.
+    #[arg(long)]
+    dedup_hash_combos: bool,
+
+    // --- Misc ---
+    /// number of pairing threads [default: available CPU count]
+    ///
+    /// Sets the Phase 2 worker thread count for parallel pairing. Groups are assigned
+    /// via LPT (Longest Processing Time First) round-robin scheduling. Use `--threads=1`
+    /// to reproduce single-threaded behavior.
+    #[arg(long)]
+    threads: Option<u16>,
+}
+
+// --- Entry point ---
+
+fn main() {
+    let cli = Cli::parse();
+
+    // At least one output must be requested.
+    let has_output = cli.out_22000.is_some()
+        || cli.out_37100.is_some()
+        || cli.out_combined.is_some()
+        || cli.out_wpa1.is_some()
+        || cli.out_wpa2.is_some()
+        || cli.out_psk_sha256.is_some()
+        || cli.out_ft.is_some()
+        || cli.out_psk_sha384.is_some()
+        || cli.out_ft_psk_sha384.is_some()
+        || cli.essid_output.is_some()
+        || cli.probe_output.is_some()
+        || cli.wordlist_output.is_some()
+        || cli.identity_output.is_some()
+        || cli.username_output.is_some()
+        || cli.device_output.is_some();
+    if !has_output {
+        eprintln!(
+            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, or -D)"
+        );
+        eprintln!("Run with --help for usage.");
+        std::process::exit(1);
+    }
+
+    if let Err(e) = run(&cli) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+// --- Pipeline ---
+
+/// Runs the full two-phase (Collect + Output) pipeline.
+///
+/// Phase 1 iterates every input file, dispatches management and data frames to their
+/// respective collectors, and populates all in-memory stores. Phase 2 pairs EAPOL
+/// messages, deduplicates, and writes all requested output files. Returns `Err` only
+/// for I/O failures that should abort the run -- parse errors are logged and skipped.
+#[allow(clippy::too_many_lines, reason = "linear pipeline orchestrator; each step is small but cumulative")]
+fn run(cli: &Cli) -> wpawolf::types::Result<()> {
+    // --- Initialise stores ---
+    let mut message_store = MessageStore::new();
+    let mut pmkid_store = PmkidStore::new();
+    let mut fragment_store = FragmentStore::new();
+    let mut essid_map = EssidMap::new();
+    let mut akm_map = AkmMap::new();
+    let mut mld_store = MldStore::new();
+    let mut essid_set = EssidSet::new();
+    let mut probe_essid_set = ProbeEssidSet::new();
+    let mut wordlist_store = WordlistStore::new();
+    let mut identity_set = IdentitySet::new();
+    let mut username_set = UsernameSet::new();
+    let mut device_store = DeviceInfoStore::new();
+    let mut stats = Stats::new();
+    let mut logger = Logger::new(cli.log.as_deref())?;
+    let mut pending_eapol: Vec<PendingEapol> = Vec::new();
+
+    // Per-frame extraction toggles derived from the CLI output flags. See
+    // `wpawolf::extract::ExtractConfig`.
+    let extract_cfg = ExtractConfig {
+        populate_wordlist: cli.wordlist_output.is_some(),
+        populate_device: cli.device_output.is_some(),
+        populate_identity: cli.identity_output.is_some(),
+        populate_username: cli.username_output.is_some(),
+        scan_ies: cli.scan_ies,
+    };
+
+    // Expand any directory arguments to the recursive set of capture files they
+    // contain. Plain file arguments pass through unchanged. Done up front so the
+    // banner and last_file metadata reflect the actual processed set.
+    let inputs = input::expand_inputs(&cli.input_files)?;
+    if inputs.is_empty() {
+        return Err(wpawolf::types::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no input capture files found (check paths and extensions)",
+        )));
+    }
+
+    // --- Phase 1: Collect ---
+    for path in &inputs {
+        stats.last_file = path.display().to_string();
+
+        let mut reader = match input::open_reader(path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("warning: cannot open {}: {e}", path.display());
+                continue;
+            },
+        };
+
+        // Populate file metadata from the reader (format, endianness, DLT).
+        // Multiple files overwrite; the last file's metadata is shown in the summary.
+        let meta = reader.file_metadata();
+        stats.file_format = meta.format;
+        stats.endianness = meta.endian.to_owned();
+        stats.dlt_desc = meta.dlt_desc;
+
+        loop {
+            match reader.next_packet() {
+                Ok(Some(packet)) => {
+                    stats.total_packets += 1;
+                    // Timestamp range (epoch microseconds). Initialise first_us on the very first packet.
+                    if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
+                        stats.timestamp_first_us = packet.timestamp_us;
+                    }
+                    if packet.timestamp_us > stats.timestamp_last_us {
+                        stats.timestamp_last_us = packet.timestamp_us;
+                    }
+
+                    // Get the DLT for this interface.
+                    let Some(dlt) = reader.link_type(packet.interface_id) else {
+                        logger.log_unknown_linktype(packet.interface_id);
+                        continue;
+                    };
+
+                    // Per-band packet count from radiotap Channel field (DLT 127 only).
+                    // Band mapping per radiotap.org: 2412-2484 MHz = 2.4 GHz,
+                    // 5180-5825 MHz = 5 GHz, 5925-7125 MHz = 6 GHz.
+                    if let Some(freq) = link::channel_freq(&packet.data, dlt) {
+                        match freq {
+                            2412..=2484 => stats.band_24ghz += 1,
+                            5180..=5825 => stats.band_5ghz += 1,
+                            5925..=7125 => stats.band_6ghz += 1,
+                            _ => {},
+                        }
+                    }
+
+                    // Strip the link-layer radio header to expose the raw 802.11 frame.
+                    // Capture the underlying error (unsupported DLT vs truncated radiotap
+                    // header etc.) so `[plcp_error]` log entries are diagnostic, not
+                    // a generic "link strip failed".
+                    if link::has_ampdu_status(&packet.data, dlt) {
+                        stats.ampdu_status_frames += 1;
+                    }
+                    let frame_data = match link::strip(&packet.data, dlt) {
+                        Ok((d, had_fcs)) => {
+                            if had_fcs {
+                                stats.fcs_stripped_frames += 1;
+                            }
+                            d
+                        },
+                        Err(e) => {
+                            stats.link_errors += 1;
+                            logger.log_plcp_error(
+                                packet.timestamp_us,
+                                packet.interface_id,
+                                &format!("link strip failed: {e}"),
+                            );
+                            continue;
+                        },
+                    };
+
+                    // Parse the 802.11 MAC header. The four-state classifier keeps
+                    // spec-valid control frames out of the `malformed_frame` log,
+                    // accepts non-zero Protocol Version frames as a forgivable
+                    // anomaly (matches tshark behaviour), and reserves `Malformed`
+                    // for frames we genuinely cannot dissect.
+                    let mac_hdr = match frame::parse(frame_data) {
+                        frame::ParseResult::Frame(h) => h,
+                        frame::ParseResult::Lenient(h) => {
+                            stats.lenient_proto_version += 1;
+                            h
+                        },
+                        frame::ParseResult::Control => {
+                            stats.ctrl_frames += 1;
+                            continue;
+                        },
+                        frame::ParseResult::Malformed(reason) => {
+                            stats.malformed_mac_hdr += 1;
+                            logger.log_malformed_frame(
+                                packet.timestamp_us,
+                                packet.interface_id,
+                                &format!("{reason} (len={})", frame_data.len()),
+                            );
+                            continue;
+                        },
+                    };
+
+                    // Count remaining frames (Data / Management / Extension).
+                    // Control was already counted above via `ParseResult::Control`.
+                    match mac_hdr.frame_type {
+                        frame::TYPE_DATA => stats.data_frames += 1,
+                        frame::TYPE_MANAGEMENT => stats.mgmt_frames += 1,
+                        frame::TYPE_EXTENSION => {
+                            stats.extension_frames += 1;
+                            continue;
+                        },
+                        _ => continue, // unreachable: parse() returns one of the four types
+                    }
+
+                    // Slice the frame body (past MAC header).
+                    let Some(body) = frame_data.get(mac_hdr.body_offset..) else {
+                        continue;
+                    };
+
+                    match mac_hdr.frame_type {
+                        frame::TYPE_MANAGEMENT => {
+                            process_mgmt(
+                                &mac_hdr,
+                                body,
+                                packet.timestamp_us,
+                                &extract_cfg,
+                                &mut essid_map,
+                                &mut essid_set,
+                                &mut probe_essid_set,
+                                &mut akm_map,
+                                &mut mld_store,
+                                &mut pmkid_store,
+                                &mut wordlist_store,
+                                &mut device_store,
+                                &mut stats,
+                                &mut logger,
+                            );
+                        },
+                        frame::TYPE_DATA => {
+                            process_data(
+                                &mac_hdr,
+                                body,
+                                packet.timestamp_us,
+                                &extract_cfg,
+                                &mut message_store,
+                                &mut pmkid_store,
+                                &essid_map,
+                                &mut akm_map,
+                                &mut identity_set,
+                                &mut username_set,
+                                &mut wordlist_store,
+                                &mut stats,
+                                &mut pending_eapol,
+                                &mut fragment_store,
+                                &mut logger,
+                            );
+                        },
+                        _ => {},
+                    }
+                },
+                Ok(None) => break, // end of file
+                Err(e) => {
+                    // Per FR-IN-10 (ARCHITECTURE.md §3.1) an EOF or corrupt record header
+                    // mid-stream stops this file but does not abort the run -- everything
+                    // already decoded from earlier records in the same file is kept. Detail
+                    // goes to `--log`; the operator-visible signal is the Phase 1 summary
+                    // counter `capture files with truncated trailing record`.
+                    stats.truncated_capture_files += 1;
+                    stats.unreadable_packets += 1;
+                    logger.log_capture_read_error(path, &format!("{e}"));
+                    break;
+                },
+            }
+        }
+    }
+
+    // --- Phase 1.5: Resolve deferred WDS EAPOL frames ---
+    // WDS relay frames had ambiguous direction during Phase 1. Now that essid_map is fully
+    // populated, resolve them using essid_map lookup, ACK-based AP discovery, or flag fallback.
+    if !pending_eapol.is_empty() {
+        resolve_wds_eapol(
+            &pending_eapol,
+            &essid_map,
+            &mut akm_map,
+            &mut message_store,
+            &mut pmkid_store,
+            &mut stats,
+            &mut logger,
+        );
+    }
+
+    // Snapshot ESSID count before handing off to output.
+    // ap_count() returns usize; u64 can represent every possible usize value on supported platforms.
+    {
+        stats.essid_count = essid_map.ap_count() as u64;
+    }
+
+    // --- Phase 2 + 3: Pair and Output ---
+    let pair_config = PairConfig {
+        eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
+        rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
+        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
+        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
+        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
+    };
+
+    let paths = OutputPaths {
+        out_22000: cli.out_22000.clone(),
+        out_37100: cli.out_37100.clone(),
+        out_combined: cli.out_combined.clone(),
+        out_wpa1: cli.out_wpa1.clone(),
+        out_wpa2: cli.out_wpa2.clone(),
+        out_psk_sha256: cli.out_psk_sha256.clone(),
+        out_ft: cli.out_ft.clone(),
+        out_psk_sha384: cli.out_psk_sha384.clone(),
+        out_ft_psk_sha384: cli.out_ft_psk_sha384.clone(),
+        essid_list: cli.essid_output.clone(),
+        probe_essid_list: cli.probe_output.clone(),
+        wordlist: cli.wordlist_output.clone(),
+        identity_list: cli.identity_output.clone(),
+        username_list: cli.username_output.clone(),
+        device_info: cli.device_output.clone(),
+    };
+
+    // Record output paths in stats so the Phase 4 banner can show configured vs not-configured.
+    let path_str = |p: &Option<std::path::PathBuf>| p.as_ref().map_or_else(String::new, |p| p.display().to_string());
+    stats.path_22000 = path_str(&cli.out_22000);
+    stats.path_37100 = path_str(&cli.out_37100);
+    stats.path_combined = path_str(&cli.out_combined);
+    stats.path_wpa1 = path_str(&cli.out_wpa1);
+    stats.path_wpa2 = path_str(&cli.out_wpa2);
+    stats.path_psk_sha256 = path_str(&cli.out_psk_sha256);
+    stats.path_ft = path_str(&cli.out_ft);
+    stats.path_psk_sha384 = path_str(&cli.out_psk_sha384);
+    stats.path_ft_psk_sha384 = path_str(&cli.out_ft_psk_sha384);
+    stats.essid_list_path = path_str(&cli.essid_output);
+    stats.probe_list_path = path_str(&cli.probe_output);
+    stats.wordlist_path = path_str(&cli.wordlist_output);
+    stats.identity_list_path = path_str(&cli.identity_output);
+    stats.username_list_path = path_str(&cli.username_output);
+    stats.device_info_path = path_str(&cli.device_output);
+
+    let thread_count: usize = cli.threads.map_or_else(
+        || std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        |t| usize::from(t.max(1)),
+    );
+
+    // 802.11be MLD canonicalization: if any Multi-Link Element was seen, rewrite all
+    // MessageStore and PmkidStore keys so link addresses collapse onto the MLD identity.
+    // When no MLE was observed, this is a no-op and byte-identical to pre-MLE behavior.
+    // [IEEE 802.11be] §9.4.2.321
+    if !mld_store.is_empty() {
+        let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
+        stats.mld_groups_merged = merged;
+        pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
+        // Fold link-MAC SSIDs into the canonical MLD MAC so essid_map lookups by
+        // canonical AP key (post-canonicalization on the pair side) actually find
+        // them. Without this, hidden-SSID resolution silently fails for any MLD
+        // AP whose SSID was advertised under a band-specific link MAC.
+        stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
+    }
+
+    // Capture-quality diagnostic: count sessions whose M1 and M3 ANonce disagree.
+    // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
+    stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
+
+    let output_stats = run_output(
+        &message_store,
+        &pmkid_store,
+        &essid_map,
+        &essid_set,
+        &probe_essid_set,
+        &wordlist_store,
+        &identity_set,
+        &username_set,
+        &device_store,
+        &akm_map,
+        &pair_config,
+        &paths,
+        thread_count,
+        &mut logger,
+    )?;
+
+    // All usize -> u64: u64 subsumes usize on all supported platforms.
+    {
+        stats.hashes_written = (output_stats.pmkids_written + output_stats.pairs_written) as u64;
+        stats.dedup_dropped = output_stats.dedup_dropped as u64;
+        // Total pairs attempted through dedup = written + dropped.
+        stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped) as u64;
+
+        // Per-combo and flag counters from the output pipeline.
+        stats.pairs_written_n1e2 = output_stats.n1e2 as u64;
+        stats.pairs_written_n3e2 = output_stats.n3e2 as u64;
+        stats.pairs_written_n1e4 = output_stats.n1e4 as u64;
+        stats.pairs_written_n2e3 = output_stats.n2e3 as u64;
+        stats.pairs_written_n4e3 = output_stats.n4e3 as u64;
+        stats.pairs_written_n3e4 = output_stats.n3e4 as u64;
+        stats.pairs_nc = output_stats.pairs_nc as u64;
+        stats.pairs_le = output_stats.pairs_le as u64;
+        stats.pairs_be = output_stats.pairs_be as u64;
+        stats.rc_gap_max = output_stats.rc_gap_max;
+        stats.rc_drift_enabled = cli.rc_drift.is_some();
+        stats.eapol_pairs_useful = output_stats.pairs_written as u64;
+        stats.essid_unresolved_emissions = output_stats.essid_unresolved_emissions;
+        stats.essid_unresolved_aps = output_stats.essid_unresolved_aps;
+
+        // Per-sink line / dropped counts for the Phase 4 banner. The fan-out engine
+        // writes the same logical hash to every configured sink; counts here are per
+        // sink and do not sum to `hashes_written`.
+        stats.lines_22000 = output_stats.lines(SinkId::Out22000);
+        stats.lines_37100 = output_stats.lines(SinkId::Out37100);
+        stats.lines_combined = output_stats.lines(SinkId::OutCombined);
+        stats.lines_wpa1 = output_stats.lines(SinkId::OutWpa1);
+        stats.lines_wpa2 = output_stats.lines(SinkId::OutWpa2);
+        stats.lines_psk_sha256 = output_stats.lines(SinkId::OutPskSha256);
+        stats.lines_ft = output_stats.lines(SinkId::OutFt);
+        stats.lines_psk_sha384 = output_stats.lines(SinkId::OutPskSha384);
+        stats.lines_ft_psk_sha384 = output_stats.lines(SinkId::OutFtPskSha384);
+        stats.dropped_22000 = output_stats.dropped(SinkId::Out22000);
+        stats.dropped_37100 = output_stats.dropped(SinkId::Out37100);
+        stats.dropped_combined = output_stats.dropped(SinkId::OutCombined);
+        stats.dropped_wpa1 = output_stats.dropped(SinkId::OutWpa1);
+        stats.dropped_wpa2 = output_stats.dropped(SinkId::OutWpa2);
+        stats.dropped_psk_sha256 = output_stats.dropped(SinkId::OutPskSha256);
+        stats.dropped_ft = output_stats.dropped(SinkId::OutFt);
+        stats.dropped_psk_sha384 = output_stats.dropped(SinkId::OutPskSha384);
+        stats.dropped_ft_psk_sha384 = output_stats.dropped(SinkId::OutFtPskSha384);
+
+        // Per-hash-type breakdown -- one bucket per row of the 11-type table in
+        // `ARCHITECTURE.md §2`. The output pipeline classifies each emitted
+        // line via `HashType::from_akm_and_attack`; copy the resulting tally into
+        // the global stats for `print_summary`.
+        stats.hash_type_emitted = output_stats.hash_type_emitted;
+    }
+
+    logger.flush()?;
+    stats.print_summary();
+    Ok(())
+}

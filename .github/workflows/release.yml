@@ -1,0 +1,425 @@
+# =============================================================================
+# release.yml -- cuts a multi-platform release when a `v*` tag is pushed.
+#
+# HIGH-LEVEL FLOW
+#   1. Four parallel build jobs produce platform-specific binaries and upload
+#      them as temporary run artifacts:
+#         - build-linux-x86    (x86_64 Linux: musl static)
+#         - build-linux-arm    (arm64  Linux: musl static)
+#         - build-windows      (x86_64 MSVC / x86_64 GNU / arm64 MSVC)
+#         - build-macos        (arm64 + x86_64)
+#   2. The `publish` job downloads every artifact, merges the two macOS
+#      slices into a `macos-universal` fat binary with `lipo`, produces a
+#      SHA256SUMS file, signs it with cosign (keyless), emits SLSA build
+#      provenance attestations for every binary, and finally creates a
+#      DRAFT GitHub Release via the `gh` CLI.
+#
+# WHEN IT RUNS
+#   git push origin v0.1.0   (or any `v*` tag) -- the only trigger. Regular
+#   pushes and pull requests are handled by ci.yml / security.yml.
+#
+# GLOSSARY for readers unfamiliar with Rust or Unix release tooling
+#   target triple   -- a "<cpu>-<vendor>-<os>-<abi>" string like
+#                      `x86_64-unknown-linux-musl`. Tells the Rust compiler
+#                      which platform to produce a binary for. Rust can
+#                      cross-compile between many pairs.
+#   musl            -- a small C library used for statically linked Linux
+#                      binaries. A musl binary does NOT depend on the host
+#                      system's glibc, so it runs on any Linux with a kernel
+#                      new enough, including Alpine.
+#   MinGW           -- a GCC-based toolchain that produces Windows
+#                      executables from Linux. Lets us build the
+#                      `x86_64-pc-windows-gnu` target on an Ubuntu runner.
+#   MSVC            -- Microsoft's C/C++ compiler toolchain. Produces the
+#                      canonical Windows `.exe`. Requires a Windows runner.
+#   lipo            -- macOS tool that glues per-CPU binaries into a single
+#                      "fat" / universal binary that runs on both Apple
+#                      Silicon (arm64) and Intel (x86_64) Macs.
+#   cosign          -- supply-chain signing tool (Sigstore project). "Keyless"
+#                      means it uses the workflow's OIDC identity and writes
+#                      signatures to a public transparency log rather than
+#                      using a pre-shared private key.
+#   SLSA provenance -- a cryptographically signed statement saying "this
+#                      binary was built from commit X by workflow Y at
+#                      time Z". Lets downstream users verify that a release
+#                      really came from this repo's CI.
+# =============================================================================
+
+name: Release
+
+# Label each run with the tag being released, prefixed with the workflow
+# name. Prevents the Actions tab from showing "Initial commit" for a
+# release-workflow run.
+run-name: "Release -- ${{ github.ref_name }}"
+
+on:
+  # A tag push is the only way this workflow starts. Cutting a release is a
+  # deliberate act: `git tag v1.2.3 && git push origin v1.2.3`.
+  push:
+    tags: ['v*']
+
+# If a release run is already in flight for this tag, do NOT cancel it. A
+# half-published release is worse than letting a duplicate run fail naturally.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+# Global env: the binary name. Must match [package].name in Cargo.toml.
+env:
+  BIN: wpawolf
+
+# Workflow-wide permissions: read-only by default. The `publish` job opts
+# into `contents: write`, `id-token: write`, and `attestations: write`.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build-linux-x86 -- x86_64 Linux. Produces ONE binary:
+  #   wpawolf-linux-x86_64       static, musl-linked
+  # The Makefile's `dist` target detects the runner OS/arch and builds
+  # whichever variant applies.
+  # ---------------------------------------------------------------------------
+  build-linux-x86:
+    name: Build (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        # rust-toolchain.toml pins the exact compiler version.
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-x86-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-x86-
+            ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        # musl-tools -- needed by the musl-static build.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build release binary
+        run: make dist
+
+      - name: Upload artifact to the workflow run
+        # Artifacts live for the duration of this run. The publish job
+        # downloads them back.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: linux-x86-binary
+          path: dist/${{ env.BIN }}-linux-x86_64
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # build-linux-arm -- arm64 Linux. Same shape as x86_64 but uses GitHub's
+  # native arm64 runner, so we compile natively (no QEMU emulation).
+  # ---------------------------------------------------------------------------
+  build-linux-arm:
+    name: Build (Linux arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-arm-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-arm-
+            ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build release binary
+        run: make dist
+
+      - name: Upload artifact to the workflow run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: linux-arm-binary
+          path: dist/${{ env.BIN }}-linux-arm64
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # build-windows -- three Windows binaries in parallel:
+  #   x86_64-msvc  canonical Windows binary, MSVC toolchain, native runner
+  #   x86_64-gnu   GNU toolchain, cross-built on Ubuntu via MinGW
+  #   arm64-msvc   ARM64 Windows, MSVC, native runner
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build (Windows ${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x86_64-msvc
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x86_64-msvc.exe
+
+          - label: x86_64-gnu
+            runner: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            artifact: windows-x86_64-gnu.exe
+            mingw_pkg: gcc-mingw-w64-x86-64
+
+          - label: arm64-msvc
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: windows-arm64-msvc.exe
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Add cross-compilation target
+        # Tells rustup to download the standard library prebuilt for this
+        # particular target triple.
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install MinGW cross-linker (GNU build only)
+        if: matrix.mingw_pkg != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends ${{ matrix.mingw_pkg }}
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ matrix.label }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ matrix.label }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release -p wpawolf --bin wpawolf --target ${{ matrix.target }}
+
+      - name: Collect artifact into dist/
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${BIN}.exe dist/${BIN}-${{ matrix.artifact }}
+          ls -lh dist/
+
+      - name: Upload artifact to the workflow run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-${{ matrix.label }}-binary
+          path: dist/${{ env.BIN }}-${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # build-macos -- one per CPU. The publish job later merges the two slices
+  # with `lipo` to produce a universal binary.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: Build (macOS ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Add cross-compilation target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ matrix.arch }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release -p wpawolf --bin wpawolf --target ${{ matrix.target }}
+
+      - name: Collect artifact into dist/
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${BIN} dist/${BIN}-macos-${{ matrix.arch }}
+          ls -lh dist/
+
+      - name: Upload artifact to the workflow run
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: macos-${{ matrix.arch }}-binary
+          path: dist/${{ env.BIN }}-macos-${{ matrix.arch }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # publish -- runs after every build job finishes. Merges artifacts, checksums,
+  # signs, attests, and creates the (draft) GitHub Release.
+  #
+  # Runs on macOS-latest because `lipo` (required for the universal binary)
+  # only exists on macOS. Everything else (`shasum`, `curl`, `cosign`, `gh`)
+  # is available on the macOS runner too.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish release
+    needs: [build-linux-x86, build-linux-arm, build-windows, build-macos]
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      # Needed to create the GitHub Release and upload assets.
+      contents: write
+      # Needed by actions/attest-build-provenance to receive a short-lived
+      # OIDC token and embed it in the SLSA statement.
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download every build artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          # merge-multiple: put everything into one flat dist/ directory.
+          merge-multiple: true
+          path: dist/
+
+      - name: Create macOS universal binary (lipo fat binary)
+        # Keep the two per-arch macOS binaries in dist/ for users who want
+        # them, and add a third "universal" entry that runs on both.
+        run: |
+          set -euo pipefail
+          lipo -create \
+            -output dist/${BIN}-macos-universal \
+            dist/${BIN}-macos-arm64 \
+            dist/${BIN}-macos-x86_64
+          lipo -info dist/${BIN}-macos-universal
+
+      - name: Generate SHA256SUMS
+        # sha256 hashes for every artifact except SHA256SUMS itself. `sort`
+        # keeps the file reproducible so two builds of the same commit
+        # produce byte-identical SHA256SUMS.
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 -b $(ls | grep -v '^SHA256SUMS' | sort) > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign (pinned binary direct from Sigstore)
+        # Avoids third-party setup actions. We pin the sigstore release and
+        # fetch only from the sigstore project's own GitHub release assets.
+        run: |
+          set -euo pipefail
+          COSIGN_VERSION="v2.4.1"
+          curl -fsSLo /usr/local/bin/cosign \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-darwin-arm64"
+          chmod +x /usr/local/bin/cosign
+          cosign version
+
+      - name: Sign SHA256SUMS (cosign keyless)
+        # `keyless` mode: cosign authenticates via the runner's OIDC token,
+        # records the signature in the public Rekor transparency log, and
+        # writes a .sig file. Users verify with:
+        #   cosign verify-blob --certificate-identity-regexp=...
+        run: |
+          set -euo pipefail
+          cd dist
+          cosign sign-blob --yes SHA256SUMS --output-signature SHA256SUMS.sig
+
+      - name: Generate SLSA build provenance attestations
+        # One statement per binary: "this artifact was built by this workflow
+        # run at this commit SHA". Consumed by tools like `gh attestation
+        # verify` and the Sigstore slsa-verifier.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: |
+            dist/${{ env.BIN }}-*
+
+      - name: List release artifacts
+        run: ls -lh dist/
+
+      - name: Create GitHub Release (draft)
+        # Uses the `gh` CLI pre-installed on every GitHub runner. Drafts
+        # are not public until a maintainer reviews and publishes them;
+        # remove `--draft` once the release process is well-exercised.
+        # `--generate-notes` auto-fills the body from the commit history
+        # since the previous tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          echo "Creating draft release ${TAG}"
+          gh release create "${TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "${TAG}" \
+            --generate-notes \
+            --draft \
+            dist/*

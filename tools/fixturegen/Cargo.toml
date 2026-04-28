@@ -1,0 +1,59 @@
+[package]
+name = "wpawolf-fixturegen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Standalone test-capture generator for wpawolf -- emits pcap/pcapng fixtures covering every WPA/WPA2/WPA3-FT-PSK code path with cryptographically valid PMK / PTK / PMKID / MIC values."
+license = "MIT"
+repository = "https://github.com/StrongWind1/WPAWolf"
+publish = false
+# Internal tool; deliberately not published to crates.io.
+
+[lints]
+# Inherit the workspace lint policy declared at the repo root. Do not add a
+# crate-local `[lints.*]` block -- update the workspace once instead.
+workspace = true
+
+# `md-5` is the canonical RustCrypto crate name; its Rust module is `md5`.
+# `cargo machete` does not resolve the hyphen-vs-underscore mapping and
+# falsely reports it as unused. The crate IS used (`use md5::Md5;` in
+# `src/crypto.rs`).
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
+
+[[bin]]
+name = "wpawolf-fixturegen"
+path = "src/main.rs"
+
+[dependencies]
+# wpawolf type surface (`AkmType`, `HashType`, `PmkidSource`, `MacAddr`,
+# `MicBytes`, ...). Path dep so the generator and the parser stay locked
+# together at the same enum layout. The whole point of the workspace.
+wpawolf = { path = "../.." }
+
+# CLI parsing -- same minimal feature set as the wpawolf binary so cargo
+# does not pull a second copy of clap with different features.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
+
+# Gzip wrapper for `.pcap.gz` / `.pcapng.gz` fixture variants.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# --- RustCrypto: every primitive named in [IEEE 802.11-2024] tables 12-9 / 12-11 ---
+# PBKDF2-HMAC-SHA1 for PMK derivation (`PSK = PBKDF2(passphrase, SSID, 4096, 32)`).
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+hmac = { version = "0.13", default-features = false }
+# KDV=1 (WPA1) MIC is HMAC-MD5; provided by the `md-5` crate to avoid the
+# RustCrypto deprecation warning on `md5`.
+md-5 = { version = "0.11", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+# AES-128-CMAC for KDV=3 MIC (AKMs 6 / 4 / 11 / ...).
+aes = { version = "0.9", default-features = false }
+cmac = { version = "0.8", default-features = false }
+# Constant-time slice comparison for known-answer asserts in tests.
+subtle = { version = "2", default-features = false }
+
+[dev-dependencies]
+# Property-style round-trip tests: write a fixture, re-parse with wpawolf,
+# assert the parser sees what the generator promised.
+wpawolf = { path = "../..", features = [] }

@@ -1,0 +1,24 @@
+# Force LF line endings on checkout for all text files.
+# This prevents CRLF from sneaking in on Windows.
+* text=auto eol=lf
+
+# Ensure these are always treated as text with LF.
+*.rs        text eol=lf diff=rust
+*.toml      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.sh        text eol=lf
+*.fish      text eol=lf
+Makefile    text eol=lf
+*.md        text eol=lf
+
+# Binary files -- do not diff or convert line endings.
+*.png       binary
+*.jpg       binary
+*.gif       binary
+*.ico       binary
+*.pcap      binary
+*.pcapng    binary
+*.hccapx    binary
+*.22000     binary

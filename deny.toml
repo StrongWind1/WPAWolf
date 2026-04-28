@@ -1,0 +1,35 @@
+[graph]
+# Analyse the full dependency graph, not just direct deps
+all-features = false
+
+[advisories]
+# Deny all known vulnerabilities
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
+
+[licenses]
+version = 2
+# Only allow OSI-approved permissive/copyleft licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Deny duplicate versions of the same crate (except where explicitly allowed)
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

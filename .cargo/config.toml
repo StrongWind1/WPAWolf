@@ -1,0 +1,4 @@
+[build]
+# Treat all warnings as errors. Override locally with RUSTFLAGS="" if needed.
+# Lint configuration lives in Cargo.toml [lints.*] -- do not duplicate here.
+rustflags = ["-D", "warnings"]
