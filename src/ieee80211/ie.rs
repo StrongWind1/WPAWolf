@@ -104,19 +104,56 @@ pub fn vendor_ie_body<'a>(ie: &Ie<'a>, oui: [u8; 3], ie_type: u8) -> Option<&'a 
 }
 
 // --- WPS IE parser ---
+//
+// WPS attribute IDs and TLV layout cross-referenced with Wireshark's authoritative
+// dissector at `ref/wireshark/epan/dissectors/packet-wps.c:74-153` and the Wi-Fi
+// Protected Setup specification §12. Top-level attributes use 2-byte BE Type +
+// 2-byte BE Length + Value. The Credential attribute (0x100E) is itself a sub-TLV
+// container that holds a complete network credential, including the bundled SSID
+// (0x1045) and Network Key (0x1027) -- so the parser walks it recursively.
+//
+// `parse_wps_body` is intentionally tolerant of WPS attributes appearing in
+// management-frame IEs even though the spec confines credential attributes to the
+// encrypted M7 / M8 EAP-WPS exchange: vendor-firmware leaks have placed Network
+// Key / Device Password values into Beacon and Probe Response WPS bodies, and the
+// audit goal is to catch every such leak.
 
-/// WPS attribute type: Manufacturer string. [Wi-Fi Protected Setup spec] §12 attribute 0x1021.
-const WPS_ATTR_MANUFACTURER: u16 = 0x1021;
-/// WPS attribute type: Model Name string. [Wi-Fi Protected Setup spec] §12 attribute 0x1023.
-const WPS_ATTR_MODEL_NAME: u16 = 0x1023;
-/// WPS attribute type: Model Number string. [Wi-Fi Protected Setup spec] §12 attribute 0x1024.
-const WPS_ATTR_MODEL_NUMBER: u16 = 0x1024;
-/// WPS attribute type: Serial Number string. [Wi-Fi Protected Setup spec] §12 attribute 0x1042.
-const WPS_ATTR_SERIAL_NUMBER: u16 = 0x1042;
-/// WPS attribute type: Device Name (friendly name). [Wi-Fi Protected Setup spec] §12 attribute 0x1011.
+/// WPS attribute: Confirmation URL4 (text URL). [WSC §12; Wireshark `WPS_TLV_TYPE_CONFIRMATION_URL4`]
+const WPS_ATTR_CONFIRMATION_URL4: u16 = 0x100A;
+/// WPS attribute: Confirmation URL6 (text URL). [WSC §12; Wireshark `WPS_TLV_TYPE_CONFIRMATION_URL6`]
+const WPS_ATTR_CONFIRMATION_URL6: u16 = 0x100B;
+/// WPS attribute: Credential -- sub-TLV bundle of an entire credential record. [WSC §12; Wireshark `WPS_TLV_TYPE_CREDENTIAL`]
+const WPS_ATTR_CREDENTIAL: u16 = 0x100E;
+/// WPS attribute: Device Name (friendly name). [WSC §12 0x1011]
 const WPS_ATTR_DEVICE_NAME: u16 = 0x1011;
-/// WPS attribute type: UUID-E (Enrollee UUID, 16 bytes). [Wi-Fi Protected Setup spec] §12 attribute 0x1047.
+/// WPS attribute: Identity (text). [WSC §12; Wireshark `WPS_TLV_TYPE_IDENTITY`]
+const WPS_ATTR_IDENTITY: u16 = 0x101C;
+/// WPS attribute: MAC Address (6 bytes). [WSC §12 0x1020]
+const WPS_ATTR_MAC_ADDRESS: u16 = 0x1020;
+/// WPS attribute: Manufacturer string. [WSC §12 0x1021]
+const WPS_ATTR_MANUFACTURER: u16 = 0x1021;
+/// WPS attribute: Model Name string. [WSC §12 0x1023]
+const WPS_ATTR_MODEL_NAME: u16 = 0x1023;
+/// WPS attribute: Model Number string. [WSC §12 0x1024]
+const WPS_ATTR_MODEL_NUMBER: u16 = 0x1024;
+/// WPS attribute: Network Key -- the cleartext PSK. [WSC §12; Wireshark `WPS_TLV_TYPE_NETWORK_KEY`]
+const WPS_ATTR_NETWORK_KEY: u16 = 0x1027;
+/// WPS attribute: New Device Name. [WSC §12; Wireshark `WPS_TLV_TYPE_NEW_DEVICE_NAME`]
+const WPS_ATTR_NEW_DEVICE_NAME: u16 = 0x1029;
+/// WPS attribute: New Password. [WSC §12; Wireshark `WPS_TLV_TYPE_NEW_PASSWORD`]
+const WPS_ATTR_NEW_PASSWORD: u16 = 0x102A;
+/// WPS attribute: Out-of-Band Device Password. [WSC §12; Wireshark `WPS_TLV_TYPE_OOB_DEVICE_PASSWORD`]
+const WPS_ATTR_OOB_DEVICE_PASSWORD: u16 = 0x102C;
+/// WPS attribute: Serial Number string. [WSC §12 0x1042]
+const WPS_ATTR_SERIAL_NUMBER: u16 = 0x1042;
+/// WPS attribute: SSID (network name). [WSC §12; Wireshark `WPS_TLV_TYPE_SSID`]
+const WPS_ATTR_SSID: u16 = 0x1045;
+/// WPS attribute: UUID-E (Enrollee UUID, 16 bytes). [WSC §12 0x1047]
 const WPS_ATTR_UUID_E: u16 = 0x1047;
+/// WPS attribute: UUID-R (Registrar UUID, 16 bytes). [WSC §12; Wireshark `WPS_TLV_TYPE_UUID_R`]
+const WPS_ATTR_UUID_R: u16 = 0x1048;
+/// WPS attribute: EAP Identity (text). [WSC §12; Wireshark `WPS_TLV_TYPE_EAP_IDENTITY`]
+const WPS_ATTR_EAP_IDENTITY: u16 = 0x104D;
 
 /// WPS IE type byte within the Wi-Fi Alliance OUI namespace.
 /// Vendor IE OUI=`00:50:F2`, type=4 identifies a WPS IE. [Wi-Fi Protected Setup spec] §12.
@@ -124,34 +161,79 @@ pub const WPS_IE_TYPE: u8 = 4;
 
 /// Device metadata extracted from a WPS vendor IE.
 ///
-/// All string fields are raw bytes -- WPS strings are ASCII in practice but the spec
-/// allows arbitrary bytes. `uuid_e` is `None` if the attribute was absent or not
-/// exactly 16 bytes. [Wi-Fi Protected Setup spec] §12.
+/// The first six fields populate the `-D` device-info row and are spec-defined
+/// AP-discovery attributes. The remaining `wordlist_values` list collects every
+/// other text-bearing or credential-bearing attribute observed during the same
+/// TLV walk -- including the `Network Key` (0x1027), `New Password` (0x102A),
+/// and `OOB Device Password` (0x102C) attributes that should never appear in
+/// management-frame WPS IEs but have been observed leaking through buggy
+/// vendor firmware. Callers route this list into the wordlist store unchanged.
+/// [Wi-Fi Protected Setup spec] §12.
 #[derive(Debug, Default, Clone)]
 pub struct WpsInfo {
-    /// Device manufacturer name. [Wi-Fi Protected Setup spec] attribute 0x1021.
+    /// Device manufacturer name. [WSC §12] attribute 0x1021.
     pub manufacturer: Vec<u8>,
-    /// Device model name. [Wi-Fi Protected Setup spec] attribute 0x1023.
+    /// Device model name. [WSC §12] attribute 0x1023.
     pub model_name: Vec<u8>,
-    /// Device model number string. [Wi-Fi Protected Setup spec] attribute 0x1024.
+    /// Device model number string. [WSC §12] attribute 0x1024.
     pub model_number: Vec<u8>,
-    /// Device serial number string. [Wi-Fi Protected Setup spec] attribute 0x1042.
+    /// Device serial number string. [WSC §12] attribute 0x1042.
     pub serial_number: Vec<u8>,
-    /// Device name (friendly name). [Wi-Fi Protected Setup spec] attribute 0x1011.
+    /// Device name (friendly name). [WSC §12] attribute 0x1011.
     pub device_name: Vec<u8>,
-    /// UUID-E (Enrollee UUID), 16 bytes. [Wi-Fi Protected Setup spec] attribute 0x1047.
+    /// UUID-E (Enrollee UUID), 16 bytes. [WSC §12] attribute 0x1047.
     pub uuid_e: Option<[u8; 16]>,
+    /// Additional wordlist candidates harvested from the same TLV walk.
+    ///
+    /// Pre-encoded for direct insertion into `WordlistStore`: text values are
+    /// stored as their raw bytes; MAC and UUID values are 12- or 32-character
+    /// lowercase hex strings. The Credential sub-TLV (0x100E) is recursed
+    /// into so its bundled SSID / Network Key / etc. land here too. Empty
+    /// values are filtered out.
+    pub wordlist_values: Vec<Vec<u8>>,
 }
 
-/// Parses a WPS IE body and extracts device metadata attributes.
+/// Parses a WPS IE body and extracts every attribute we have a use for.
 ///
 /// `body` is the WPS IE data after the OUI+type prefix (i.e., the output of
-/// `vendor_ie_body(ie, [0x00, 0x50, 0xF2], 4)`). Attributes in unrecognised
-/// positions are skipped. A truncated attribute stops iteration. [Wi-Fi Protected
-/// Setup spec] §12 TLV attribute format.
+/// `vendor_ie_body(ie, [0x00, 0x50, 0xF2], 4)`). The walker:
+///
+///  1. Populates the typed fields (manufacturer / model / serial / device name /
+///     UUID-E) used for the `-D` device-info row.
+///  2. Pushes every *other* text- or credential-bearing attribute value into
+///     `info.wordlist_values` for `-W` seeding -- including Network Key
+///     (0x1027), New Password (0x102A), OOB Device Password (0x102C), bundled
+///     SSID (0x1045), MAC Address (0x1020 -> hex), UUID-R (0x1048 -> hex),
+///     Identity (0x101C), EAP Identity (0x104D), New Device Name (0x1029), and
+///     Confirmation URL4 / URL6 (0x100A / 0x100B).
+///  3. Recurses into Credential (0x100E) sub-TLVs so a leaked credential bundle
+///     contributes its inner SSID and Network Key the same way as a top-level
+///     attribute.
+///
+/// A truncated attribute stops iteration cleanly. Numeric / flag / nonce /
+/// hash / public-key attributes are intentionally skipped: they carry no
+/// password-equivalent text. [Wi-Fi Protected Setup spec] §12 TLV format.
 #[must_use]
 pub fn parse_wps_body(body: &[u8]) -> WpsInfo {
     let mut info = WpsInfo::default();
+    walk_wps_tlvs(body, &mut info, 0);
+    info
+}
+
+/// Maximum WPS sub-TLV nesting depth. The only nesting level the spec defines
+/// is the Credential attribute (0x100E) -- two layers comfortably covers it
+/// while preventing pathological cycles in malformed input.
+const WPS_MAX_RECURSION: u8 = 4;
+
+/// Walks a WPS TLV body, populating `info` and recursing into Credential sub-TLVs.
+///
+/// `depth` guards against runaway recursion on malformed input (a Credential
+/// attribute that nests Credential attributes). Sub-TLVs share the top-level
+/// attribute namespace, so the same attribute IDs are recognised at any depth.
+fn walk_wps_tlvs(body: &[u8], info: &mut WpsInfo, depth: u8) {
+    if depth >= WPS_MAX_RECURSION {
+        return;
+    }
     let mut pos = 0usize;
     while pos + 4 <= body.len() {
         // WPS TLV: Type (2 bytes BE) + Length (2 bytes BE) + Value (Length bytes).
@@ -164,29 +246,50 @@ pub fn parse_wps_body(body: &[u8]) -> WpsInfo {
             Some(b) => b,
             None => break,
         };
-        let attr_type = u16::from_be_bytes(type_bytes); // big-endian per [Wi-Fi Protected Setup spec] §12
-        let attr_len = u16::from_be_bytes(len_bytes) as usize; // big-endian per [Wi-Fi Protected Setup spec] §12
+        let attr_type = u16::from_be_bytes(type_bytes);
+        let attr_len = u16::from_be_bytes(len_bytes) as usize;
         let value_start = pos + 4;
         let value_end = value_start + attr_len;
-        // Truncated attribute (attr_len > remaining body) -- stop cleanly.
         let Some(value) = body.get(value_start..value_end) else { break };
         match attr_type {
+            // -- Typed -D-row fields --
             WPS_ATTR_MANUFACTURER => info.manufacturer = value.to_vec(),
             WPS_ATTR_MODEL_NAME => info.model_name = value.to_vec(),
             WPS_ATTR_MODEL_NUMBER => info.model_number = value.to_vec(),
             WPS_ATTR_SERIAL_NUMBER => info.serial_number = value.to_vec(),
             WPS_ATTR_DEVICE_NAME => info.device_name = value.to_vec(),
             WPS_ATTR_UUID_E => {
-                // UUID-E must be exactly 16 bytes; discard if wrong length.
                 if let Ok(uuid) = value.try_into() {
                     info.uuid_e = Some(uuid);
                 }
             },
-            _ => {}, // unknown/unneeded attribute -- skip and continue
+            // -- Credential bundle: recurse into inner WPS TLVs --
+            WPS_ATTR_CREDENTIAL => walk_wps_tlvs(value, info, depth + 1),
+            // -- Text- and credential-bearing attributes for -W --
+            WPS_ATTR_NETWORK_KEY
+            | WPS_ATTR_NEW_PASSWORD
+            | WPS_ATTR_OOB_DEVICE_PASSWORD
+            | WPS_ATTR_NEW_DEVICE_NAME
+            | WPS_ATTR_IDENTITY
+            | WPS_ATTR_EAP_IDENTITY
+            | WPS_ATTR_CONFIRMATION_URL4
+            | WPS_ATTR_CONFIRMATION_URL6
+            | WPS_ATTR_SSID
+                if !value.is_empty() =>
+            {
+                info.wordlist_values.push(value.to_vec());
+            },
+            // -- Binary identifiers: encode as lowercase hex for -W --
+            WPS_ATTR_MAC_ADDRESS if value.len() == 6 => {
+                info.wordlist_values.push(crate::types::bytes_to_hex_string(value).into_bytes());
+            },
+            WPS_ATTR_UUID_R if value.len() == 16 => {
+                info.wordlist_values.push(crate::types::bytes_to_hex_string(value).into_bytes());
+            },
+            _ => {}, // numeric / flag / nonce / hash / cert / unknown -- carries no PSK signal
         }
         pos = value_end;
     }
-    info
 }
 
 /// Searches `tagged_params` for the first WPS vendor IE and parses its body.
@@ -999,6 +1102,58 @@ mod tests {
         let info = parse_wps_body(&body);
         // Truncated attribute must not be stored.
         assert!(info.manufacturer.is_empty(), "truncated attribute must not be stored");
+    }
+
+    #[test]
+    fn wps_parse_network_key_lands_in_wordlist_values() {
+        // 0x1027 (Network Key) is the cleartext PSK. It should never appear in a
+        // Beacon / ProbeResp WPS body, but vendor leaks have placed it there;
+        // when present, it must reach the wordlist.
+        let psk = b"hunter2-correct-horse";
+        let body = wps_attr(WPS_ATTR_NETWORK_KEY, psk);
+        let info = parse_wps_body(&body);
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == psk), "network key in wordlist_values");
+        assert!(info.manufacturer.is_empty());
+    }
+
+    #[test]
+    fn wps_parse_recurses_into_credential() {
+        // Credential (0x100E) is a sub-TLV bundle; an embedded SSID and
+        // Network Key inside must surface in wordlist_values.
+        let mut credential_body = Vec::new();
+        credential_body.extend_from_slice(&wps_attr(WPS_ATTR_SSID, b"GuestNet"));
+        credential_body.extend_from_slice(&wps_attr(WPS_ATTR_NETWORK_KEY, b"P@ssw0rd!"));
+        let body = wps_attr(WPS_ATTR_CREDENTIAL, &credential_body);
+        let info = parse_wps_body(&body);
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"GuestNet"), "inner SSID surfaced");
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"P@ssw0rd!"), "inner network key surfaced");
+    }
+
+    #[test]
+    fn wps_parse_mac_address_and_uuid_r_hex_encoded() {
+        // 0x1020 (MAC) and 0x1048 (UUID-R) are binary identifiers; they must
+        // be emitted to wordlist_values as lowercase hex strings.
+        let mac = [0x01u8, 0x23, 0x45, 0x67, 0x89, 0xAB];
+        let uuid_r: [u8; 16] = [0xCDu8; 16];
+        let mut body = Vec::new();
+        body.extend_from_slice(&wps_attr(WPS_ATTR_MAC_ADDRESS, &mac));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_UUID_R, &uuid_r));
+        let info = parse_wps_body(&body);
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"0123456789ab"), "MAC hex");
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"), "UUID-R hex");
+    }
+
+    #[test]
+    fn wps_parse_recursion_depth_bounded() {
+        // A pathologically nested Credential must not recurse forever. Build a
+        // 3-level nest containing a Network Key in the innermost layer; the
+        // depth guard kicks in at WPS_MAX_RECURSION (=4) so this should still
+        // surface the inner key.
+        let inner = wps_attr(WPS_ATTR_NETWORK_KEY, b"deepest");
+        let lvl2 = wps_attr(WPS_ATTR_CREDENTIAL, &inner);
+        let lvl1 = wps_attr(WPS_ATTR_CREDENTIAL, &lvl2);
+        let info = parse_wps_body(&lvl1);
+        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"deepest"), "nested key surfaced");
     }
 
     #[test]

@@ -87,14 +87,26 @@ pub fn process_probe_req(
     }
 
     // WPS metadata from Probe Requests -- client device names/models.
-    // Probe Request WPS IEs describe the *sending STA*, not the AP.
-    // Wordlist only; not -D (which is AP device info).
+    // Probe Request WPS IEs describe the *sending STA*, not the AP, so the
+    // row never lands in -D. The full set of WPS-extracted columns -- string
+    // fields, STA MAC (hex), and UUID-E (hex) -- is still routed to -W per
+    // the project rule that every extracted column reaches the wordlist.
     if populate_wordlist {
         if let Some(wps) = extract_wps_info(body) {
             for field in [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name] {
                 if !field.is_empty() {
                     wordlist_store.insert(field.clone());
                 }
+            }
+            wordlist_store.insert(mac_hdr.sta.to_hex_lower().into_bytes());
+            if let Some(uuid) = wps.uuid_e.as_ref() {
+                wordlist_store.insert(crate::types::bytes_to_hex_string(uuid).into_bytes());
+            }
+            // Every other text- or credential-bearing WPS attribute observed
+            // in this Probe Request body -- including any leaked Network Key
+            // / OOB Device Password / Credential bundle. See `parse_wps_body`.
+            for value in &wps.wordlist_values {
+                wordlist_store.insert(value.clone());
             }
             stats.wps_probe_req_extracted += 1;
         }
@@ -261,6 +273,66 @@ mod tests {
             false,
         );
         assert_eq!(store.total_count(), 0);
+    }
+
+    fn wps_ie_tagged(manufacturer: &[u8], uuid_e: Option<[u8; 16]>) -> Vec<u8> {
+        // WPS vendor IE: tag 221, OUI 00:50:F2, type 0x04, then BE TLV attrs.
+        let mut body = vec![0x00, 0x50, 0xF2, 0x04];
+        body.extend_from_slice(&0x1021u16.to_be_bytes());
+        body.extend_from_slice(&(manufacturer.len() as u16).to_be_bytes());
+        body.extend_from_slice(manufacturer);
+        if let Some(uuid) = uuid_e {
+            body.extend_from_slice(&0x1047u16.to_be_bytes());
+            body.extend_from_slice(&16u16.to_be_bytes());
+            body.extend_from_slice(&uuid);
+        }
+        let mut tagged = vec![221u8, body.len() as u8];
+        tagged.extend_from_slice(&body);
+        tagged
+    }
+
+    // STA-side WPS in a Probe Request: every extracted column must reach -W,
+    // including the STA MAC (hex) and UUID-E (hex). No -D row is written for
+    // probe-side WPS (it describes the client, not an AP).
+    #[test]
+    fn probe_req_wps_wordlist_includes_sta_mac_hex_and_uuid_hex() {
+        let uuid: [u8; 16] =
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10];
+        let body = wps_ie_tagged(b"AcmeSTA", Some(uuid));
+
+        let mac_hdr = dummy_mac_hdr([0xFF; 6], [0xCD; 6]); // broadcast probe; STA = 0xCD
+        let mut store = PmkidStore::new();
+        let akm_map = AkmMap::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut probe_essid_set = ProbeEssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut stats = Stats::new();
+        let mut logger = Logger::new(None).unwrap();
+
+        process_probe_req(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut probe_essid_set,
+            &akm_map,
+            &mut store,
+            &mut wl,
+            &mut stats,
+            &mut logger,
+            true,
+        );
+
+        let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
+        assert!(entries.iter().any(|e| *e == b"AcmeSTA"), "manufacturer in wordlist: {entries:?}");
+        assert!(entries.iter().any(|e| *e == b"cdcdcdcdcdcd"), "STA MAC hex in wordlist: {entries:?}");
+        assert!(
+            entries.iter().any(|e| *e == b"0123456789abcdeffedcba9876543210"),
+            "UUID-E hex in wordlist: {entries:?}"
+        );
+        assert_eq!(stats.wps_probe_req_extracted, 1);
     }
 
     // S20 -- Assoc Request with OSEN IE containing PMKID -> OsenIe (helper test).

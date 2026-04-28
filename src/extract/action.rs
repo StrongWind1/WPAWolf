@@ -121,6 +121,15 @@ pub fn process_action(
         let target_ap_bytes: [u8; 6] = body.get(8..14).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 6]);
         let sta_addr = MacAddr::from_bytes(sta_addr_bytes);
         let target_ap = MacAddr::from_bytes(target_ap_bytes);
+        // Both MACs as 12-char hex into -W. Mirrors RNR / MLD / WPS-row MAC
+        // handling: any MAC harvested from a management-frame body lands in
+        // the wordlist when -W is requested. The header AP / STA MACs are
+        // already covered by other -W contributions; these are the *embedded*
+        // identifiers in the FT Action body itself.
+        if populate_wordlist {
+            wordlist_store.insert(sta_addr.to_hex_lower().into_bytes());
+            wordlist_store.insert(target_ap.to_hex_lower().into_bytes());
+        }
         // FT Response has a 2-byte Status Code after the fixed 14-byte header.
         let ie_offset = if action_code == ACTION_FT_RESPONSE { ACTION_FT_RESPONSE_FIXED } else { ACTION_FT_FIXED };
         let ies = body.get(ie_offset..).unwrap_or(&[]);
@@ -568,6 +577,87 @@ mod tests {
 
         assert_eq!(store.total_count(), 1);
         assert_eq!(store.iter().next().unwrap().source, PmkidSource::MeshPeeringConfirm);
+    }
+
+    // FT Action body carries embedded STA Address and Target AP Address
+    // (body[2..14]). Both must land in -W as 12-char lowercase hex when -W is
+    // requested -- mirrors the RNR / MLD MAC handling and gives operators a
+    // shot at MAC-derived default-PSK schemes for the roaming target.
+    #[test]
+    fn ft_action_request_mac_addresses_land_in_wordlist() {
+        let pmkid = [0x44u8; 16];
+        let sta = [0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+        let target_ap = [0xDEu8, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
+        let mut body = Vec::new();
+        body.push(6); // category=6 FT
+        body.push(1); // action=1 FT Request
+        body.extend_from_slice(&sta);
+        body.extend_from_slice(&target_ap);
+        body.extend_from_slice(&rsn_ie_tagged(pmkid));
+
+        let mac_hdr = dummy_mac_hdr([0x33; 6], [0x44; 6]);
+        let mut store = PmkidStore::new();
+        let mut stats = Stats::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut probe_essid_set_test = ProbeEssidSet::new();
+        let mut logger = Logger::new(None).unwrap();
+        process_action(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut probe_essid_set_test,
+            &mut wl,
+            true, // populate_wordlist on
+            &mut store,
+            &mut stats,
+            &mut logger,
+        );
+
+        let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
+        assert!(entries.iter().any(|e| *e == b"123456789abc"), "STA MAC hex in -W: {entries:?}");
+        assert!(entries.iter().any(|e| *e == b"deadbeefcafe"), "Target AP MAC hex in -W: {entries:?}");
+    }
+
+    // The same body with -W off must not populate the wordlist even though
+    // PMKID extraction still happens.
+    #[test]
+    fn ft_action_request_no_wordlist_when_flag_off() {
+        let pmkid = [0x55u8; 16];
+        let mut body = Vec::new();
+        body.push(6);
+        body.push(1);
+        body.extend_from_slice(&[0xAAu8; 6]); // sta
+        body.extend_from_slice(&[0xBBu8; 6]); // target_ap
+        body.extend_from_slice(&rsn_ie_tagged(pmkid));
+
+        let mac_hdr = dummy_mac_hdr([0x33; 6], [0x44; 6]);
+        let mut store = PmkidStore::new();
+        let mut stats = Stats::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut probe_essid_set_test = ProbeEssidSet::new();
+        let mut logger = Logger::new(None).unwrap();
+        process_action(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut probe_essid_set_test,
+            &mut wl,
+            false,
+            &mut store,
+            &mut stats,
+            &mut logger,
+        );
+
+        assert!(wl.is_empty(), "-W off must not populate wordlist");
+        assert_eq!(store.total_count(), 1);
     }
 
     // S18 -- AMPE element < 16 bytes -> skipped, no extraction.

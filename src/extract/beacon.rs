@@ -19,7 +19,7 @@ use crate::store::{
     essid::EssidMap,
     pmkid::{PmkidEntry, PmkidStore},
 };
-use crate::types::{AkmType, MacAddr, PmkidSource};
+use crate::types::{AkmType, MacAddr, PmkidSource, bytes_to_hex_string};
 
 use super::common::{BEACON_FIXED, SUBTYPE_BEACON};
 
@@ -153,6 +153,12 @@ pub fn process_beacon_or_probe_resp(
                 stats.mle_mld_addrs_learned += 1;
             }
         }
+        // MLD address as 12-char hex into -W. Matches the RNR neighbor-BSSID
+        // treatment above: any MAC harvested from a management frame that we
+        // record elsewhere also seeds the wordlist when -W is requested.
+        if populate_wordlist {
+            wordlist_store.insert(mld_addr.to_hex_lower().into_bytes());
+        }
     }
 
     // Extract SSID List IE (tag 84) entries. [IEEE 802.11-2024] §9.4.2.71
@@ -183,9 +189,18 @@ pub fn process_beacon_or_probe_resp(
     }
 
     // WPS device metadata extraction for -D and -W.
+    //
+    // -W is a strict superset of every column emitted to -D: the AP MAC (hex),
+    // manufacturer, model name, model number, serial number, device name,
+    // UUID-E (hex), and the resolved ESSID. The resolved ESSID is already
+    // wordlist-inserted via the SSID IE branch above; the AP MAC and UUID-E
+    // are unique to the WPS row and added here so a downstream
+    // `tr '\t' '\n' | sort -u` over `.wps.devices` is byte-equivalent (modulo
+    // ESSID dedup) to the wordlist contribution from this frame. MAC-as-hex
+    // mirrors the RNR neighbor-BSSID handling above; UUID-E often embeds
+    // serial / MAC bytes that some vendor-default PSK derivations key off.
     if populate_device || populate_wordlist {
         if let Some(wps) = extract_wps_info(ies) {
-            // Insert WPS text fields into wordlist for -W output.
             if populate_wordlist {
                 for field in
                     [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name]
@@ -194,8 +209,20 @@ pub fn process_beacon_or_probe_resp(
                         wordlist_store.insert(field.clone());
                     }
                 }
+                wordlist_store.insert(mac_hdr.ap.to_hex_lower().into_bytes());
+                if let Some(uuid) = wps.uuid_e.as_ref() {
+                    wordlist_store.insert(bytes_to_hex_string(uuid).into_bytes());
+                }
+                // Every other text- or credential-bearing WPS attribute the
+                // walker recognised. In a well-behaved capture this is empty;
+                // its purpose is to surface the cleartext PSK / OOB password
+                // / credential bundle that buggy vendor firmware sometimes
+                // leaks through Beacon / ProbeResp WPS bodies. See
+                // `parse_wps_body`.
+                for value in &wps.wordlist_values {
+                    wordlist_store.insert(value.clone());
+                }
             }
-            // WPS device info for -D output.
             if populate_device {
                 let essid = essid_map.resolve(&mac_hdr.ap, timestamp_us).unwrap_or(&[]).to_vec();
                 device_store.push(DeviceInfoEntry {
@@ -490,6 +517,206 @@ mod tests {
         );
 
         assert_eq!(store.total_count(), 0);
+    }
+
+    fn wps_ie_tagged(manufacturer: &[u8], uuid_e: Option<[u8; 16]>) -> Vec<u8> {
+        // WPS vendor IE: tag 221, OUI 00:50:F2, type 0x04, then big-endian TLV attrs.
+        let mut body = vec![0x00, 0x50, 0xF2, 0x04];
+        // Manufacturer attribute (0x1021).
+        body.extend_from_slice(&0x1021u16.to_be_bytes());
+        body.extend_from_slice(&(manufacturer.len() as u16).to_be_bytes());
+        body.extend_from_slice(manufacturer);
+        if let Some(uuid) = uuid_e {
+            // UUID-E attribute (0x1047), 16 bytes.
+            body.extend_from_slice(&0x1047u16.to_be_bytes());
+            body.extend_from_slice(&16u16.to_be_bytes());
+            body.extend_from_slice(&uuid);
+        }
+        let mut tagged = vec![221u8, body.len() as u8];
+        tagged.extend_from_slice(&body);
+        tagged
+    }
+
+    // -W must be a strict superset of every column written to -D: in particular
+    // the AP MAC (hex) and UUID-E (hex) -- not just the WPS string columns.
+    #[test]
+    fn wps_wordlist_includes_mac_hex_and_uuid_hex() {
+        let uuid: [u8; 16] =
+            [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB];
+        let mut body = vec![0u8; 12];
+        body.extend_from_slice(&wps_ie_tagged(b"Acme", Some(uuid)));
+
+        let mac_hdr = frame::MacHeader {
+            ap: MacAddr::from_bytes([0xAB; 6]),
+            sta: MacAddr::from_bytes([0xFF; 6]),
+            frame_type: frame::TYPE_MANAGEMENT,
+            subtype: SUBTYPE_BEACON,
+            protected: false,
+            body_offset: 24,
+            direction: frame::FrameDirection::Ibss,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        };
+
+        let mut store = PmkidStore::new();
+        let mut akm_map = AkmMap::new();
+        let mut mld_store = MldStore::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut device_store = DeviceInfoStore::new();
+        let mut stats = Stats::new();
+        let mut logger = Logger::new(None).unwrap();
+
+        process_beacon_or_probe_resp(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut akm_map,
+            &mut mld_store,
+            &mut store,
+            &mut wl,
+            &mut device_store,
+            &mut stats,
+            &mut logger,
+            true,
+            true,
+        );
+
+        let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
+        assert!(entries.iter().any(|e| *e == b"Acme"), "manufacturer in wordlist: {entries:?}");
+        assert!(entries.iter().any(|e| *e == b"abababababab"), "AP MAC hex in wordlist: {entries:?}");
+        assert!(
+            entries.iter().any(|e| *e == b"deadbeef00112233445566778899aabb"),
+            "UUID-E hex in wordlist: {entries:?}"
+        );
+        assert_eq!(device_store.len(), 1);
+    }
+
+    // When -W is off, the wordlist must remain empty even though the WPS row
+    // still lands in -D.
+    #[test]
+    fn wps_no_wordlist_when_flag_off() {
+        let uuid: [u8; 16] = [0xCC; 16];
+        let mut body = vec![0u8; 12];
+        body.extend_from_slice(&wps_ie_tagged(b"Acme", Some(uuid)));
+
+        let mac_hdr = frame::MacHeader {
+            ap: MacAddr::from_bytes([0x11; 6]),
+            sta: MacAddr::from_bytes([0xFF; 6]),
+            frame_type: frame::TYPE_MANAGEMENT,
+            subtype: SUBTYPE_BEACON,
+            protected: false,
+            body_offset: 24,
+            direction: frame::FrameDirection::Ibss,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        };
+
+        let mut store = PmkidStore::new();
+        let mut akm_map = AkmMap::new();
+        let mut mld_store = MldStore::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut device_store = DeviceInfoStore::new();
+        let mut stats = Stats::new();
+        let mut logger = Logger::new(None).unwrap();
+
+        process_beacon_or_probe_resp(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut akm_map,
+            &mut mld_store,
+            &mut store,
+            &mut wl,
+            &mut device_store,
+            &mut stats,
+            &mut logger,
+            false,
+            true,
+        );
+
+        assert!(wl.is_empty(), "wordlist should not be populated when -W is off");
+        assert_eq!(device_store.len(), 1);
+    }
+
+    fn mle_ext_ie(mld_mac: [u8; 6]) -> Vec<u8> {
+        // Extension element: tag 255, ExtID 107 (Multi-Link), type 0 (Basic),
+        // Common Info Length 7, MLD MAC. [IEEE 802.11be] §9.4.2.321
+        let mut value = vec![107u8, 0x00, 0x00, 0x07];
+        value.extend_from_slice(&mld_mac);
+        let mut tagged = vec![255u8, value.len() as u8];
+        tagged.extend_from_slice(&value);
+        tagged
+    }
+
+    // The MLD MAC harvested from a Basic Multi-Link Element must reach -W as
+    // 12-char hex when the AP differs from the MLD address. Mirrors the RNR
+    // neighbor-BSSID treatment in the same handler.
+    #[test]
+    fn mle_mld_mac_lands_in_wordlist_as_hex() {
+        let mld = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+        let mut body = vec![0u8; 12];
+        body.extend_from_slice(&mle_ext_ie(mld));
+
+        let mac_hdr = frame::MacHeader {
+            ap: MacAddr::from_bytes([0x11; 6]), // distinct from mld so the mapping records.
+            sta: MacAddr::from_bytes([0xFF; 6]),
+            frame_type: frame::TYPE_MANAGEMENT,
+            subtype: SUBTYPE_BEACON,
+            protected: false,
+            body_offset: 24,
+            direction: frame::FrameDirection::Ibss,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        };
+
+        let mut store = PmkidStore::new();
+        let mut akm_map = AkmMap::new();
+        let mut mld_store = MldStore::new();
+        let mut essid_map = EssidMap::new();
+        let mut essid_set = EssidSet::new();
+        let mut wl = WordlistStore::new();
+        let mut device_store = DeviceInfoStore::new();
+        let mut stats = Stats::new();
+        let mut logger = Logger::new(None).unwrap();
+
+        process_beacon_or_probe_resp(
+            &mac_hdr,
+            &body,
+            0,
+            &mut essid_map,
+            &mut essid_set,
+            &mut akm_map,
+            &mut mld_store,
+            &mut store,
+            &mut wl,
+            &mut device_store,
+            &mut stats,
+            &mut logger,
+            true,
+            false,
+        );
+
+        let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
+        assert!(entries.iter().any(|e| *e == b"123456789abc"), "MLD MAC hex in wordlist: {entries:?}");
+        assert_eq!(stats.mle_basic_seen, 1);
+        assert_eq!(stats.mle_mld_addrs_learned, 1);
     }
 
     // S17 -- Probe Response with PMKID Count=1 -> ProbeRespRsnIe.

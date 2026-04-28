@@ -319,8 +319,14 @@ fn process_msdu_payload(
                     }
                 }
             }
-            // -U (username): only Response/Identity yields a username.
+            // -U (username) / -W (wordlist): only Response/Identity yields a
+            // username. The username strand of the wordlist mirrors the
+            // identity strand above so `-W` remains a strict superset of the
+            // text columns written to `-I` / `-U`.
             if let Some(username_bytes) = eap_info.username {
+                if cfg.populate_wordlist && !username_bytes.is_empty() {
+                    wordlist_store.insert(username_bytes.clone());
+                }
                 if let Ok(s) = String::from_utf8(username_bytes) {
                     if !s.is_empty() {
                         username_set.insert(s);
