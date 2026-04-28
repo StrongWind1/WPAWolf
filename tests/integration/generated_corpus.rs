@@ -301,10 +301,10 @@ fn parse_manifest_fixtures() -> Vec<ManifestFixture> {
 #[test]
 fn sentinel_rejection_fixtures_increment_their_counter_and_emit_nothing() {
     let cases: &[(&str, &str)] = &[
-        ("edge/null_nonce_m1.pcap", "NULL nonce rejected (M1/M2/M3; M4 NULL is spec-valid)"),
-        ("edge/ff_nonce_m1.pcap", "0xFF nonce rejected"),
-        ("edge/null_pmkid_kde.pcap", "NULL PMKID rejected (placeholder)"),
-        ("edge/ff_pmkid_kde.pcap", "0xFF PMKID rejected"),
+        ("edge/null_nonce_m1.pcap", "NULL nonce rejected (frame dropped"),
+        ("edge/ff_nonce_m1.pcap", "0xFF nonce rejected (frame dropped"),
+        ("edge/null_pmkid_kde.pcap", "NULL PMKID rejected (placeholder; PMKID dropped"),
+        ("edge/ff_pmkid_kde.pcap", "0xFF PMKID rejected (PMKID dropped"),
     ];
 
     for (rel, label) in cases {
@@ -372,10 +372,13 @@ fn non_emitting_s_sites_increment_their_stats_counter() {
 /// in `tools/fixturegen/src/catalog.rs`). When wpawolf processes both files in
 /// one invocation, `MessageStore` accumulates all four messages under the same
 /// `MacPair` key and Phase 4 pairing fires the full set of N#E# combos --
-/// exercising FR-PAIR-CROSS-FILE in `ARCHITECTURE.md §8`. Running file B
-/// alone produces only the M3-anchored pairs (N3E2 / N3E4 / N4E3 / N2E3) and
-/// no M1-derived PMKID; running both together must additionally produce the
-/// M1 PMKID line and the N1E2 / N1E4 pairs that need the M1 `ANonce`.
+/// exercising FR-PAIR-CROSS-FILE in `ARCHITECTURE.md §8`.
+///
+/// File B alone has no Beacon/Probe Response, so the AP's SSID is unresolved
+/// and wpawolf drops every uncrackable hash (logging the AP under
+/// `[essid_not_found_summary]` in --log instead). The joint A+B run resolves
+/// the SSID from file A's Beacon and emits both the M1 PMKID line (`WPA*02*`)
+/// and the EAPOL pair line (`WPA*03*`).
 #[test]
 fn multi_file_pairing_resolves_across_files() {
     let path_a = Path::new(CORPUS_ROOT).join("edge/multi_file_a.pcap");
@@ -388,28 +391,33 @@ fn multi_file_pairing_resolves_across_files() {
     let out_alone_b = run_wpawolf(&path_b);
     let out_joint = run_wpawolf_multi(&[&path_a, &path_b]);
 
-    // File A in isolation: only the M1 carries a PMKID; no EAPOL pair forms.
+    // File A in isolation: Beacon supplies the SSID and the M1 carries a PMKID;
+    // emit the M1 PMKID line. No EAPOL pair (no M2/M3/M4 in this file).
     assert!(out_alone_a.contains("WPA*02*"), "file A alone should emit the M1 PMKID line");
     assert!(!out_alone_a.contains("WPA*03*"), "file A alone has no M2/M3/M4 -- no EAPOL pair should emit");
 
-    // File B in isolation: M2/M3/M4 cover N3E2 / N3E4 / N4E3 / N2E3, all
-    // emitted as `WPA*03*` (Wpa2PskEapol taxonomy prefix). No M1 means no
-    // M1-PMKID line.
-    assert!(out_alone_b.contains("WPA*03*"), "file B alone should emit M3-anchored EAPOL pairs");
-    assert!(!out_alone_b.contains("WPA*02*"), "file B alone has no PMKID source frame -- no `WPA*02*` should emit");
+    // File B in isolation: no Beacon means no SSID; uncrackable hashes are
+    // dropped, so no `WPA*` lines should appear. The cross-file branch below
+    // is what makes this AP's hashes recoverable.
+    let count_lines = |s: &str| -> usize { s.lines().filter(|l| l.starts_with("WPA*")).count() };
+    assert_eq!(
+        count_lines(&out_alone_b),
+        0,
+        "file B alone has no SSID -- every emission must be dropped, not shipped with a NULL ESSID"
+    );
 
-    // Joint run: both M1 PMKID and EAPOL pair lines must appear.
+    // Joint run: file A's Beacon resolves the SSID for file B's frames, so
+    // both the M1 PMKID line and the EAPOL pair line ship.
     assert!(out_joint.contains("WPA*02*"), "joint run missing the M1 PMKID line (cross-file PMKID resolution broke)");
     assert!(out_joint.contains("WPA*03*"), "joint run missing the EAPOL pair line (cross-file pairing broke)");
 
-    // Joint run must produce strictly more lines than either file alone.
-    let count_lines = |s: &str| -> usize { s.lines().filter(|l| l.starts_with("WPA*")).count() };
+    // Joint run must produce strictly more lines than file A alone (file B
+    // alone produces zero).
     let n_alone_a = count_lines(&out_alone_a);
-    let n_alone_b = count_lines(&out_alone_b);
     let n_joint = count_lines(&out_joint);
     assert!(
-        n_joint > n_alone_a && n_joint > n_alone_b,
-        "joint run produced {n_joint} lines but file A had {n_alone_a} and file B had {n_alone_b}; cross-file pairing should add at least the M1 PMKID line"
+        n_joint > n_alone_a,
+        "joint run produced {n_joint} lines but file A alone had {n_alone_a}; cross-file pairing should add at least the EAPOL pair line"
     );
 }
 

@@ -13,6 +13,7 @@ pub mod device_info;
 pub mod hashcat;
 pub mod wordlists;
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -153,7 +154,7 @@ pub struct OutputStats {
     /// `ARCHITECTURE.md §2`). Counted once per logical hash regardless of how many
     /// sinks it was fanned out to. Merged into `Stats::hash_type_emitted` after
     /// `run_output` returns.
-    pub hash_type_emitted: std::collections::HashMap<HashType, u64>,
+    pub hash_type_emitted: HashMap<HashType, u64>,
 
     /// Hash lines emitted with an empty SSID because `essid_map` had no entry for
     /// the AP. Surfaces the residual hidden-SSID gap after Beacon, Probe Response,
@@ -182,37 +183,70 @@ impl OutputStats {
 
 // --- HashSinks ---
 
-/// One `BufWriter<File>` per configured sink. Unconfigured sinks hold `None`.
+/// A configured hash sink with deferred file creation.
+///
+/// `path` is set at construction time, but no `File` is opened until the first
+/// write. Sinks that never receive a hash line therefore never call
+/// `File::create`, and an empty file is never left on disk -- the reason
+/// `--psk-sha384-out` etc. used to materialize as 0-byte files when the
+/// capture had no matching hashes.
+struct LazySink {
+    path: PathBuf,
+    writer: Option<BufWriter<std::fs::File>>,
+}
+
+impl LazySink {
+    /// Returns a writable handle, creating (and truncating) the file on first call.
+    fn writer(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
+        if self.writer.is_none() {
+            self.writer = Some(BufWriter::new(std::fs::File::create(&self.path)?));
+        }
+        // The branch above guarantees Some.
+        Ok(self.writer.as_mut().unwrap_or_else(|| unreachable!()))
+    }
+
+    /// Flushes the underlying writer if it has been opened.
+    fn flush(&mut self) -> Result<()> {
+        if let Some(w) = self.writer.as_mut() {
+            w.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// One `LazySink` per configured sink. Unconfigured sinks hold `None`.
 struct HashSinks {
-    writers: [Option<BufWriter<std::fs::File>>; SinkId::COUNT],
+    sinks: [Option<LazySink>; SinkId::COUNT],
 }
 
 impl HashSinks {
-    /// Opens a writer for every configured path. Order of array slots matches `SinkId`.
-    fn open(paths: &OutputPaths) -> Result<Self> {
-        let writers = [
-            open_writer(paths.out_22000.as_deref())?,
-            open_writer(paths.out_37100.as_deref())?,
-            open_writer(paths.out_combined.as_deref())?,
-            open_writer(paths.out_wpa1.as_deref())?,
-            open_writer(paths.out_wpa2.as_deref())?,
-            open_writer(paths.out_psk_sha256.as_deref())?,
-            open_writer(paths.out_ft.as_deref())?,
-            open_writer(paths.out_psk_sha384.as_deref())?,
-            open_writer(paths.out_ft_psk_sha384.as_deref())?,
+    /// Records the configured path for every sink without opening any file.
+    /// File creation is deferred to the first write per sink (see `LazySink`).
+    fn open(paths: &OutputPaths) -> Self {
+        let lazy = |p: Option<&Path>| p.map(|p| LazySink { path: p.to_path_buf(), writer: None });
+        let sinks = [
+            lazy(paths.out_22000.as_deref()),
+            lazy(paths.out_37100.as_deref()),
+            lazy(paths.out_combined.as_deref()),
+            lazy(paths.out_wpa1.as_deref()),
+            lazy(paths.out_wpa2.as_deref()),
+            lazy(paths.out_psk_sha256.as_deref()),
+            lazy(paths.out_ft.as_deref()),
+            lazy(paths.out_psk_sha384.as_deref()),
+            lazy(paths.out_ft_psk_sha384.as_deref()),
         ];
-        Ok(Self { writers })
+        Self { sinks }
     }
 
-    /// Returns `true` if any sink has a configured writer.
+    /// Returns `true` if any sink has a configured path.
     fn any_configured(&self) -> bool {
-        self.writers.iter().any(Option::is_some)
+        self.sinks.iter().any(Option::is_some)
     }
 
-    /// Flushes every configured writer. Called after each pipeline finishes.
+    /// Flushes every sink whose file has actually been created.
     fn flush_all(&mut self) -> Result<()> {
-        for w in self.writers.iter_mut().flatten() {
-            w.flush()?;
+        for s in self.sinks.iter_mut().flatten() {
+            s.flush()?;
         }
         Ok(())
     }
@@ -318,14 +352,17 @@ fn fan_out(
     let mut any_written = false;
     for sink in candidates.into_iter().flatten() {
         let idx = sink.as_index();
-        let Some(slot) = sinks.writers.get_mut(idx) else { continue };
-        let Some(writer) = slot.as_mut() else { continue };
+        let Some(slot) = sinks.sinks.get_mut(idx) else { continue };
+        let Some(lazy) = slot.as_mut() else { continue };
         let accepted = match item {
             FanItem::Pmkid { entry, essid, .. } => dedup.check_pmkid(sink, entry, essid),
             FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
         };
         if accepted {
             let line = build_line(&item, sink, ht);
+            // First write to a sink creates (and truncates) its file; subsequent
+            // writes reuse the same `BufWriter`. See `LazySink::writer`.
+            let writer = lazy.writer()?;
             writeln!(writer, "{line}")?;
             if let Some(c) = stats.lines_per_sink.get_mut(idx) {
                 *c += 1;
@@ -377,13 +414,14 @@ pub fn run_output(
 ) -> Result<OutputStats> {
     let mut stats = OutputStats::default();
     let mut dedup = PerSinkDedup::new();
-    let mut sinks = HashSinks::open(paths)?;
+    let mut sinks = HashSinks::open(paths);
     let any_sink = sinks.any_configured();
-    // Track distinct AP MACs that emit with no SSID. Sized at zero by default; a
-    // capture with full SSID coverage never allocates beyond the empty set's
-    // header. Counted into `stats.essid_unresolved_aps` once both pipelines
-    // finish so the summary reflects pre-dedup unique-AP count.
-    let mut unresolved_aps: std::collections::HashSet<crate::types::MacAddr> = std::collections::HashSet::new();
+    // Track APs whose hash lines we declined to emit because no ESSID was ever
+    // observed for them. Such lines are not crackable (hashcat needs the ESSID
+    // to derive the PMK), so they go to `--log` only -- nothing reaches a hash
+    // sink. Map value is the count of would-have-been-emitted lines per AP; the
+    // distinct-AP count is the map's `len()`.
+    let mut unresolved_drops: HashMap<crate::types::MacAddr, u64> = HashMap::new();
 
     // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
     //
@@ -424,24 +462,23 @@ pub fn run_output(
                 None
             };
 
-            // An empty `ssids` slice means we never observed a beacon / probe-resp / assoc
-            // for this AP, so the hash line ships with a NULL ESSID. Only credit the
-            // counter to a *line that actually shipped*: a dedup-dropped line must not
-            // be billed as an unresolved emission.
-            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) =
-                if ssids.is_empty() { (vec![&[]], true) } else { (ssids, false) };
+            // An empty `ssids` slice means we never observed a beacon / probe-resp /
+            // assoc for this AP. A hash line with a NULL ESSID is not crackable
+            // (hashcat needs the ESSID to derive the PMK), so we drop the would-be
+            // emission, track the AP for the per-AP `[essid_not_found_summary]`
+            // log line at the end of the run, and continue with the next entry.
+            if ssids.is_empty() {
+                *unresolved_drops.entry(entry.ap).or_insert(0) += 1;
+                stats.essid_unresolved_emissions += 1;
+                continue;
+            }
 
-            for essid in essid_list {
+            for essid in ssids {
                 let item = FanItem::Pmkid { entry, ft: ft_ctx, essid };
                 let written = fan_out(&mut sinks, &mut dedup, &mut stats, ht, item)?;
                 if written {
                     stats.pmkids_written += 1;
                     *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
-                    if is_unresolved {
-                        logger.log_essid_not_found(&format_mac_hex(entry.ap));
-                        stats.essid_unresolved_emissions += 1;
-                        unresolved_aps.insert(entry.ap);
-                    }
                 } else {
                     stats.dedup_dropped += 1;
                 }
@@ -473,22 +510,21 @@ pub fn run_output(
                 None
             };
 
-            // See pipeline 1 comment: bill `essid_unresolved_emissions` only to lines
-            // that actually shipped, not to dedup-dropped duplicates.
-            let (essid_list, is_unresolved): (Vec<&[u8]>, bool) =
-                if ssids.is_empty() { (vec![&[]], true) } else { (ssids, false) };
+            // See pipeline 1 comment: a missing SSID makes the line uncrackable,
+            // so we drop the emission, record the AP for end-of-run logging, and
+            // move on. No fan-out, no per-sink line counter.
+            if ssids.is_empty() {
+                *unresolved_drops.entry(pair.ap).or_insert(0) += 1;
+                stats.essid_unresolved_emissions += 1;
+                continue;
+            }
 
-            for essid in essid_list {
+            for essid in ssids {
                 let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
                 let written = fan_out(&mut sinks, &mut dedup, &mut stats, ht, item)?;
                 if written {
                     stats.pairs_written += 1;
                     *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
-                    if is_unresolved {
-                        logger.log_essid_not_found(&format_mac_hex(pair.ap));
-                        stats.essid_unresolved_emissions += 1;
-                        unresolved_aps.insert(pair.ap);
-                    }
 
                     // Per-combo / flag counters for the stats summary, bumped once per
                     // logical pair that survived at least one sink's dedup.
@@ -520,6 +556,41 @@ pub fn run_output(
     // Flush hash writers before opening auxiliary outputs.
     sinks.flush_all()?;
 
+    // --- Per-AP unresolved-SSID summary ---
+    //
+    // Walk both stores once to collect first/last packet timestamps for every
+    // AP whose hashes we dropped, then write one `[essid_not_found_summary]`
+    // log line per AP. Doing the scan as a single pass over the stores keeps
+    // the cost O(total_messages + total_pmkids) regardless of how many APs
+    // are unresolved -- matters when a corpus contains thousands of hidden
+    // BSSIDs. APs with no remaining frames in either store after the run
+    // (vanishingly rare; would need every owning frame to have been dropped
+    // post-extract) fall back to (0, 0) so the log line is still complete.
+    if !unresolved_drops.is_empty() {
+        let wanted: HashSet<crate::types::MacAddr> = unresolved_drops.keys().copied().collect();
+        let mut ranges: HashMap<crate::types::MacAddr, (u64, u64)> = HashMap::new();
+        message_store.fold_timestamp_range_into(&wanted, &mut ranges);
+        for entry in pmkid_store.iter() {
+            if !wanted.contains(&entry.ap) {
+                continue;
+            }
+            let r = ranges.entry(entry.ap).or_insert((u64::MAX, 0));
+            r.0 = r.0.min(entry.timestamp);
+            r.1 = r.1.max(entry.timestamp);
+        }
+        // Sort the AP list for deterministic log output (the underlying map is
+        // hash-based, so iteration order is otherwise unstable across runs).
+        let mut aps: Vec<crate::types::MacAddr> = unresolved_drops.keys().copied().collect();
+        aps.sort_unstable_by_key(|m| m.0);
+        for ap in aps {
+            let dropped = unresolved_drops.get(&ap).copied().unwrap_or(0);
+            let (first_us, last_us) = ranges.get(&ap).copied().unwrap_or((0, 0));
+            let first_us = if first_us == u64::MAX { 0 } else { first_us };
+            logger.log_essid_not_found_summary(&format_mac_hex(ap), dropped, first_us, last_us);
+        }
+    }
+    stats.essid_unresolved_aps = unresolved_drops.len() as u64;
+
     // --- Auxiliary outputs ---
 
     if let Some(path) = &paths.essid_list {
@@ -547,22 +618,7 @@ pub fn run_output(
         write_device_info(device_store, &mut f)?;
     }
 
-    stats.essid_unresolved_aps = unresolved_aps.len() as u64;
-
     Ok(stats)
-}
-
-// --- Internal helpers ---
-
-/// Opens a `BufWriter<std::fs::File>` at `path`, or returns `None` if path is `None`.
-///
-/// `BufWriter` reduces syscall count by batching small writes into 8 KiB chunks.
-/// The file is truncated on open (standard `File::create` semantics).
-fn open_writer(path: Option<&Path>) -> Result<Option<BufWriter<std::fs::File>>> {
-    match path {
-        Some(p) => Ok(Some(BufWriter::new(std::fs::File::create(p)?))),
-        None => Ok(None),
-    }
 }
 
 // --- Unit tests ---

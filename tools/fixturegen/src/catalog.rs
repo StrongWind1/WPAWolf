@@ -1067,13 +1067,14 @@ fn edge_section() -> Result<Vec<Fixture>> {
             link_type: LinkType::Radiotap,
             description: "Multi-file pairing -- file B: M2 + M3 + M4".to_owned(),
             packets: wrap_with_radiotap(&[h.m2, h.m3, h.m4]),
-            // File B on its own: APless combos (N2E3 / N4E3) and the
-            // N3E2 / N3E4 / N3E3 pairs all fire from the M2 / M3 / M4
-            // alone, without ever needing the M1 from file A.
-            expected_hashes: vec!["WPA*03*".to_owned()],
-            // File B has no M1 and so no PMKID source frame; the M1 PMKID
-            // line (`WPA*02*`) must not appear when this file is run alone.
-            forbidden_hashes: vec!["WPA*02*".to_owned()],
+            // File B on its own carries no Beacon / Probe Response, so the AP's
+            // SSID is unknown. wpawolf drops every uncrackable hash with no
+            // resolved ESSID and reports them via `[essid_not_found_summary]`
+            // in --log instead -- file B in isolation must therefore emit no
+            // `WPA*` lines at all. The cross-file test asserts that `WPA*03*`
+            // reappears once file A's Beacon supplies the SSID.
+            expected_hashes: Vec::new(),
+            forbidden_hashes: vec!["WPA*02*".to_owned(), "WPA*03*".to_owned()],
         });
     }
 

@@ -153,9 +153,9 @@ impl EssidMap {
     /// filter -- a useful escape hatch for operators who want every recorded SSID
     /// to enter hash output regardless of frequency.
     ///
-    /// Returns an empty `Vec` when no SSIDs are recorded for `ap` (the caller is
-    /// expected to fall back to an empty-ESSID hash line and log
-    /// `essid_not_found`).
+    /// Returns an empty `Vec` when no SSIDs are recorded for `ap`. The caller is
+    /// expected to drop the would-be hash line (no ESSID = uncrackable) and
+    /// account for it via the per-AP `[essid_not_found_summary]` log line.
     #[must_use]
     pub fn ssids_for_emit(&self, ap: &MacAddr, fanout_threshold: usize, dominance_ratio: u64) -> Vec<&[u8]> {
         let Some(entries) = self.map.get(ap) else { return Vec::new() };
@@ -219,8 +219,9 @@ impl EssidMap {
     /// Without this, an AP advertising itself under multiple link MACs (one per
     /// 2.4 / 5 / 6 GHz band) shows the SSID under each link MAC, but the EAPOL
     /// pair was already canonicalized to the MLD MAC -- so `all_for_ap(MLD)`
-    /// returns nothing and the hash is emitted with a `[essid_not_found]` log.
-    /// Folding link-MAC SSIDs into the canonical MLD MAC closes that gap.
+    /// returns nothing and the hash is dropped as uncrackable (and logged via
+    /// `[essid_not_found_summary]`). Folding link-MAC SSIDs into the canonical
+    /// MLD MAC closes that gap.
     pub fn canonicalize_pairs<F>(&mut self, mut canonicalize: F) -> u64
     where
         F: FnMut(MacAddr) -> MacAddr,

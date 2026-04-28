@@ -310,9 +310,9 @@ fn mesh_control_skip_recovers_eapol_handshake() {
     write_pcap(&pcap, &[beacon, m1, m2, m3, m4]);
     let (log, contents) = run_wpawolf_22000(&pcap, &out);
 
-    // Stats banner must show that the Mesh Control header was actually skipped.
+    // Stats banner must show that the Mesh Control header was actually unwrapped.
     assert!(
-        log.contains("Mesh Data frames with Mesh Control header skipped"),
+        log.contains("Mesh Data frames recovered"),
         "stats banner missing mesh_control_frames line; full log:\n{log}"
     );
     // Hash output must contain at least one WPA*02* (EAPOL) line.

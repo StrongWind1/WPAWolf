@@ -9,8 +9,10 @@
 //! - `unknown_linktype`   -- a pcapng EPB referenced an `interface_id` for which no
 //!   preceding IDB exists.
 //! - `unknown_akm`        -- AKM suite type outside IEEE 802.11-2024 Table 9-190.
-//! - `essid_not_found`    -- a hash line was emitted for an AP whose SSID was never
-//!   observed on the wire.
+//! - `essid_not_found_summary` -- per-AP summary line for hashes dropped because
+//!   no ESSID was ever observed for the AP. Carries the AP MAC, the count of
+//!   would-have-been-emitted lines, and the earliest / latest packet timestamps
+//!   the AP appeared in. Emitted once per affected AP at end of run.
 //! - `capture_read_error` -- per-file ingest error, typically a truncated trailing
 //!   packet record (FR-IN-10).
 //! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3) or
@@ -81,9 +83,17 @@ impl Logger {
         self.write_line(&format!("[unknown_akm] type={akm_byte}"));
     }
 
-    /// Logs when no ESSID could be resolved for a hash line's AP.
-    pub fn log_essid_not_found(&mut self, ap_hex: &str) {
-        self.write_line(&format!("[essid_not_found] ap={ap_hex}"));
+    /// Logs a per-AP summary for hashes dropped due to a missing ESSID.
+    ///
+    /// Emitted once per AP at the end of the output run with the count of
+    /// would-have-been-emitted hash lines and the earliest / latest packet
+    /// timestamps the AP appeared in. The timestamps let an operator open the
+    /// originating capture and locate the AP's traffic without scrubbing the
+    /// whole file.
+    pub fn log_essid_not_found_summary(&mut self, ap_hex: &str, dropped: u64, first_us: u64, last_us: u64) {
+        self.write_line(&format!(
+            "[essid_not_found_summary] ap={ap_hex} dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
+        ));
     }
 
     /// Logs an EAPOL-Key frame whose Key Nonce was rejected as a sentinel value.
@@ -181,7 +191,7 @@ mod tests {
         logger.log_plcp_error(999, 1, "AVS length mismatch");
         logger.log_unknown_linktype(0xDEAD_u32);
         logger.log_unknown_akm(0xFF);
-        logger.log_essid_not_found("aabbccddeeff");
+        logger.log_essid_not_found_summary("aabbccddeeff", 3, 1_000, 9_000);
         logger.log_capture_read_error(std::path::Path::new("/tmp/example.pcap"), "truncated");
         assert!(logger.flush().is_ok());
         assert!(logger.writer.is_none(), "no-op logger must keep writer absent");

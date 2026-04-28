@@ -136,7 +136,7 @@ fn orphan_final_fragment_does_not_reassemble() {
     // No reassembled MSDUs counter should appear (the line only prints when > 0).
     assert!(!stderr.contains("reassembled MSDUs"), "expected no reassembled MSDUs; stderr:\n{stderr}");
     // But the disorder counter should fire.
-    assert!(stderr.contains("fragments dropped (out of order)"), "expected disorder counter; stderr:\n{stderr}");
+    assert!(stderr.contains("fragments dropped (out of order"), "expected disorder counter; stderr:\n{stderr}");
 }
 
 #[test]

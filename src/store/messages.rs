@@ -156,6 +156,34 @@ impl MessageStore {
         (old_group_count as u64).saturating_sub(self.groups.len() as u64)
     }
 
+    /// Folds the earliest and latest message timestamps for every AP MAC in
+    /// `wanted` into the `out` map.
+    ///
+    /// For each AP MAC present in `wanted`, scans every group whose key has
+    /// that AP and updates the `(first_us, last_us)` tuple in `out` with the
+    /// minimum / maximum `EapolMessage::timestamp` observed. Entries are
+    /// inserted on demand. APs with no matching messages are left untouched.
+    ///
+    /// Used by the output pipeline to log a per-AP timestamp range for
+    /// "`essid_not_found`" APs so the operator can locate the source frames in
+    /// the original capture without having to grep the whole `MessageStore`.
+    pub fn fold_timestamp_range_into(
+        &self,
+        wanted: &std::collections::HashSet<MacAddr>,
+        out: &mut HashMap<MacAddr, (u64, u64)>,
+    ) {
+        for (mac_pair, msgs) in &self.groups {
+            if !wanted.contains(&mac_pair.ap) {
+                continue;
+            }
+            for msg in msgs {
+                let entry = out.entry(mac_pair.ap).or_insert((u64::MAX, 0));
+                entry.0 = entry.0.min(msg.timestamp);
+                entry.1 = entry.1.max(msg.timestamp);
+            }
+        }
+    }
+
     /// Counts (AP, STA) groups where any M1 `ANonce` differs from any M3 `ANonce`.
     ///
     /// Per IEEE 802.11-2024 §12.7.6.4, the `ANonce` in M3 must equal the `ANonce` in M1

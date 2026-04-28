@@ -5,7 +5,7 @@
 //! dedup stats (generated vs written), AKM distribution, and ESSID count. Prints a
 //! formatted summary to stderr unconditionally at the end of every run.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::types::{HashType, MacAddr, MsgType};
 
@@ -269,8 +269,25 @@ pub struct Stats {
 
     /// EAPOL pairs generated (before dedup) -- includes PMKIDs in the denominator.
     pub eapol_pairs_generated: u64,
-    /// Input file path (for the summary header).
+    /// Last input file path processed (shown in summary as the most recent file).
     pub last_file: String,
+    /// Number of input capture files actually opened by the ingest loop.
+    ///
+    /// Increments once per file that was successfully opened, regardless of how
+    /// many packets it contained. Combined with `file_formats_seen`,
+    /// `endians_seen`, and `dlt_descs_seen`, lets the Phase 1 banner reflect
+    /// every file processed when a directory is walked, not just the last one.
+    pub input_file_count: u64,
+    /// Histogram of capture file formats observed across the input set.
+    /// Key is the human-readable format string (e.g. "pcap 2.4" or "pcapng 1.0");
+    /// value is the count of files reporting that format. `BTreeMap` for
+    /// deterministic ordering in the summary output.
+    pub file_formats_seen: BTreeMap<String, u64>,
+    /// Histogram of capture file endianness values observed (e.g. "little endian").
+    pub endians_seen: BTreeMap<String, u64>,
+    /// Histogram of capture file link-types observed
+    /// (e.g. "`DLT_IEEE802_11_RADIO` (127)").
+    pub dlt_descs_seen: BTreeMap<String, u64>,
 
     // --- EAPOL auth-length maximums (body length = eapol_frame.len()) ---
     // hcxpcapngtool prints these as "authlen (authlen + EAPAUTH_SIZE)" where EAPAUTH_SIZE = 4.
@@ -315,13 +332,9 @@ pub struct Stats {
 
     // --- hcxpcapngtool parity stats ---
 
-    // File metadata (populated once after opening each file).
-    /// Human-readable capture format string, e.g. "pcap 2.4" or "pcapng 1.0".
-    pub file_format: String,
-    /// Endianness of the capture system, e.g. "little endian".
-    pub endianness: String,
-    /// DLT description, e.g. "`DLT_IEEE802_11_RADIO` (127)".
-    pub dlt_desc: String,
+    // File metadata is now aggregated across the whole input set via
+    // `file_formats_seen` / `endians_seen` / `dlt_descs_seen` and the
+    // `input_file_count` counter. See those fields for details.
     /// Timestamp of the first packet seen (microseconds since Unix epoch).
     pub timestamp_first_us: u64,
     /// Timestamp of the last packet seen (microseconds since Unix epoch).
@@ -480,12 +493,14 @@ pub struct Stats {
     /// under a band link MAC whose SSID would otherwise have been unreachable
     /// via the MLD-keyed pair lookup at output time.
     pub essid_link_macs_merged: u64,
-    /// Hash lines emitted with an empty SSID because no Beacon, Probe Response,
-    /// `AssocReq` / `ReassocReq`, directed Probe Request, nor MLD link-MAC
-    /// fallback yielded an SSID for the AP. Crackability is impaired -- hashcat
-    /// derives the PMK from PSK + SSID so an empty SSID never matches.
+    /// Hash lines suppressed because no Beacon, Probe Response, `AssocReq` /
+    /// `ReassocReq`, directed Probe Request, nor MLD link-MAC fallback yielded
+    /// an SSID for the AP. Hashcat derives the PMK from PSK + SSID so an empty
+    /// SSID is uncrackable; we drop the line and emit a per-AP
+    /// `[essid_not_found_summary]` entry to `--log` instead. Counts every
+    /// would-have-been-emitted line, including the multi-SSID fan-out hits.
     pub essid_unresolved_emissions: u64,
-    /// Distinct AP MACs that produced at least one `essid_unresolved_emissions`.
+    /// Distinct AP MACs that contributed to `essid_unresolved_emissions`.
     /// Lower bound on the count of "truly hidden" APs in the capture.
     pub essid_unresolved_aps: u64,
 
@@ -749,6 +764,14 @@ impl Stats {
         (s24, s56)
     }
 
+    /// Renders a histogram map as `"key1 (n1), key2 (n2)"`, sorted by descending
+    /// count then by key for deterministic, eyeball-friendly output.
+    fn format_histogram_self(map: &BTreeMap<String, u64>) -> String {
+        let mut entries: Vec<(&String, &u64)> = map.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        entries.iter().map(|(k, n)| format!("{k} ({n})")).collect::<Vec<_>>().join(", ")
+    }
+
     /// Prints the four-section summary to stderr.
     ///
     /// Sections:
@@ -799,17 +822,37 @@ impl Stats {
         // ======================================================================
         section!(1, "Ingest");
 
-        if !self.last_file.is_empty() {
-            stat!("file name", self.last_file);
-        }
-        if !self.file_format.is_empty() {
-            stat!("file format", self.file_format);
-        }
-        if !self.endianness.is_empty() {
-            stat!("endian", self.endianness);
-        }
-        if !self.dlt_desc.is_empty() {
-            stat!("network type", self.dlt_desc);
+        // File metadata: when more than one file was processed (directory walk),
+        // surface a count + histogram of formats / endians / DLTs so the operator
+        // can spot a mixed-format input set. Single-file runs keep the original
+        // one-line layout for hcxpcapngtool parity.
+        if self.input_file_count > 1 {
+            stat!("input files processed", self.input_file_count);
+            if !self.file_formats_seen.is_empty() {
+                stat!("file formats seen", Self::format_histogram_self(&self.file_formats_seen));
+            }
+            if !self.endians_seen.is_empty() {
+                stat!("endians seen", Self::format_histogram_self(&self.endians_seen));
+            }
+            if !self.dlt_descs_seen.is_empty() {
+                stat!("network types seen", Self::format_histogram_self(&self.dlt_descs_seen));
+            }
+            if !self.last_file.is_empty() {
+                stat!("last file processed", self.last_file);
+            }
+        } else {
+            if !self.last_file.is_empty() {
+                stat!("file name", self.last_file);
+            }
+            if let Some(fmt) = self.file_formats_seen.keys().next() {
+                stat!("file format", fmt);
+            }
+            if let Some(en) = self.endians_seen.keys().next() {
+                stat!("endian", en);
+            }
+            if let Some(d) = self.dlt_descs_seen.keys().next() {
+                stat!("network type", d);
+            }
         }
         if self.timestamp_first_us > 0 {
             stat!("first packet (epoch s)", self.timestamp_first_us / 1_000_000);
@@ -818,11 +861,11 @@ impl Stats {
             stat!("duration (s)", dur_s);
         }
         stat!("packets total", self.total_packets);
-        nz!("link/parse errors", self.link_errors);
-        nz!("  MAC header malformed", self.malformed_mac_hdr);
-        nz!("frames with non-zero Protocol Version (forgiven)", self.lenient_proto_version);
-        nz!("capture files with truncated trailing record", self.truncated_capture_files);
-        nz!("  trailing packets unread (see --log)", self.unreadable_packets);
+        nz!("link/parse errors (frames dropped)", self.link_errors);
+        nz!("  MAC header malformed (frame dropped)", self.malformed_mac_hdr);
+        nz!("frames with non-zero Protocol Version (forgiven; processed)", self.lenient_proto_version);
+        nz!("capture files with truncated trailing record (earlier records kept)", self.truncated_capture_files);
+        nz!("  trailing packets unread (dropped; see --log)", self.unreadable_packets);
 
         // ======================================================================
         // Phase 2 -- Decode: link/802.11 frame classification, per-band
@@ -837,15 +880,15 @@ impl Stats {
         nz!("relay (WDS) frames", self.relay_frames);
         nz!("WPA encrypted data frames", self.wpa_encrypted_data);
         nz!("PMF-encrypted management frames (802.11w)", self.mgmt_protected_frames);
-        nz!("  Action body skipped (FT/Mesh PMKIDs unavailable)", self.mgmt_protected_action_skipped);
+        nz!("  Action body dropped (PMF-encrypted; FT/Mesh PMKIDs unavailable)", self.mgmt_protected_action_skipped);
         nz!("A-MSDU aggregated Data frames (802.11n)", self.amsdu_frames_seen);
-        nz!("  subframes parsed for hidden EAPOL", self.amsdu_subframes_total);
-        nz!("frames with trailing FCS stripped (radiotap Flags 0x10)", self.fcs_stripped_frames);
+        nz!("  subframes recovered for hidden EAPOL", self.amsdu_subframes_total);
+        nz!("frames with trailing FCS stripped (recovered; radiotap Flags 0x10)", self.fcs_stripped_frames);
         nz!("radiotap A-MPDU Status field present (it_present bit 20)", self.ampdu_status_frames);
-        nz!("fragments seen (non-final, buffered)", self.fragment_stats.fragments_seen);
-        nz!("  reassembled MSDUs", self.fragment_stats.fragments_reassembled);
-        nz!("  fragments dropped (out of order)", self.fragment_stats.fragments_dropped_disorder);
-        nz!("  fragments dropped (overflow)", self.fragment_stats.fragments_dropped_overflow);
+        nz!("fragments seen (non-final, buffered for reassembly)", self.fragment_stats.fragments_seen);
+        nz!("  reassembled MSDUs (recovered)", self.fragment_stats.fragments_reassembled);
+        nz!("  fragments dropped (out of order; unrecoverable)", self.fragment_stats.fragments_dropped_disorder);
+        nz!("  fragments dropped (buffer overflow; unrecoverable)", self.fragment_stats.fragments_dropped_overflow);
         nz!("AWDL frames (Apple AWDL)", self.awdl_frames);
         nz!("on 2.4 GHz band (from radiotap)", self.band_24ghz);
         nz!("on 5 GHz band (from radiotap)", self.band_5ghz);
@@ -874,9 +917,9 @@ impl Stats {
 
         // Management subtype counts -- everything captured into stores.
         nz!("BEACON (total)", self.beacon_frames);
-        nz!("  SSID wildcard (hidden)", self.beacon_ssid_wildcard);
-        nz!("  SSID zeroed", self.beacon_ssid_zeroed);
-        nz!("  SSID oversized (malformed)", self.beacon_ssid_oversized);
+        nz!("  SSID wildcard (hidden; beacon retained)", self.beacon_ssid_wildcard);
+        nz!("  SSID zeroed (beacon retained)", self.beacon_ssid_zeroed);
+        nz!("  SSID oversized (SSID rejected; beacon retained)", self.beacon_ssid_oversized);
         nz!("  RSNXE SAE-H2E required (WPA3)", self.rsnxe_sae_h2e);
         nz!("  RSNXE SAE-PK supported", self.rsnxe_sae_pk);
         nz!("  RSNXE Secure LTF (11az)", self.rsnxe_secure_ltf);
@@ -946,8 +989,8 @@ impl Stats {
         nz!("  ANQP Domain Name List parsed", self.anqp_domain_name);
         nz!("  ANQP NAI Realm parsed", self.anqp_nai_realm);
         nz!("  ANQP HS2 Operator Friendly Name parsed", self.anqp_hs_operator_friendly_name);
-        nz!("  ANQP unknown Info ID", self.anqp_unknown_info_id);
-        nz!("  ANQP fragmented (skipped)", self.anqp_fragmented_skipped);
+        nz!("  ANQP unknown Info ID (parser skipped)", self.anqp_unknown_info_id);
+        nz!("  ANQP fragmented (dropped; reassembly not implemented)", self.anqp_fragmented_skipped);
         nz!("ACTION NO ACK (total)", self.action_no_ack_frames);
         nz!("ATIM (total)", self.atim_frames);
         nz!("MEASUREMENT PILOT (total)", self.measurement_pilot_frames);
@@ -955,8 +998,8 @@ impl Stats {
 
         // Auxiliary extracted metadata.
         stat!("ESSID (unique APs seen)", self.essid_count);
-        nz!("  hash lines emitted without resolved SSID", self.essid_unresolved_emissions);
-        nz!("    distinct APs (lower bound on truly hidden APs)", self.essid_unresolved_aps);
+        nz!("  hash lines dropped (no SSID resolved; not crackable)", self.essid_unresolved_emissions);
+        nz!("    distinct APs dropped (see [essid_not_found_summary] in --log)", self.essid_unresolved_aps);
         nz!("SSID List IE entries extracted", self.ssid_list_entries);
         nz!("Country codes extracted", self.country_codes_extracted);
         nz!("Mesh IDs extracted", self.mesh_ids_extracted);
@@ -1001,26 +1044,29 @@ impl Stats {
             );
         }
         stat!("  M4 messages", self.eapol_m4);
-        nz!("  NULL nonce rejected (M1/M2/M3; M4 NULL is spec-valid)", self.null_nonce_rejected);
-        nz!("  0xFF nonce rejected", self.ff_nonce_rejected);
-        nz!("  NULL MIC rejected (M2/M3/M4)", self.null_mic_rejected);
-        nz!("  0xFF MIC rejected (M2/M3/M4)", self.ff_mic_rejected);
-        nz!("  NULL PMKID rejected (placeholder)", self.null_pmkid_rejected);
-        nz!("  0xFF PMKID rejected", self.ff_pmkid_rejected);
+        nz!("  NULL nonce rejected (frame dropped; M1/M2/M3; M4 NULL is spec-valid)", self.null_nonce_rejected);
+        nz!("  0xFF nonce rejected (frame dropped)", self.ff_nonce_rejected);
+        nz!("  NULL MIC rejected (frame dropped; M2/M3/M4)", self.null_mic_rejected);
+        nz!("  0xFF MIC rejected (frame dropped; M2/M3/M4)", self.ff_mic_rejected);
+        nz!("  NULL PMKID rejected (placeholder; PMKID dropped)", self.null_pmkid_rejected);
+        nz!("  0xFF PMKID rejected (PMKID dropped)", self.ff_pmkid_rejected);
         if self.eapol_time_gap_max_us > 0 {
             stat!("  session time gap max (ms)", self.eapol_time_gap_max_us / 1_000);
         }
-        nz!("  ANonce M1/M3 mismatch sessions (spec §12.7.6.4)", self.anonce_m1_m3_mismatch_sessions);
+        nz!(
+            "  ANonce M1/M3 mismatch sessions (diagnostic; both anchors emitted; spec §12.7.6.4)",
+            self.anonce_m1_m3_mismatch_sessions
+        );
 
         // EAPOL direction classification (WDS tier breakdown).
         nz!("EAPOL classified by direction (Tier 1)", self.eapol_tier1_direction);
-        nz!("  WDS via essid_map (Tier 1b)", self.eapol_tier1b_essid);
-        nz!("  WDS via ACK discovery (Tier 2)", self.eapol_tier2_ack_discovery);
-        nz!("  WDS flag-based fallback (Tier 3)", self.eapol_tier3_flag_fallback);
-        nz!("  direction/ACK mismatches", self.eapol_ack_mismatches);
+        nz!("  WDS via essid_map (Tier 1b; recovered)", self.eapol_tier1b_essid);
+        nz!("  WDS via ACK discovery (Tier 2; recovered)", self.eapol_tier2_ack_discovery);
+        nz!("  WDS flag-based fallback (Tier 3; recovered)", self.eapol_tier3_flag_fallback);
+        nz!("  direction/ACK mismatches (diagnostic; frame still paired)", self.eapol_ack_mismatches);
         nz!("  preauthentication frames (EtherType 0x88C7)", self.eapol_preauth_frames);
-        nz!("  LLC accepted but EAPOL parse rejected", self.eapol_llc_invalid);
-        nz!("  Mesh Data frames with Mesh Control header skipped", self.mesh_control_frames);
+        nz!("  LLC accepted but EAPOL parse rejected (frame dropped)", self.eapol_llc_invalid);
+        nz!("  Mesh Data frames recovered (Mesh Control header unwrapped)", self.mesh_control_frames);
         nz!("  EAP-Success frames (RFC 3748 §4.2)", self.eap_success_frames);
         nz!("  EAP-Failure frames (RFC 3748 §4.2)", self.eap_failure_frames);
 
@@ -1069,18 +1115,21 @@ impl Stats {
         nz!("  N2E3 authorized (SNonce from M2, EAPOL from M3, AP-less)", self.pairs_written_n2e3);
         nz!("  N4E3 authorized (SNonce from M4, EAPOL from M3, AP-less)", self.pairs_written_n4e3);
         nz!("  N3E4 authorized (ANonce from M3, EAPOL from M4)", self.pairs_written_n3e4);
-        nz!("  NC flag (error-corr applied)", self.pairs_nc);
-        nz!("  LE endianness flag", self.pairs_le);
-        nz!("  BE endianness flag", self.pairs_be);
+        nz!("  NC flag set on pair (nonce-error-correction hint passed to hashcat)", self.pairs_nc);
+        nz!("  LE endianness flag set on pair (LE-router hint passed to hashcat)", self.pairs_le);
+        nz!("  BE endianness flag set on pair (BE-router hint passed to hashcat)", self.pairs_be);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
             stat!("  RC gap max (suggested NC threshold)", self.rc_gap_max);
         }
 
-        // PMKID family routing (mode 22000 vs 37100). Per ARCHITECTURE.md §2:
-        // non-FT bucket = WPA2-PSK / PSK-SHA256 / PSK-SHA384;
-        // FT bucket = FT-PSK / FT-PSK-SHA384.
-        nz!("non-FT PSK family (mode 22000: WPA2-PSK/SHA256/SHA384)", self.pmkid_wpa2_psk);
-        nz!("FT-PSK family (mode 37100: FT-PSK/FT-PSK-SHA384)", self.pmkid_ft_psk);
+        // PMKIDs found by AKM family (extraction-time tally, before dedup and
+        // before the type-1-vs-type-2 routing). The actual emitted-line counts
+        // appear in the per-hash-type breakdown above and the per-sink counters
+        // below; this row just shows how many raw PMKIDs each AKM family
+        // contributed. Per ARCHITECTURE.md §2: non-FT family = WPA2-PSK /
+        // PSK-SHA256 / PSK-SHA384; FT family = FT-PSK / FT-PSK-SHA384.
+        nz!("PMKIDs found by AKM family (non-FT: WPA2-PSK/SHA256/SHA384)", self.pmkid_wpa2_psk);
+        nz!("PMKIDs found by AKM family (FT: FT-PSK/FT-PSK-SHA384)", self.pmkid_ft_psk);
 
         // Per-sink hash output rows. Each configured sink shows its file path and
         // the line / dedup-dropped counters; unconfigured sinks show "not configured"
@@ -1108,7 +1157,7 @@ impl Stats {
             stat!(label, display);
             if !path.is_empty() {
                 stat!("  lines written", lines);
-                nz!("  dedup dropped", dropped);
+                nz!("  dedup dropped (duplicate hashes; not written)", dropped);
             }
         }
 
@@ -1225,6 +1274,10 @@ mod tests {
         assert_eq!(s.null_pmkid_rejected, 0);
         assert_eq!(s.ff_pmkid_rejected, 0);
         assert!(s.last_file.is_empty());
+        assert_eq!(s.input_file_count, 0);
+        assert!(s.file_formats_seen.is_empty());
+        assert!(s.endians_seen.is_empty());
+        assert!(s.dlt_descs_seen.is_empty());
         assert_eq!(s.m1_auth_len_max, 0);
         assert_eq!(s.m2_auth_len_max, 0);
         assert_eq!(s.m3_auth_len_max, 0);
@@ -1315,6 +1368,26 @@ mod tests {
         s.pairs_le = 2;
         s.rc_gap_max = 3;
         s.last_file = "example.pcap".to_owned();
-        s.print_summary(); // must not panic
+        s.input_file_count = 1;
+        *s.file_formats_seen.entry("pcap 2.4".to_owned()).or_insert(0) += 1;
+        *s.endians_seen.entry("little endian".to_owned()).or_insert(0) += 1;
+        *s.dlt_descs_seen.entry("DLT_IEEE802_11_RADIO (127)".to_owned()).or_insert(0) += 1;
+        s.print_summary(); // must not panic (single-file branch)
+    }
+
+    #[test]
+    fn print_summary_multi_file_branch_does_not_panic() {
+        // Exercises the directory-walk display: count > 1 with mixed formats /
+        // endians / DLTs across the input set.
+        let mut s = Stats::new();
+        s.input_file_count = 17;
+        *s.file_formats_seen.entry("pcap 2.4".to_owned()).or_insert(0) += 14;
+        *s.file_formats_seen.entry("pcapng 1.0".to_owned()).or_insert(0) += 3;
+        *s.endians_seen.entry("little endian".to_owned()).or_insert(0) += 16;
+        *s.endians_seen.entry("big endian".to_owned()).or_insert(0) += 1;
+        *s.dlt_descs_seen.entry("DLT_IEEE802_11_RADIO (127)".to_owned()).or_insert(0) += 12;
+        *s.dlt_descs_seen.entry("DLT_IEEE802_11 (105)".to_owned()).or_insert(0) += 5;
+        s.last_file = "/captures/last.pcap".to_owned();
+        s.print_summary();
     }
 }

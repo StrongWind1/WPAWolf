@@ -149,8 +149,8 @@ per-AP / per-STA state crosses the file boundary.
 | Handshake spanning two files (M1 in file A, M2/3/4 in file B) | not paired -- file A's M1 is freed before file B is opened | paired -- M1 sits in `MessageStore` until file B's M2/3/4 arrives |
 | PMKID in file A + EAPOL in file B for same (AP, STA) | both emitted independently per file (no cross-pairing)   | both fan out into the shared stores; emission sees the union |
 | File-open failure                                    | prints "failed to open" to stdout, sets exit failure, continues to next file | warning on stderr, continues to next file                |
-| Per-file pcapng metadata (SHB hardware/OS/app strings, IDB list) | tracked and emitted per file                             | tracked once; the most recent file's metadata wins in the summary |
-| File-format summary block                            | one summary per file                                     | one summary at the end of the run; `last_file` field shows the most recent file |
+| Per-file pcapng metadata (SHB hardware/OS/app strings, IDB list) | tracked and emitted per file                             | tracked once; multi-file runs surface the format / endian / DLT histogram across the whole input set |
+| File-format summary block                            | one summary per file                                     | one summary at the end of the run; single-file runs render the original `file name / file format / endian / network type` quartet, multi-file runs render `input files processed`, `file formats seen`, `endians seen`, `network types seen`, and `last file processed` |
 | Pairing pass                                         | runs at end of each file, before `closelists()`          | runs once, after every input file has been read          |
 
 The reference C implementation in `hcxpcapngtool.c` (`processcapfile`,
@@ -239,7 +239,7 @@ scheme (and exactly which rows crack today), see
 | `-I FILE` `--identity-output`  | EAP identity strings (RFC 3748 §5.1, autohex) |
 | `-U FILE` `--username-output`  | EAP peer-identity strings from inner methods (MSCHAPv2, LEAP, ...) |
 | `-D FILE` `--device-output`    | WPS device info (tab-separated, sorted by manufacturer) |
-| `--log FILE`                   | structured malformed-frame / skipped-packet log |
+| `--log FILE`                   | structured malformed-frame / skipped-packet log; also carries one `[essid_not_found_summary]` line per AP whose hashes were dropped because no SSID was ever observed |
 
 ### Output filters
 
@@ -348,6 +348,20 @@ assoc/reassoc histogram, PMKID + EAPOL discovery, NULL / 0xFF
 rejection counters) come before Phase 4; full catalogue in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §9.
 
+Every "issue" stat row is suffixed with whether the count means data
+was **dropped**, **recovered**, or **diagnostic**. For example
+`fragments dropped (out of order; unrecoverable)` is a real loss of
+EAPOL bytes, `Mesh Data frames recovered (Mesh Control header
+unwrapped)` is a positive (the mesh wrapper was unwrapped so the
+inner LLC could be processed), and `direction/ACK mismatches
+(diagnostic; frame still paired)` is just a capture-quality note --
+the frame was paired anyway.
+
+Hash sinks are created **lazily**: a configured sink that never
+receives a matching hash never has its file created on disk. This
+keeps `--psk-sha384-out` (and any other sink whose hash type doesn't
+appear in the corpus) from materialising as a 0-byte file.
+
 The N#E# notation (`N1E2`, `N1E4`, ..., `N3E4`) is the wpawolf taxonomy
 form: **N**once from message **#**, **E**APOL frame from message **#**.
 The same six combos appear under the older `M#E#` notation
@@ -385,7 +399,7 @@ and the full message-pair byte spec are in
   consulted before the AKM map, correcting the WPA1+RSN-descriptor+
   PMKID-KDE vendor quirk and other mixed-mode beacon discrepancies
 - Strict clippy (pedantic + nursery + cargo), `make check-all` zero
-  warnings, 689 tests across lib + binary + integration suites
+  warnings, 712 tests across lib + binary + integration suites
 - Companion [`wpawolf-fixturegen`](tools/fixturegen/) workspace crate
   emits a deterministic 75-fixture pcap/pcapng corpus covering every
   (hash type x PMKID site x N#E# combo x link-layer x edge case)

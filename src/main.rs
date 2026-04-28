@@ -169,13 +169,15 @@ struct Cli {
     /// EAPOL data), `plcp_error` (link-layer header validation failed -- radiotap /
     /// PPI / Prism / AVS error, or an unsupported DLT), `unknown_linktype` (pcapng
     /// EPB referenced an `interface_id` with no preceding IDB), `unknown_akm`
-    /// (suite outside [IEEE 802.11-2024] Table 9-190), `essid_not_found` (hash line
-    /// emitted for an AP whose SSID was never observed), `capture_read_error`
-    /// (per-file ingest failure -- typically a truncated trailing packet),
-    /// `invalid_nonce` / `invalid_mic` / `invalid_pmkid` (NULL or all-`0xFF` sentinels
-    /// rejected at extract time). Per-category field layout matches `src/log.rs`:
-    /// frame-bearing categories lead with `timestamp_us`, others (e.g. `unknown_akm`,
-    /// `essid_not_found`) carry only the event-specific field(s).
+    /// (suite outside [IEEE 802.11-2024] Table 9-190), `essid_not_found_summary`
+    /// (per-AP summary of hash lines dropped because no SSID was observed for the
+    /// AP -- carries `dropped`, `first_seen_us`, `last_seen_us`),
+    /// `capture_read_error` (per-file ingest failure -- typically a truncated
+    /// trailing packet), `invalid_nonce` / `invalid_mic` / `invalid_pmkid` (NULL or
+    /// all-`0xFF` sentinels rejected at extract time). Per-category field layout
+    /// matches `src/log.rs`: frame-bearing categories lead with `timestamp_us`,
+    /// others (e.g. `unknown_akm`, `essid_not_found_summary`) carry only the
+    /// event-specific field(s).
     #[arg(long)]
     log: Option<std::path::PathBuf>,
 
@@ -384,12 +386,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             },
         };
 
-        // Populate file metadata from the reader (format, endianness, DLT).
-        // Multiple files overwrite; the last file's metadata is shown in the summary.
+        // Populate file metadata from the reader. Histograms aggregate across
+        // every input file so a directory walk can report a count + format /
+        // endian / DLT distribution rather than only the last file's values.
+        stats.input_file_count += 1;
         let meta = reader.file_metadata();
-        stats.file_format = meta.format;
-        stats.endianness = meta.endian.to_owned();
-        stats.dlt_desc = meta.dlt_desc;
+        *stats.file_formats_seen.entry(meta.format).or_insert(0) += 1;
+        *stats.endians_seen.entry(meta.endian.to_owned()).or_insert(0) += 1;
+        *stats.dlt_descs_seen.entry(meta.dlt_desc).or_insert(0) += 1;
 
         loop {
             match reader.next_packet() {

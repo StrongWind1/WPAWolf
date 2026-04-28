@@ -1754,8 +1754,16 @@ multiple ESSIDs exist for the same AP (SSID change), use the one
 closest in time to the handshake.
 
 #### FR-ESSID-3
-If no ESSID is found for an AP, still emit the hash with an empty ESSID
-field (allowed by hashcat). Log a warning.
+If no ESSID is found for an AP, **drop** the would-have-been-emitted hash
+line and account for it via the `[essid_not_found_summary]` log category
+in `--log` (one line per affected AP with `dropped=N`,
+`first_seen_us=`, `last_seen_us=`). Hashcat derives the PMK from
+PSK + ESSID, so an empty-ESSID line can never match -- emitting it would
+waste downstream cracking time and trigger `Salt-value exception` /
+`Token length exception` parser errors in mode 22000 / 37100. The
+Phase 3 stats banner surfaces the same information as
+`hash lines dropped (no SSID resolved; not crackable)` with the
+`distinct APs dropped` sub-counter.
 
 #### FR-OUT-1
 Mode 22000 PMKID line shape (canonical type 02; types 04, 08 use the
@@ -1928,8 +1936,11 @@ summary statistics are printed unconditionally to stderr on every run.
 - `unknown_linktype`    - pcapng EPB referenced an `interface_id` for which no
   preceding IDB exists; the packet is dropped
 - `unknown_akm`         - AKM suite type outside [IEEE 802.11-2024] Table 9-190
-- `essid_not_found`     - hash line emitted for an AP whose SSID was never
-  observed on the wire
+- `essid_not_found_summary` - per-AP summary: the AP's SSID was never observed,
+  so every would-have-been-emitted hash line for it was dropped at output
+  time as uncrackable. One line per affected AP at end of run; carries `ap=`,
+  `dropped=N`, `first_seen_us=`, `last_seen_us=` so the operator can locate
+  the source frames in the original capture
 - `capture_read_error`  - per-file ingest error (typically a truncated trailing
   packet record per FR-IN-10); the file is closed and the run continues
 - `invalid_nonce`       - EAPOL frame discarded: nonce was NULL (M1/M2/M3) or
@@ -1942,8 +1953,9 @@ Format: `[category] <category-specific fields>`. Per-category field layout
 matches the `Logger::log_*` method signatures. Frame-bearing categories
 (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`,
 `invalid_pmkid`) lead with `timestamp_us`; `unknown_linktype`,
-`unknown_akm`, `essid_not_found`, and `capture_read_error` do not (the
-event has no single packet timestamp).
+`unknown_akm`, `essid_not_found_summary`, and `capture_read_error` do not
+(the event has no single packet timestamp; the summary line carries its
+own `first_seen_us` / `last_seen_us` range fields).
 
 ### §8.9  Correctness, performance, dependencies, build, threading
 
@@ -2045,13 +2057,33 @@ immediately see which phase a parse failure occurred in.
 
 ### §9.1  Phase 1 (Ingest) counters
 
-- File count, total bytes read.
-- Per-format counts: pcap (LE/BE us/ns/Kuznetzov), pcapng (multi-SHB,
-  multi-IDB, nanosecond-resolution interfaces), gzip wrappers.
-- Endianness per pcap / per pcapng section.
-- Truncated-block count, malformed-block count.
+- `input_file_count` -- regular files actually opened by the ingest loop.
+  Single-file runs render the original `file name / file format / endian /
+  network type` quartet for hcxpcapngtool parity; multi-file runs (when
+  positional args expand to more than one capture, typically from a
+  recursive directory walk) instead surface a histogram-style banner:
+  `input files processed`, `file formats seen` (e.g. `pcap 2.4 (1789),
+  pcapng 1.0 (8)`), `endians seen`, `network types seen`, `last file
+  processed`.
+- `file_formats_seen` / `endians_seen` / `dlt_descs_seen` --
+  `BTreeMap<String, u64>` histograms populated once per file from the
+  reader's `FileMetadata`. Sorted by descending count (then key) at
+  display time so an operator can spot a single odd file in a
+  thousand-capture corpus.
+- Truncated-trailing-record count (`truncated_capture_files`,
+  `unreadable_packets`); MAC-header-malformed count
+  (`malformed_mac_hdr`); link/parse error count (`link_errors`); forgiven
+  non-zero Protocol Version frames (`lenient_proto_version`).
 - FCS framing count (radiotap Flags bit 0x10).
 - Multi-member gzip stream count.
+
+Every "issue" stat is suffixed with whether the count means data was
+**dropped** (frames or hashes lost), **recovered** (the issue was worked
+around and the data was processed), or **diagnostic** (the issue was
+noted but had no data impact). For example `link/parse errors (frames
+dropped)`, `frames with non-zero Protocol Version (forgiven; processed)`,
+`capture files with truncated trailing record (earlier records kept)`.
+This convention applies across every phase.
 
 ### §9.2  Phase 2 (Decode) counters
 
@@ -2107,6 +2139,12 @@ immediately see which phase a parse failure occurred in.
 
 - Total unique, SSID wildcard / unset, zeroed SSID, oversized SSID,
   ESSID changes per AP.
+- `essid_unresolved_emissions` / `essid_unresolved_aps` -- hash lines
+  dropped at output time because no ESSID was ever observed for the AP
+  (uncrackable per FR-ESSID-3), and the count of distinct AP MACs
+  contributing those drops. Each affected AP also produces one
+  `[essid_not_found_summary]` line in `--log` carrying `dropped=N`,
+  `first_seen_us=`, `last_seen_us=`.
 
 **EAPOL counters.**
 

@@ -292,14 +292,14 @@ fn category_unknown_akm_fires_on_out_of_table_akm_byte() {
 }
 
 #[test]
-fn category_essid_not_found_fires_on_orphan_pmkid() {
-    // To trigger essid_not_found we need a hash to be EMITTED for an AP that
-    // has no SSID in the EssidMap. Easiest path: an Association Request that
-    // carries a PMKID in its RSN IE, with no Beacon / Probe Response from
-    // that AP elsewhere in the capture. PmkidStore picks up the PMKID; the
-    // emit pipeline walks essid_map, finds no SSID, calls
-    // logger.log_essid_not_found(ap_hex), and writes one hash line with
-    // an empty SSID field.
+fn category_essid_not_found_summary_fires_on_orphan_pmkid() {
+    // Easiest way to trigger an unresolved-ESSID emission: feed wpawolf an
+    // Association Request that carries a PMKID in its RSN IE, with no Beacon
+    // / Probe Response from that AP anywhere in the capture. PmkidStore picks
+    // up the PMKID; the output pipeline walks essid_map, finds no SSID, drops
+    // the would-be hash line, and writes one
+    // `[essid_not_found_summary]` log line per affected AP at end of run with
+    // the drop count and first/last seen timestamps.
     let pcap = "/tmp/wpawolf_logcov_essidnf.pcap";
     let log = "/tmp/wpawolf_logcov_essidnf.log";
 
@@ -323,9 +323,12 @@ fn category_essid_not_found_fires_on_orphan_pmkid() {
     run_with_log(pcap, log, &[]);
 
     let ap_hex = format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", ap[0], ap[1], ap[2], ap[3], ap[4], ap[5]);
-    let lines = log_lines_for(log, "[essid_not_found]");
-    assert!(!lines.is_empty(), "expected at least one [essid_not_found] line");
+    let lines = log_lines_for(log, "[essid_not_found_summary]");
+    assert!(!lines.is_empty(), "expected at least one [essid_not_found_summary] line");
     assert!(lines.iter().any(|l| l.contains(&format!("ap={ap_hex}"))), "expected ap={ap_hex}; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("dropped=")), "expected dropped=N field; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("first_seen_us=")), "expected first_seen_us=N field; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("last_seen_us=")), "expected last_seen_us=N field; got {lines:?}");
 }
 
 #[test]
@@ -431,7 +434,7 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     // Phase 1 stats summary must include the forgiven count.
     let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
     assert!(
-        stderr_contents.contains("frames with non-zero Protocol Version (forgiven)"),
+        stderr_contents.contains("frames with non-zero Protocol Version (forgiven"),
         "expected stats line in stderr; got:\n{stderr_contents}"
     );
 }

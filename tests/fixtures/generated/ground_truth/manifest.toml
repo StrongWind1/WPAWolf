@@ -940,9 +940,9 @@ container = "pcap"
 link_type = "radiotap"
 packet_count = 3
 expected_hashes = [
-    "WPA*03*",
 ]
 forbidden_hashes = [
     "WPA*02*",
+    "WPA*03*",
 ]
 

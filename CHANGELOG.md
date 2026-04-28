@@ -150,7 +150,7 @@ The per-hash-type breakdown leads Phase 4 and prints one row per
 
 ## Quality bar
 
-- 689 tests (unit + binary + integration, including a superset oracle
+- 712 tests (unit + binary + integration, including a superset oracle
   asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture,
   a cross-file pairing oracle confirming the shared `MessageStore`
   reassembles handshakes split across pcap files, and the
@@ -214,8 +214,54 @@ detection (LE/BE bits in the message_pair byte), the canonical 11-type
 hash taxonomy, and the consolidation of the design / requirements /
 hash-types documents into a single canonical [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-Recent: nine-sink CLI surface that surfaces the 11-type taxonomy at the file
-level. The legacy `-o` / `-f` short flags are now the long-form
+Recent (v0.3.0): operator-experience pass driven by a 1,797-file regression
+run.
+
+- **Multi-file Phase 1 banner.** When the input expands to more than one
+  capture (typical of a recursive directory walk), the Phase 1 stats
+  banner now surfaces `input files processed`, plus
+  `BTreeMap<String, u64>` histograms of `file formats seen`, `endians
+  seen`, `network types seen`, and `last file processed`. Single-file
+  runs keep the original `file name / file format / endian / network
+  type` quartet for hcxpcapngtool parity. Counts and histograms are
+  populated once per opened reader from `FileMetadata`; the histograms
+  are sorted by descending count then key for deterministic display.
+- **Unresolved-SSID hashes are dropped, not emitted (FR-ESSID-3
+  rewrite).** A hash line whose AP has no SSID resolved (no Beacon /
+  Probe Response / Assoc Request / Reassoc Request / directed Probe
+  Request / MLD link-MAC fallback yielded one) is uncrackable -- hashcat
+  derives the PMK from PSK + ESSID. Such lines also trigger
+  `Salt-value exception` in mode 37100 and `Token length exception` in
+  mode 22000 at hashcat parse time. Output now drops the would-be
+  emission, accounts for it via `essid_unresolved_emissions` /
+  `essid_unresolved_aps` in the Phase 3 banner, and writes one
+  `[essid_not_found_summary] ap=... dropped=N first_seen_us=...
+  last_seen_us=...` log line per affected AP. Operators can locate the
+  source frames in the original capture via the timestamp range.
+- **Lazy hash-sink files.** A configured sink (`--22000-out`,
+  `--psk-sha384-out`, ...) no longer calls `File::create` until the
+  first matching hash line is written. A sink whose hash type does not
+  appear in the corpus therefore never materialises an empty file on
+  disk. Previously `--psk-sha384-out` etc. always left a 0-byte file.
+- **Stat-line clarity pass.** Every "issue" stat line now ends with an
+  explicit suffix: `(frame dropped)`, `(frames dropped)`,
+  `(unrecoverable)`, `(recovered)`, `(forgiven; processed)`, or
+  `(diagnostic; ...)`. The biggest semantic fix:
+  `Mesh Data frames with Mesh Control header skipped` ->
+  `Mesh Data frames recovered (Mesh Control header unwrapped)`. The old
+  label read like the frames were skipped (dropped); the counter
+  actually means the opposite -- every increment is a frame whose mesh
+  wrapper was successfully unwrapped so the inner LLC/EAPOL could be
+  processed.
+- **PMKID family counter relabel.** `non-FT PSK family (mode 22000:
+  WPA2-PSK/SHA256/SHA384)` -> `PMKIDs found by AKM family (non-FT:
+  WPA2-PSK/SHA256/SHA384)` (and the FT row in kind). The old label was
+  misleading: the counter increments at PMKID *extraction* time, not at
+  emission, so the value never matches the actual `lines written` to
+  the legacy mode 22000 / 37100 sinks below it.
+
+Earlier: nine-sink CLI surface that surfaces the 11-type taxonomy at the
+file level. The legacy `-o` / `-f` short flags are now the long-form
 `--22000-out` / `--37100-out` (line-format-identical for hashcat); the new
 `-o` is the combined taxonomy file (every emitted hash, prefix
 `WPA*<type-code>*`). Per-AKM sinks (`--wpa1-out`, `--wpa2-out`,
