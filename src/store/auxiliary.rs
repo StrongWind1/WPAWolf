@@ -23,6 +23,16 @@ const SSID_LEN_MAX: usize = 32;
 /// Applies hcxpcapngtool's `fwriteessidstr` filter -- returns `true` iff
 /// the SSID bytes pass hcx's write gate.
 ///
+/// The 32-byte cap is spec-mandated: [IEEE 802.11-2024] §9.4.2.2 (Figure
+/// 9-209) defines the SSID element Length field as 0-32 octets, so any
+/// `> 32` body is by definition a parse error / bit-flipped IE Length.
+/// Length 0 is the spec-defined wildcard SSID (used in Probe Requests
+/// and mesh Beacon/Probe Response per §9.4.2.2 paragraph 3); not a
+/// usable hash salt. The first-byte-zero gate is hcxtools' hidden-network
+/// convention: APs that pad the SSID element with NUL bytes instead of
+/// using length=0 produce a salt whose PMK derivation cannot match any
+/// real network, so the resulting hash is uncrackable.
+///
 /// Mirror of `hcxtools/include/fileops.c:72-86`:
 ///
 /// ```text
@@ -30,13 +40,12 @@ const SSID_LEN_MAX: usize = 32;
 /// if (essidstr[0] == 0) return;
 /// ```
 ///
-/// Used by both `EssidSet` (`-E`) and `ProbeEssidSet` (`-R`) so those
-/// wordlist outputs are a byte-for-byte superset of hcx's same-flag
-/// emissions (modulo the autohex format difference, which the harness
-/// normaliser collapses). Broader string collection -- corrupted-frame
-/// fragments, sub-`min_len` runs, blobs `> 32` bytes -- happens only in
-/// `WordlistStore` (`-W`).
-fn passes_hcx_essid_filter(essid: &[u8]) -> bool {
+/// Used by `EssidSet` (`-E`), `ProbeEssidSet` (`-R`), and `EssidMap`
+/// (the per-AP SSID history that drives hash-line ESSID resolution) so
+/// the same admission rule governs every place SSIDs feed downstream.
+/// Broader string collection -- corrupted-frame fragments, sub-`min_len`
+/// runs, blobs `> 32` bytes -- happens only in `WordlistStore` (`-W`).
+pub(crate) fn passes_hcx_essid_filter(essid: &[u8]) -> bool {
     if essid.is_empty() || essid.len() > SSID_LEN_MAX {
         return false;
     }

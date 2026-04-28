@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::store::auxiliary::passes_hcx_essid_filter;
 use crate::types::MacAddr;
 
 /// A single ESSID observation with its first-seen timestamp.
@@ -44,19 +45,30 @@ impl EssidMap {
     /// If the same SSID bytes are already recorded for this AP, updates the stored
     /// timestamp if the new observation is earlier (preserves the earliest-seen time).
     /// If the SSID bytes differ from all recorded SSIDs, appends a new `EssidEntry`.
-    /// Empty SSIDs (hidden-network broadcasts per IEEE 802.11-2024 §9.4.2.3) are ignored.
+    ///
+    /// Admission is gated by `passes_hcx_essid_filter`: length 1-32 octets and
+    /// first byte non-zero. This rejects three classes of input that would otherwise
+    /// produce hashcat-invalid hash lines once `EssidMap::all_for_ap` feeds the
+    /// output pipeline (`src/output/mod.rs`):
+    ///
+    /// - **Length 0**: the spec-defined wildcard SSID per [IEEE 802.11-2024]
+    ///   §9.4.2.2 paragraph 3; carries no salt material.
+    /// - **Length > 32**: malformed -- the SSID element's Length field is defined
+    ///   as 0-32 octets per §9.4.2.2 (Figure 9-209), so any longer body comes
+    ///   from a bit-flipped IE Length byte that caused the parser to slurp the
+    ///   following IE's body. hcxtools mirrors this rule (`fileops.c:76`).
+    /// - **First byte 0x00**: hidden-network convention. Some APs (and corrupt
+    ///   frames) pad the SSID element with leading NUL bytes; the resulting
+    ///   salt cannot derive a PMK that matches any real network, so the hash
+    ///   is uncrackable. Mirrors hcxtools `fileops.c:79`.
+    ///
+    /// The same gate is applied to `EssidSet` (`-E`) and `ProbeEssidSet` (`-R`)
+    /// in `src/store/auxiliary.rs`, so admission is uniform across every store
+    /// that participates in hash emission. `WordlistStore` (`-W`) keeps a broader
+    /// rule (control-byte splitting, sub-`min_len` runs) because its purpose is
+    /// leaked-text salvage, not hash-salt material.
     pub fn insert(&mut self, ap: MacAddr, essid: Vec<u8>, timestamp: u64) {
-        if essid.is_empty() {
-            // hidden-network broadcast -- no useful SSID information, skip
-            return;
-        }
-        // Skip all-null SSIDs (hidden AP using zero-filled SSID element).
-        // Some APs broadcast `\x00...` instead of a zero-length SSID element to hide the
-        // network; others use it in probe responses before revealing the real SSID.
-        // Accepting all-null SSIDs causes timestamp-based resolution to pick the wrong SSID
-        // when the null appears earlier in the capture than the real SSID.
-        // [IEEE 802.11-2024] §9.4.2.3 -- SSID element; hidden networks may use length=0
-        if essid.iter().all(|&b| b == 0) {
+        if !passes_hcx_essid_filter(&essid) {
             return;
         }
         let entries = self.map.entry(ap).or_default();
@@ -148,8 +160,8 @@ impl EssidMap {
             }
             for entry in entries {
                 // Reuse the same dedup-by-bytes / earliest-timestamp semantics as
-                // `insert`. The all-zero / empty filters were already applied at
-                // original insert time, so we can call insert directly.
+                // `insert`. The hcx-essid filter was already applied at original
+                // insert time, so re-checking here is a no-op for accepted entries.
                 self.insert(canon, entry.essid, entry.timestamp);
             }
         }
@@ -190,6 +202,51 @@ mod tests {
         let ap = mac(0x22);
         m.insert(ap, vec![], 500);
         assert_eq!(m.resolve(&ap, 500), None);
+    }
+
+    #[test]
+    fn insert_oversized_essid_rejected() {
+        // Spec [IEEE 802.11-2024] §9.4.2.2: SSID Length field is 0-32 octets.
+        // 33 bytes is the canonical bit-flipped-IE-Length parse error and
+        // produces hashcat-invalid hash lines (hcxtools rejects via
+        // `ESSID_LEN_MAX = 32` at `fileops.c:76`).
+        let mut m = EssidMap::new();
+        let ap = mac(0x77);
+        m.insert(ap, vec![b'A'; 33], 100);
+        assert_eq!(m.resolve(&ap, 100), None, "33-byte SSID must be rejected");
+        // Boundary: exactly 32 bytes is spec-valid and must be accepted.
+        m.insert(ap, vec![b'A'; 32], 200);
+        assert!(m.resolve(&ap, 200).is_some(), "32-byte SSID is at the spec limit");
+    }
+
+    #[test]
+    fn insert_leading_nul_essid_rejected() {
+        // Hidden-network convention: a single leading NUL with non-zero tail
+        // bytes still has no usable salt material (hcxtools `fileops.c:79`).
+        // Mirrors the gate already applied to `EssidSet` / `ProbeEssidSet`.
+        let mut m = EssidMap::new();
+        let ap = mac(0x88);
+        m.insert(ap, vec![0x00, b'a', b'b', b'c'], 100);
+        assert_eq!(m.resolve(&ap, 100), None, "leading-NUL SSID must be rejected");
+    }
+
+    #[test]
+    fn insert_all_nul_essid_rejected() {
+        // All-zero SSID was the previous filter's only rejection; still must
+        // hit the leading-NUL branch under the broader filter.
+        let mut m = EssidMap::new();
+        let ap = mac(0x99);
+        m.insert(ap, vec![0u8; 8], 100);
+        assert_eq!(m.resolve(&ap, 100), None);
+    }
+
+    #[test]
+    fn insert_single_byte_non_nul_accepted() {
+        // 1-byte SSIDs are spec-valid and occasionally seen on guest networks.
+        let mut m = EssidMap::new();
+        let ap = mac(0xAB);
+        m.insert(ap, vec![b'X'], 100);
+        assert_eq!(m.resolve(&ap, 100), Some(b"X".as_slice()));
     }
 
     #[test]
