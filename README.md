@@ -3,7 +3,7 @@
 Fast, no-drop WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat.
 
 [![CI](https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml/badge.svg)](https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Edition 2024](https://img.shields.io/badge/edition-2024-informational)](rust-toolchain.toml)
 
 `wpawolf` ingests pcap / pcapng / gzip captures and emits hashcat mode
@@ -470,4 +470,4 @@ wpawolf/
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+Apache 2.0. See [`LICENSE`](LICENSE).

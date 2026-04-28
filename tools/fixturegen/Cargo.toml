@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Standalone test-capture generator for wpawolf -- emits pcap/pcapng fixtures covering every WPA/WPA2/WPA3-FT-PSK code path with cryptographically valid PMK / PTK / PMKID / MIC values."
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/WPAWolf"
 publish = false
 # Internal tool; deliberately not published to crates.io.
