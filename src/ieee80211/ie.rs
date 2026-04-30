@@ -128,8 +128,6 @@ const WPS_ATTR_CREDENTIAL: u16 = 0x100E;
 const WPS_ATTR_DEVICE_NAME: u16 = 0x1011;
 /// WPS attribute: Identity (text). [WSC §12; Wireshark `WPS_TLV_TYPE_IDENTITY`]
 const WPS_ATTR_IDENTITY: u16 = 0x101C;
-/// WPS attribute: MAC Address (6 bytes). [WSC §12 0x1020]
-const WPS_ATTR_MAC_ADDRESS: u16 = 0x1020;
 /// WPS attribute: Manufacturer string. [WSC §12 0x1021]
 const WPS_ATTR_MANUFACTURER: u16 = 0x1021;
 /// WPS attribute: Model Name string. [WSC §12 0x1023]
@@ -186,10 +184,9 @@ pub struct WpsInfo {
     /// Additional wordlist candidates harvested from the same TLV walk.
     ///
     /// Pre-encoded for direct insertion into `WordlistStore`: text values are
-    /// stored as their raw bytes; MAC and UUID values are 12- or 32-character
-    /// lowercase hex strings. The Credential sub-TLV (0x100E) is recursed
-    /// into so its bundled SSID / Network Key / etc. land here too. Empty
-    /// values are filtered out.
+    /// stored as their raw bytes; UUID values are 32-character lowercase hex
+    /// strings. The Credential sub-TLV (0x100E) is recursed into so its bundled
+    /// SSID / Network Key / etc. land here too. Empty values are filtered out.
     pub wordlist_values: Vec<Vec<u8>>,
 }
 
@@ -203,9 +200,9 @@ pub struct WpsInfo {
 ///  2. Pushes every *other* text- or credential-bearing attribute value into
 ///     `info.wordlist_values` for `-W` seeding -- including Network Key
 ///     (0x1027), New Password (0x102A), OOB Device Password (0x102C), bundled
-///     SSID (0x1045), MAC Address (0x1020 -> hex), UUID-R (0x1048 -> hex),
-///     Identity (0x101C), EAP Identity (0x104D), New Device Name (0x1029), and
-///     Confirmation URL4 / URL6 (0x100A / 0x100B).
+///     SSID (0x1045), UUID-R (0x1048 -> hex), Identity (0x101C), EAP Identity
+///     (0x104D), New Device Name (0x1029), and Confirmation URL4 / URL6
+///     (0x100A / 0x100B).
 ///  3. Recurses into Credential (0x100E) sub-TLVs so a leaked credential bundle
 ///     contributes its inner SSID and Network Key the same way as a top-level
 ///     attribute.
@@ -280,9 +277,9 @@ fn walk_wps_tlvs(body: &[u8], info: &mut WpsInfo, depth: u8) {
                 info.wordlist_values.push(value.to_vec());
             },
             // -- Binary identifiers: encode as lowercase hex for -W --
-            WPS_ATTR_MAC_ADDRESS if value.len() == 6 => {
-                info.wordlist_values.push(crate::types::bytes_to_hex_string(value).into_bytes());
-            },
+            // MAC addresses (0x1020) are deliberately skipped: they are
+            // device identifiers, not password-equivalent text, and inflate
+            // the wordlist with values that no PSK derivation keys off.
             WPS_ATTR_UUID_R if value.len() == 16 => {
                 info.wordlist_values.push(crate::types::bytes_to_hex_string(value).into_bytes());
             },
@@ -1130,17 +1127,20 @@ mod tests {
     }
 
     #[test]
-    fn wps_parse_mac_address_and_uuid_r_hex_encoded() {
-        // 0x1020 (MAC) and 0x1048 (UUID-R) are binary identifiers; they must
-        // be emitted to wordlist_values as lowercase hex strings.
+    fn wps_parse_uuid_r_hex_encoded_mac_skipped() {
+        // 0x1048 (UUID-R) is a binary identifier; it must be emitted to
+        // wordlist_values as a 32-char lowercase hex string. 0x1020 (MAC)
+        // is intentionally skipped -- MAC addresses are device identifiers,
+        // not password-equivalent text.
+        const WPS_ATTR_MAC_ADDRESS: u16 = 0x1020;
         let mac = [0x01u8, 0x23, 0x45, 0x67, 0x89, 0xAB];
         let uuid_r: [u8; 16] = [0xCDu8; 16];
         let mut body = Vec::new();
         body.extend_from_slice(&wps_attr(WPS_ATTR_MAC_ADDRESS, &mac));
         body.extend_from_slice(&wps_attr(WPS_ATTR_UUID_R, &uuid_r));
         let info = parse_wps_body(&body);
-        assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"0123456789ab"), "MAC hex");
         assert!(info.wordlist_values.iter().any(|v| v.as_slice() == b"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"), "UUID-R hex");
+        assert!(!info.wordlist_values.iter().any(|v| v.as_slice() == b"0123456789ab"), "MAC must not be in wordlist");
     }
 
     #[test]

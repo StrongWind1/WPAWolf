@@ -121,15 +121,9 @@ pub fn process_action(
         let target_ap_bytes: [u8; 6] = body.get(8..14).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 6]);
         let sta_addr = MacAddr::from_bytes(sta_addr_bytes);
         let target_ap = MacAddr::from_bytes(target_ap_bytes);
-        // Both MACs as 12-char hex into -W. Mirrors RNR / MLD / WPS-row MAC
-        // handling: any MAC harvested from a management-frame body lands in
-        // the wordlist when -W is requested. The header AP / STA MACs are
-        // already covered by other -W contributions; these are the *embedded*
-        // identifiers in the FT Action body itself.
-        if populate_wordlist {
-            wordlist_store.insert(sta_addr.to_hex_lower().into_bytes());
-            wordlist_store.insert(target_ap.to_hex_lower().into_bytes());
-        }
+        // The embedded STA / Target AP MACs are not seeded into -W: MAC
+        // addresses are device identifiers, not password-equivalent text.
+        // They are still used below as the (ap, sta) pair for PMKID storage.
         // FT Response has a 2-byte Status Code after the fixed 14-byte header.
         let ie_offset = if action_code == ACTION_FT_RESPONSE { ACTION_FT_RESPONSE_FIXED } else { ACTION_FT_FIXED };
         let ies = body.get(ie_offset..).unwrap_or(&[]);
@@ -580,11 +574,11 @@ mod tests {
     }
 
     // FT Action body carries embedded STA Address and Target AP Address
-    // (body[2..14]). Both must land in -W as 12-char lowercase hex when -W is
-    // requested -- mirrors the RNR / MLD MAC handling and gives operators a
-    // shot at MAC-derived default-PSK schemes for the roaming target.
+    // (body[2..14]). Neither is seeded into -W: MAC addresses are device
+    // identifiers, not password-equivalent text. The (ap, sta) pair is still
+    // used internally for PMKID storage.
     #[test]
-    fn ft_action_request_mac_addresses_land_in_wordlist() {
+    fn ft_action_request_mac_addresses_not_in_wordlist() {
         let pmkid = [0x44u8; 16];
         let sta = [0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC];
         let target_ap = [0xDEu8, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
@@ -618,8 +612,11 @@ mod tests {
         );
 
         let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
-        assert!(entries.iter().any(|e| *e == b"123456789abc"), "STA MAC hex in -W: {entries:?}");
-        assert!(entries.iter().any(|e| *e == b"deadbeefcafe"), "Target AP MAC hex in -W: {entries:?}");
+        assert!(!entries.iter().any(|e| *e == b"123456789abc"), "STA MAC must not be in -W: {entries:?}");
+        assert!(!entries.iter().any(|e| *e == b"deadbeefcafe"), "Target AP MAC must not be in -W: {entries:?}");
+        // PMKID extraction still happens; the embedded MACs are used internally
+        // as the (ap, sta) pair for the PmkidEntry but not seeded into -W.
+        assert_eq!(stats.pmkids_found, 1);
     }
 
     // The same body with -W off must not populate the wordlist even though

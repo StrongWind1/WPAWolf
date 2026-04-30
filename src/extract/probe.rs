@@ -88,9 +88,9 @@ pub fn process_probe_req(
 
     // WPS metadata from Probe Requests -- client device names/models.
     // Probe Request WPS IEs describe the *sending STA*, not the AP, so the
-    // row never lands in -D. The full set of WPS-extracted columns -- string
-    // fields, STA MAC (hex), and UUID-E (hex) -- is still routed to -W per
-    // the project rule that every extracted column reaches the wordlist.
+    // row never lands in -D. The text-bearing WPS columns plus UUID-E (hex)
+    // are routed to -W. The STA MAC itself is *not* seeded -- it is a device
+    // identifier, not password-equivalent text.
     if populate_wordlist {
         if let Some(wps) = extract_wps_info(body) {
             for field in [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name] {
@@ -98,7 +98,6 @@ pub fn process_probe_req(
                     wordlist_store.insert(field.clone());
                 }
             }
-            wordlist_store.insert(mac_hdr.sta.to_hex_lower().into_bytes());
             if let Some(uuid) = wps.uuid_e.as_ref() {
                 wordlist_store.insert(crate::types::bytes_to_hex_string(uuid).into_bytes());
             }
@@ -291,11 +290,12 @@ mod tests {
         tagged
     }
 
-    // STA-side WPS in a Probe Request: every extracted column must reach -W,
-    // including the STA MAC (hex) and UUID-E (hex). No -D row is written for
-    // probe-side WPS (it describes the client, not an AP).
+    // STA-side WPS in a Probe Request: text columns and UUID-E (hex) must
+    // reach -W. The STA MAC itself is intentionally *not* seeded -- it is a
+    // device identifier, not password-equivalent text. No -D row is written
+    // for probe-side WPS (it describes the client, not an AP).
     #[test]
-    fn probe_req_wps_wordlist_includes_sta_mac_hex_and_uuid_hex() {
+    fn probe_req_wps_wordlist_includes_uuid_hex_but_not_sta_mac() {
         let uuid: [u8; 16] =
             [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10];
         let body = wps_ie_tagged(b"AcmeSTA", Some(uuid));
@@ -327,7 +327,7 @@ mod tests {
 
         let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
         assert!(entries.iter().any(|e| *e == b"AcmeSTA"), "manufacturer in wordlist: {entries:?}");
-        assert!(entries.iter().any(|e| *e == b"cdcdcdcdcdcd"), "STA MAC hex in wordlist: {entries:?}");
+        assert!(!entries.iter().any(|e| *e == b"cdcdcdcdcdcd"), "STA MAC must not be in wordlist: {entries:?}");
         assert!(
             entries.iter().any(|e| *e == b"0123456789abcdeffedcba9876543210"),
             "UUID-E hex in wordlist: {entries:?}"

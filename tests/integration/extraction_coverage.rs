@@ -336,9 +336,10 @@ fn beacon_emits_every_plaintext_surface() {
     assert_word(&wordlist, ARUBA_AP_NAME, "Aruba vendor AP name");
     assert_word(&wordlist, P2P_DEVICE_NAME, "P2P device name");
 
-    // RNR BSSIDs are emitted to the wordlist as lowercase hex (no separators).
+    // RNR BSSIDs are device identifiers, not password-equivalent text, so
+    // they must NOT appear in the wordlist. They are still counted in stats.
     let rnr_hex: String = RNR_BSSID.iter().map(|b| format!("{b:02x}")).collect();
-    assert_contains(&wordlist, &rnr_hex, "RNR BSSID hex");
+    assert!(!wordlist.lines().any(|line| line == rnr_hex), "RNR BSSID hex {rnr_hex} must not be seeded into -W");
 
     // Device-info (-D) output must include the WPS-derived AP profile.
     let device_lc = device.to_ascii_lowercase();

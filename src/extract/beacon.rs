@@ -123,18 +123,13 @@ pub fn process_beacon_or_probe_resp(
                     stats.rnr_6ghz_colocated += 1;
                 }
             }
-            // Harvest each TBTT Information field's BSSID. The list is metadata only;
-            // SSIDs for the neighbors are not advertised inline (a separate Beacon
-            // probe is required to learn each neighbor's SSID), so we record presence
-            // for visibility / wordlist seeding without claiming an ESSID mapping.
-            let bssids = extract_rnr_bssids(ie.value);
-            for bssid in &bssids {
-                let mac = MacAddr::from_bytes(*bssid);
-                if populate_wordlist {
-                    wordlist_store.insert(mac.to_hex_lower().into_bytes());
-                }
-            }
-            stats.rnr_bssids_extracted += bssids.len() as u64;
+            // Count each TBTT Information field's BSSID for visibility. The
+            // list is metadata only; SSIDs for the neighbors are not
+            // advertised inline (a separate Beacon probe is required to learn
+            // each neighbor's SSID), so we do not claim an ESSID mapping. The
+            // BSSIDs themselves are not seeded into the wordlist -- MAC
+            // addresses are device identifiers, not password-equivalent text.
+            stats.rnr_bssids_extracted += extract_rnr_bssids(ie.value).len() as u64;
             break; // RNR may appear once per frame.
         }
     }
@@ -152,12 +147,6 @@ pub fn process_beacon_or_probe_resp(
             if mld_store.len() > before {
                 stats.mle_mld_addrs_learned += 1;
             }
-        }
-        // MLD address as 12-char hex into -W. Matches the RNR neighbor-BSSID
-        // treatment above: any MAC harvested from a management frame that we
-        // record elsewhere also seeds the wordlist when -W is requested.
-        if populate_wordlist {
-            wordlist_store.insert(mld_addr.to_hex_lower().into_bytes());
         }
     }
 
@@ -190,15 +179,13 @@ pub fn process_beacon_or_probe_resp(
 
     // WPS device metadata extraction for -D and -W.
     //
-    // -W is a strict superset of every column emitted to -D: the AP MAC (hex),
-    // manufacturer, model name, model number, serial number, device name,
-    // UUID-E (hex), and the resolved ESSID. The resolved ESSID is already
-    // wordlist-inserted via the SSID IE branch above; the AP MAC and UUID-E
-    // are unique to the WPS row and added here so a downstream
-    // `tr '\t' '\n' | sort -u` over `.wps.devices` is byte-equivalent (modulo
-    // ESSID dedup) to the wordlist contribution from this frame. MAC-as-hex
-    // mirrors the RNR neighbor-BSSID handling above; UUID-E often embeds
-    // serial / MAC bytes that some vendor-default PSK derivations key off.
+    // -W contains every text-bearing WPS column: manufacturer, model name,
+    // model number, serial number, device name, UUID-E (hex), and the
+    // resolved ESSID. The resolved ESSID is already wordlist-inserted via
+    // the SSID IE branch above. UUID-E often embeds serial / MAC bytes that
+    // some vendor-default PSK derivations key off, so it is hex-encoded into
+    // -W. The AP MAC itself is *not* seeded into -W -- it is a device
+    // identifier, not password-equivalent text.
     if populate_device || populate_wordlist {
         if let Some(wps) = extract_wps_info(ies) {
             if populate_wordlist {
@@ -209,7 +196,6 @@ pub fn process_beacon_or_probe_resp(
                         wordlist_store.insert(field.clone());
                     }
                 }
-                wordlist_store.insert(mac_hdr.ap.to_hex_lower().into_bytes());
                 if let Some(uuid) = wps.uuid_e.as_ref() {
                     wordlist_store.insert(bytes_to_hex_string(uuid).into_bytes());
                 }
@@ -537,10 +523,11 @@ mod tests {
         tagged
     }
 
-    // -W must be a strict superset of every column written to -D: in particular
-    // the AP MAC (hex) and UUID-E (hex) -- not just the WPS string columns.
+    // -W must include the WPS text columns plus UUID-E (hex). The AP MAC
+    // is intentionally *not* seeded -- it is a device identifier, not
+    // password-equivalent text.
     #[test]
-    fn wps_wordlist_includes_mac_hex_and_uuid_hex() {
+    fn wps_wordlist_includes_uuid_hex_but_not_mac() {
         let uuid: [u8; 16] =
             [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB];
         let mut body = vec![0u8; 12];
@@ -590,7 +577,7 @@ mod tests {
 
         let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
         assert!(entries.iter().any(|e| *e == b"Acme"), "manufacturer in wordlist: {entries:?}");
-        assert!(entries.iter().any(|e| *e == b"abababababab"), "AP MAC hex in wordlist: {entries:?}");
+        assert!(!entries.iter().any(|e| *e == b"abababababab"), "AP MAC must not be in wordlist: {entries:?}");
         assert!(
             entries.iter().any(|e| *e == b"deadbeef00112233445566778899aabb"),
             "UUID-E hex in wordlist: {entries:?}"
@@ -662,11 +649,12 @@ mod tests {
         tagged
     }
 
-    // The MLD MAC harvested from a Basic Multi-Link Element must reach -W as
-    // 12-char hex when the AP differs from the MLD address. Mirrors the RNR
-    // neighbor-BSSID treatment in the same handler.
+    // The MLD MAC harvested from a Basic Multi-Link Element must record the
+    // link_addr -> MLD_addr mapping and bump stats counters, but must not be
+    // seeded into -W: MAC addresses are device identifiers, not
+    // password-equivalent text.
     #[test]
-    fn mle_mld_mac_lands_in_wordlist_as_hex() {
+    fn mle_mld_mac_recorded_but_not_in_wordlist() {
         let mld = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
         let mut body = vec![0u8; 12];
         body.extend_from_slice(&mle_ext_ie(mld));
@@ -714,7 +702,7 @@ mod tests {
         );
 
         let entries: Vec<&[u8]> = wl.iter().map(Vec::as_slice).collect();
-        assert!(entries.iter().any(|e| *e == b"123456789abc"), "MLD MAC hex in wordlist: {entries:?}");
+        assert!(!entries.iter().any(|e| *e == b"123456789abc"), "MLD MAC must not be in wordlist: {entries:?}");
         assert_eq!(stats.mle_basic_seen, 1);
         assert_eq!(stats.mle_mld_addrs_learned, 1);
     }

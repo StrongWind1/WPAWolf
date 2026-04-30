@@ -2193,7 +2193,7 @@ surfaces is a `tests/integration/extraction_coverage.rs` failure.
 | Cisco CCX1 AP name (tag 133) | Cisco CCX v1 §A.3 | `ccx1_ap_names_extracted` | wordlist |
 | Vendor AP names (tag 221, multiple OUIs) | wireshark `packet-ieee80211.c` | `vendor_ap_names_extracted` | wordlist |
 | Multiple BSSID profile (tag 71 / sub-BSSID) | §9.4.2.45a + §35.2.2 | `multiple_bssid_profiles` | `essid_map` |
-| Reduced Neighbor Report BSSIDs (tag 201) | §9.4.2.170 | `rnr_bssids_extracted` | wordlist (hex) |
+| Reduced Neighbor Report BSSIDs (tag 201) | §9.4.2.170 | `rnr_bssids_extracted` | stats only (MAC, not seeded into -W) |
 | Wi-Fi Direct (P2P) device name (vendor IE OUI `50:6F:9A` type 9) | WFA Wi-Fi Direct | `p2p_device_names_extracted` | wordlist |
 | FILS Discovery SSID (Public Action 34) | §9.6.7.36 | `fils_discovery_ssids` | `essid_map`, `essid_set`, wordlist |
 | Action Neighbor Report SSID (Action cat 5) | §9.6.6.6 | `action_nr_req_ssids` | `essid_set` |
