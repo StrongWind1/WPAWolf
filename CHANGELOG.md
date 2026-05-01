@@ -2,9 +2,61 @@
 
 This file is a current-state summary of `wpawolf` rather than a per-release
 diary. For per-commit detail, see `git log`. For wire-level behaviour, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md). For semantic-version intent the project
-follows [SemVer](https://semver.org/spec/v2.0.0.html); v1.x is the current
-line.
+[`ARCHITECTURE.md`](ARCHITECTURE.md). The "Releases" section below captures
+notable per-version boundaries; the rest of the file describes what the
+current release supports. For semantic-version intent the project follows
+[SemVer](https://semver.org/spec/v2.0.0.html); v1.x is the current line.
+
+## Releases
+
+### v0.3.2 -- 2026-05-01
+
+**Test-harness and CI reliability fix. No code or output-format changes.**
+Hash-line output is byte-identical to v0.3.1 for every capture; v0.3.2
+upgraders do not need to re-process anything.
+
+- Parity test (`tests/integration/superset_test.rs`) now pins the
+  minimum supported oracle at `hcxpcapngtool >= 7.0.1`, parses the
+  `--version` banner, and refuses to run against stale oracles
+  (Ubuntu/Debian package 6.2.x, RHEL stream, Kali older releases).
+  Pre-7.0.1 emits a different `WPA*01*` / `WPA*02*` trailer format
+  and is not a valid parity reference.
+- Missing or stale oracle is now a hard panic when `CI=true` is set
+  in the environment, replacing the prior soft-skip path that
+  silently no-op'd the gate. Locally the test still soft-skips with
+  a clear message so contributors without hcxtools installed can
+  still run the rest of the suite.
+- CI (`.github/workflows/ci.yml`) builds `hcxpcapngtool` from a
+  pinned upstream tag (`HCXTOOLS_TAG = 7.1.2`) before running
+  `cargo test`, so the parity check actually executes on every PR
+  for the first time.
+- New `make check-parity` Makefile target mirrors the CI hard-fail
+  behaviour locally.
+- New `tools/audit_citations.sh` walks every `[hcxpcapngtool:NNNN]`
+  citation in `src/` and `ARCHITECTURE.md` and asserts the cited
+  region is in-bounds in `ref/hcxtools/hcxpcapngtool.c`. Skips
+  cleanly when `ref/` is absent (gitignored, developer-side only).
+  Wired into `make check-all`.
+- README rewritten to the centered-HTML style used by the rest of
+  the family (CredWolf, KerbWolf, Kerberos, WiFi_Cracking).
+  "Authorized use only" moved from the top of the file to just
+  above the License section.
+- `CHANGELOG.md`, `CONTRIBUTING.md`, and the bug-report template
+  now document the `>= 7.0.1` oracle requirement and the
+  build-from-source recipe.
+
+### v0.3.1 -- 2026-04-30
+
+Stop seeding MAC addresses into the `-W` wordlist sink. Pre-v0.3.1
+runs included AP/STA MACs alongside legitimate ESSID / EAP / WPS
+strings, which polluted the wordlist with non-credential material.
+
+### v0.3.0 -- 2026-04-28
+
+`-W` wordlist sink salvages WPS / FT / EAP leaked text;
+`--22000-out` / `--37100-out` apply hashcat-compatible ESSID filter
+at `EssidMap` admission; `-o` collapses multi-ESSID inflation at
+hash emit time; CHANGELOG / README rebuilt.
 
 ## What wpawolf is
 
