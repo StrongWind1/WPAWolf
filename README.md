@@ -1,10 +1,25 @@
-# wpawolf
+<h1 align="center">WPAWolf</h1>
 
-Fast, no-drop WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat.
+<p align="center">
+  <strong>Fast, no-drop WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat.</strong>
+</p>
 
-[![CI](https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml/badge.svg)](https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Edition 2024](https://img.shields.io/badge/edition-2024-informational)](rust-toolchain.toml)
+<p align="center">
+  <a href="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.85-informational" alt="MSRV 1.85"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> &bull;
+  <a href="#cli-reference">CLI reference</a> &bull;
+  <a href="#building">Building</a> &bull;
+  <a href="ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+---
 
 `wpawolf` ingests pcap / pcapng / gzip captures and emits hashcat mode
 22000 (WPA-PSK / WPA-PSK-SHA256 / PMKID) and mode 37100 (FT-PSK) hash
@@ -13,16 +28,6 @@ It is a ground-up Rust rewrite of
 [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool`,
 designed to fix the handful of upstream behaviours that silently
 discard valid handshakes.
-
-## Authorized use only
-
-`wpawolf` operates on pcap files you already have in hand. It does not
-capture traffic, inject frames, or touch the radio in any way. Running
-it on captures you do not own or have written authorisation to analyse
-is illegal in most jurisdictions. Use it for your own networks, CTF
-challenges, lab research, and authorised engagements.
-
----
 
 ## Quick start
 
@@ -429,16 +434,49 @@ covers this work.
 ## Building
 
 ```sh
-make dev        # debug build
-make build      # release build (native target)
-make test       # run the test suite
-make check-all  # full CI gate (fmt + clippy + deny + check + test + doc + hygiene + machete)
+make dev          # debug build
+make build        # release build (native target)
+make test         # run the test suite (parity test soft-skips if hcxtools missing)
+make check-parity # run the parity test under CI=true (hard-fails on missing oracle)
+make check-all    # full CI gate (fmt + clippy + deny + check + test + doc + hygiene + machete)
 ```
 
 Requires a stable Rust toolchain (see `rust-toolchain.toml`). Once
 [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) and
 [`cargo-machete`](https://github.com/bnjbvr/cargo-machete) are
 installed, `make check-all` runs the complete pre-PR gate.
+
+### Parity oracle: hcxpcapngtool >= 7.0.1
+
+`tests/integration/superset_test.rs` validates wpawolf's correctness
+claim by running `hcxpcapngtool` against the same fixture and asserting
+wpawolf's output is a superset of the oracle's. **The claim only holds
+against `hcxpcapngtool >= 7.0.1`** -- older releases emit different
+`WPA*01*` and `WPA*02*` trailer bytes (PMKID status was added in 6.3.1,
+default `ST_NC` initialisation arrived in 6.3.2, and the canonical
+EAPOL-frame selection swapped from M3 to M2 in 7.0.1). The test reads
+`--version`, parses the banner, and refuses to run against a stale
+oracle.
+
+Distro packages are too old: Ubuntu 22.04/24.04 and Debian stable still
+ship `hcxtools 6.2.x` at time of writing, so `apt install hcxtools` does
+*not* satisfy the parity gate. Build from upstream source:
+
+```sh
+git clone --depth 1 --branch 7.1.2 https://github.com/ZerBea/hcxtools
+make -C hcxtools hcxpcapngtool
+sudo install -m 0755 hcxtools/hcxpcapngtool /usr/local/bin/hcxpcapngtool
+hcxpcapngtool --version  # must report >= 7.0.1
+```
+
+CI installs the pinned tag automatically (`HCXTOOLS_TAG` in
+`.github/workflows/ci.yml`). The parity test is gated on `CI=true` so
+the oracle install step cannot be silently dropped; locally,
+`make check-parity` mirrors the CI behaviour.
+
+If you do not have hcxtools installed and run `cargo test` directly, the
+parity test logs a clearly-tagged skip notice on stderr and the rest of
+the suite still runs.
 
 ### Release artifacts (cross-platform)
 
@@ -479,6 +517,16 @@ wpawolf/
 ├── Cargo.toml                    Workspace + crate config + strict lint policy
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
+
+---
+
+## Authorized use only
+
+`wpawolf` operates on pcap files you already have in hand. It does not
+capture traffic, inject frames, or touch the radio in any way. Running
+it on captures you do not own or have written authorisation to analyse
+is illegal in most jurisdictions. Use it for your own networks, CTF
+challenges, lab research, and authorised engagements.
 
 ---
 
