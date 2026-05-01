@@ -148,10 +148,32 @@ The per-hash-type breakdown leads Phase 4 and prints one row per
 `HashType` variant with the canonical 11-type name verbatim
 (`WPA2-PSK-EAPOL`, `FT-PSK-PMKID`, etc.).
 
+## Parity oracle
+
+`tests/integration/superset_test.rs` validates the "no hash is silently
+dropped" claim by running `hcxpcapngtool` as a reference and asserting
+`wpawolf_output >= oracle_output` line-for-line.
+
+**Minimum oracle version: `hcxpcapngtool >= 7.0.1`.** The wire trailer
+of `WPA*01*` (PMKID) and `WPA*02*` (EAPOL) lines changed three times
+across the 6.3.x / 7.0.x boundary: the PMKID status byte was added in
+6.3.1, default `ST_NC` initialisation was added in 6.3.2, and the
+canonical EAPOL-frame selection swapped from the M3 frame to the M2
+frame in 7.0.1. wpawolf's output matches the post-7.0.1 convention.
+Comparing against an older oracle is not meaningful and produces noisy
+false-positive mismatches.
+
+The parity test parses the oracle banner, refuses stale versions, and
+hard-fails when `CI=true` is set so a missing install step in CI cannot
+silently no-op the gate. Locally, `make check-parity` reproduces the
+same hard-fail behaviour. Distro packages are too old; build hcxtools
+from the upstream tag (`HCXTOOLS_TAG` pinned in `.github/workflows/ci.yml`).
+
 ## Quality bar
 
 - 712 tests (unit + binary + integration, including a superset oracle
-  asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture,
+  asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture
+  with `hcxpcapngtool >= 7.0.1`,
   a cross-file pairing oracle confirming the shared `MessageStore`
   reassembles handshakes split across pcap files, and the
   `generated_corpus` oracle that runs wpawolf against every fixture

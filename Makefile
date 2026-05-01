@@ -1,6 +1,6 @@
 .PHONY: fmt fmt-fix lint lint-fix doc dev build check \
-        test test-release test-matrix \
-        audit machete \
+        test test-release test-matrix check-parity \
+        audit audit-citations machete \
         ascii-check lf-check hygiene \
         build-linux-musl build-linux-arm-musl \
         build-macos-arm build-macos-x86 build-macos-universal \
@@ -99,10 +99,24 @@ test-release:
 # convention and so adding a feature later only touches the Makefile.
 test-matrix: test
 
+# Parity gate: runs the superset test under CI=true so a missing or stale
+# hcxpcapngtool oracle is a hard failure instead of a silent skip. wpawolf
+# claims parity against hcxpcapngtool >= 7.0.1 -- distro packages are too
+# old; build from upstream source first. See README "Parity oracle" section.
+check-parity:
+	CI=true $(CARGO) test --release --test superset -- --nocapture
+
 # -- Dependency auditing --------------------------------------------------------
 
 audit:
 	$(CARGO) deny check
+
+# Verify every [hcxpcapngtool:NNNN] citation in src/ and ARCHITECTURE.md
+# points at a real line in the vendored ref/hcxtools/hcxpcapngtool.c.
+# Catches drift when the vendored source is updated without re-checking
+# the citations that depend on its line numbering.
+audit-citations:
+	./tools/audit_citations.sh
 
 machete:
 	$(CARGO) machete
@@ -327,4 +341,4 @@ clean:
 # -- Gates ---------------------------------------------------------------------
 
 # Full verification gate -- run before every push.
-check-all: fmt lint audit check test-matrix doc hygiene machete
+check-all: fmt lint audit audit-citations check test-matrix doc hygiene machete

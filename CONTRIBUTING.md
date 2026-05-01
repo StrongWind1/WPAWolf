@@ -21,18 +21,45 @@ possible kind of bug.
 
 ```sh
 make check-all
+make check-parity   # only when touching pairing / output / extraction
 ```
 
-This runs, in order: `fmt`, `clippy` (zero warnings), `cargo deny`,
-`cargo check`, `cargo test`, `cargo doc` with warnings-as-errors, ASCII
-hygiene, LF hygiene, and unused-dependency detection. A green `check-all` is
-required for review.
+`make check-all` runs, in order: `fmt`, `clippy` (zero warnings),
+`cargo deny`, `cargo check`, `cargo test`, `cargo doc` with
+warnings-as-errors, ASCII hygiene, LF hygiene, and unused-dependency
+detection. A green `check-all` is required for review.
+
+`make check-parity` re-runs the superset test against `hcxpcapngtool`
+with `CI=true` set, which converts a missing or stale oracle from a
+soft skip into a hard failure. Run this whenever you change anything
+in `src/pair/`, `src/output/`, `src/store/`, or `src/extract/`.
 
 Install the pre-commit hook so you catch lint failures before push:
 
 ```sh
 make hooks
 ```
+
+### Parity oracle: hcxpcapngtool >= 7.0.1
+
+The superset test in `tests/integration/superset_test.rs` requires
+`hcxpcapngtool >= 7.0.1` on `PATH`. Distro packages (Ubuntu 22.04/24.04,
+Debian stable) ship 6.2.x and emit a pre-7.0.1 hash-line format that is
+not a valid parity reference for current wpawolf. Build from upstream:
+
+```sh
+git clone --depth 1 --branch 7.1.2 https://github.com/ZerBea/hcxtools
+sudo apt-get install -y libssl-dev libz-dev   # or dnf / brew equivalents
+make -C hcxtools hcxpcapngtool
+sudo install -m 0755 hcxtools/hcxpcapngtool /usr/local/bin/hcxpcapngtool
+hcxpcapngtool --version
+```
+
+If hcxpcapngtool is missing or older than 7.0.1, the test prints a
+clearly-tagged skip notice and the remaining suite still runs (so
+contributors who only touch unrelated areas don't need the oracle
+installed). The CI gate panics in either case, so a regression cannot
+slip through to main.
 
 ## Commit messages
 

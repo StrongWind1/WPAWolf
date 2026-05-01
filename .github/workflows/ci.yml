@@ -119,11 +119,27 @@ jobs:
   # ---------------------------------------------------------------------------
   # test -- the real test gate. wpawolf has no Cargo feature flags today, so
   # a single Linux configuration covers the whole crate.
+  #
+  # The parity test in tests/integration/superset_test.rs runs hcxpcapngtool
+  # as an oracle and asserts wpawolf's output is a superset. wpawolf claims
+  # parity against hcxpcapngtool >= 7.0.1 only -- older releases emit a
+  # different WPA*01* / WPA*02* trailer format. Distro packages (Ubuntu,
+  # Debian) ship 6.2.x at time of writing, so we build the oracle from the
+  # upstream source at a pinned tag and put it on PATH before `cargo test`.
+  #
+  # `CI=true` is exported into the test environment so the parity test panics
+  # rather than silently skipping if the install step ever drops; the
+  # superset test reads that env var and switches its missing-oracle branch
+  # from a soft skip to a hard failure.
   # ---------------------------------------------------------------------------
   test:
     name: test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      # Pinned oracle version. Bump when wpawolf is re-validated against a
+      # newer hcxpcapngtool tag. Keep this >= the test's MIN_HCXPCAPNGTOOL.
+      HCXTOOLS_TAG: "7.1.2"
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -132,6 +148,22 @@ jobs:
 
       - name: Install Rust toolchain
         run: rustup show
+
+      - name: Install hcxpcapngtool oracle (pinned)
+        # hcxpcapngtool is the parity oracle for the superset test. Distro
+        # packages are years stale (Ubuntu 22.04/24.04 ship 6.2.x) and emit a
+        # pre-7.0.1 format that fails the superset comparison for unrelated
+        # reasons. Build from the upstream tag pinned in HCXTOOLS_TAG above.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev libz-dev
+          tmpdir="$(mktemp -d)"
+          git clone --quiet --depth 1 --branch "${HCXTOOLS_TAG}" \
+            https://github.com/ZerBea/hcxtools.git "${tmpdir}"
+          make -C "${tmpdir}" hcxpcapngtool
+          sudo install -m 0755 "${tmpdir}/hcxpcapngtool" /usr/local/bin/hcxpcapngtool
+          hcxpcapngtool --version
 
       - name: Cache cargo build artefacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
@@ -147,6 +179,10 @@ jobs:
             ubuntu-cargo-
 
       - name: cargo test --all-targets --all-features
+        env:
+          # Forwarded to cargo so the superset test sees CI=true and treats
+          # a missing or stale oracle as a hard failure rather than a skip.
+          CI: "true"
         run: cargo test --all-targets --all-features
 
   # ---------------------------------------------------------------------------
