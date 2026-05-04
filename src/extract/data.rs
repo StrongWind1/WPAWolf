@@ -248,23 +248,25 @@ fn process_msdu_payload(
     // LLC/SNAP EtherType is 0x888E or 0x88C7 (preauth).
     {
         let t = eapol::check_invalid_fields(body);
-        let ap_hex = mac_hdr.ap.to_hex_lower();
-        let sta_hex = mac_hdr.sta.to_hex_lower();
+        // The MAC hex wrappers are zero-allocation `Display` views; the hot path
+        // (most frames trigger no sentinel) builds no `String` at all, and a
+        // firing branch only allocates the single log-line `String` inside the
+        // logger.
         if t.null_nonce {
             stats.null_nonce_rejected += 1;
-            logger.log_invalid_nonce(timestamp_us, &ap_hex, &sta_hex, "null");
+            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "null");
         }
         if t.ff_nonce {
             stats.ff_nonce_rejected += 1;
-            logger.log_invalid_nonce(timestamp_us, &ap_hex, &sta_hex, "ff");
+            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "ff");
         }
         if t.null_mic {
             stats.null_mic_rejected += 1;
-            logger.log_invalid_mic(timestamp_us, &ap_hex, &sta_hex, "null");
+            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "null");
         }
         if t.ff_mic {
             stats.ff_mic_rejected += 1;
-            logger.log_invalid_mic(timestamp_us, &ap_hex, &sta_hex, "ff");
+            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "ff");
         }
     }
     // Surface the preauth EtherType (0x88C7) separately from regular EAPOL (0x888E)

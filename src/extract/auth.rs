@@ -51,7 +51,7 @@ pub fn process_auth_ft(
     };
     for pmkid in pmkids {
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-            logger.log_invalid_pmkid(timestamp_us, &ap.to_hex_lower(), &sta.to_hex_lower(), kind);
+            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
         }
         pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft });
         stats.pmkids_found += 1;
@@ -92,7 +92,7 @@ pub fn process_auth_fils(
     let akm = akm_map.get(&ap);
     for pmkid in pmkids {
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-            logger.log_invalid_pmkid(timestamp_us, &ap.to_hex_lower(), &sta.to_hex_lower(), kind);
+            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
         }
         pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None });
         stats.pmkids_found += 1;
@@ -136,7 +136,7 @@ pub fn process_auth_pasn(
     let akm = akm_map.get(&ap);
     for pmkid in pmkids {
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-            logger.log_invalid_pmkid(timestamp_us, &ap.to_hex_lower(), &sta.to_hex_lower(), kind);
+            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
         }
         pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None });
         stats.pmkids_found += 1;

@@ -90,26 +90,25 @@ pub fn resolve_wds_eapol(
 
         // Pre-check for invalid nonce/MIC values before full parse (WDS deferred path).
         // Logs each rejection so the structured-log audit trail is identical to the
-        // non-WDS path in process_msdu_payload.
+        // non-WDS path in process_msdu_payload. The MAC hex wrappers are
+        // zero-allocation `Display` views; nothing is built unless a check fires.
         {
             let t = eapol::check_invalid_fields(&p.body);
-            let ap_hex = ap.to_hex_lower();
-            let sta_hex = sta.to_hex_lower();
             if t.null_nonce {
                 stats.null_nonce_rejected += 1;
-                logger.log_invalid_nonce(p.timestamp, &ap_hex, &sta_hex, "null");
+                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), "null");
             }
             if t.ff_nonce {
                 stats.ff_nonce_rejected += 1;
-                logger.log_invalid_nonce(p.timestamp, &ap_hex, &sta_hex, "ff");
+                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), "ff");
             }
             if t.null_mic {
                 stats.null_mic_rejected += 1;
-                logger.log_invalid_mic(p.timestamp, &ap_hex, &sta_hex, "null");
+                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), "null");
             }
             if t.ff_mic {
                 stats.ff_mic_rejected += 1;
-                logger.log_invalid_mic(p.timestamp, &ap_hex, &sta_hex, "ff");
+                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), "ff");
             }
         }
         if let Some(key) = eapol::parse(&p.body, resolved_dir) {

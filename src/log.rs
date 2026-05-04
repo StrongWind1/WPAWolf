@@ -90,7 +90,13 @@ impl Logger {
     /// timestamps the AP appeared in. The timestamps let an operator open the
     /// originating capture and locate the AP's traffic without scrubbing the
     /// whole file.
-    pub fn log_essid_not_found_summary(&mut self, ap_hex: &str, dropped: u64, first_us: u64, last_us: u64) {
+    pub fn log_essid_not_found_summary(
+        &mut self,
+        ap_hex: impl std::fmt::Display,
+        dropped: u64,
+        first_us: u64,
+        last_us: u64,
+    ) {
         self.write_line(&format!(
             "[essid_not_found_summary] ap={ap_hex} dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
         ));
@@ -101,7 +107,13 @@ impl Logger {
     /// `kind` is `"null"` (all-`0x00` nonce in M1/M2/M3 -- spec violation) or
     /// `"ff"` (all-`0xFF` nonce in any message -- firmware flash-erase pattern).
     /// M4 NULL nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5 and is NOT logged.
-    pub fn log_invalid_nonce(&mut self, timestamp_us: u64, ap_hex: &str, sta_hex: &str, kind: &str) {
+    pub fn log_invalid_nonce(
+        &mut self,
+        timestamp_us: u64,
+        ap_hex: impl std::fmt::Display,
+        sta_hex: impl std::fmt::Display,
+        kind: &str,
+    ) {
         self.write_line(&format!("[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
     }
 
@@ -110,7 +122,13 @@ impl Logger {
     /// `kind` is `"null"` (all-`0x00`) or `"ff"` (all-`0xFF`). Only fires when the Key
     /// MIC flag (Key Information bit B8) is set, i.e. M2 / M3 / M4. M1 has no MIC by
     /// spec and is never logged here.
-    pub fn log_invalid_mic(&mut self, timestamp_us: u64, ap_hex: &str, sta_hex: &str, kind: &str) {
+    pub fn log_invalid_mic(
+        &mut self,
+        timestamp_us: u64,
+        ap_hex: impl std::fmt::Display,
+        sta_hex: impl std::fmt::Display,
+        kind: &str,
+    ) {
         self.write_line(&format!("[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
     }
 
@@ -120,7 +138,13 @@ impl Logger {
     /// flash-erase sentinel). Both have no cracking value. Fires from every PMKID
     /// extraction site (M1 KDE, M2 RSN IE, `AssocReq`, `ReassocReq`, FT/FILS/PASN Auth,
     /// FT Action frames, Probe Request, Beacon, `ProbeResp`, Mesh Peering, OSEN IE).
-    pub fn log_invalid_pmkid(&mut self, timestamp_us: u64, ap_hex: &str, sta_hex: &str, kind: &str) {
+    pub fn log_invalid_pmkid(
+        &mut self,
+        timestamp_us: u64,
+        ap_hex: impl std::fmt::Display,
+        sta_hex: impl std::fmt::Display,
+        kind: &str,
+    ) {
         self.write_line(&format!("[invalid_pmkid] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
     }
 

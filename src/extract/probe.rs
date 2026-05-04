@@ -121,7 +121,7 @@ pub fn process_probe_req(
         let ft = extract_ft_fields(body);
         for pmkid in pmkids {
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                logger.log_invalid_pmkid(timestamp_us, &mac_hdr.ap.to_hex_lower(), &mac_hdr.sta.to_hex_lower(), kind);
+                logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
             }
             pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,

@@ -80,10 +80,11 @@ impl<'a> Iterator for AmsduIter<'a> {
             return None;
         }
         let payload = self.rest.get(14..total_with_payload)?;
-        // Skip padding to next 4-byte boundary. No padding is added after the
-        // *last* subframe; if the remainder is shorter than the padding, just
-        // exhaust the rest and the next call returns None naturally. Use
-        // `wrapping_add` of `(4 - n) & 3` so a value already aligned adds 0.
+        // Skip padding to the next 4-byte boundary. No padding is added after
+        // the *last* subframe; if the remainder is shorter than the padding,
+        // exhaust the rest and the next call returns None naturally. The outer
+        // `& 3` collapses the aligned case (where `4 - 0 = 4`) back to 0 so a
+        // length that is already a multiple of 4 contributes no padding.
         let pad = (4usize - (payload_len & 3)) & 3;
         let next_offset = total_with_payload.saturating_add(pad).min(self.rest.len());
         self.rest = self.rest.get(next_offset..).unwrap_or(&[]);

@@ -22,12 +22,16 @@ impl MacAddr {
         Self(bytes)
     }
 
-    /// Returns the MAC address as a lowercase 12-character hex string without separators.
+    /// Returns a `Display`-implementing wrapper that formats the MAC as 12 lowercase
+    /// hex characters with no separators (e.g. `aabbccddeeff`).
     ///
-    /// Used in hashcat hash-line fields where the compact form is required.
+    /// Allocation-free in `write!` / `format_args!` / log-line `format!` contexts:
+    /// the wrapper writes directly into the formatter rather than building an
+    /// intermediate `String`. Call `.to_string()` on the result if an owned
+    /// `String` is genuinely required.
     #[must_use]
-    pub fn to_hex_lower(&self) -> String {
-        bytes_to_hex_string(&self.0)
+    pub const fn hex_lower(&self) -> MacHexLower<'_> {
+        MacHexLower(self)
     }
 }
 
@@ -42,6 +46,22 @@ impl std::fmt::Display for MacAddr {
 impl std::fmt::Debug for MacAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MacAddr({self})")
+    }
+}
+
+/// Display wrapper for the compact, no-separator hex form of a `MacAddr`.
+///
+/// Formats as 12 lowercase hex characters (e.g. `aabbccddeeff`). Used in
+/// hashcat hash-line fields and structured-log lines where the compact form
+/// is required. Returned by `MacAddr::hex_lower`; never constructed directly
+/// outside this module.
+#[derive(Clone, Copy, Debug)]
+pub struct MacHexLower<'a>(&'a MacAddr);
+
+impl std::fmt::Display for MacHexLower<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = &self.0.0;
+        write!(f, "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", b[0], b[1], b[2], b[3], b[4], b[5])
     }
 }
 
@@ -825,9 +845,13 @@ mod tests {
     }
 
     #[test]
-    fn macaddr_to_hex_lower() {
+    fn macaddr_hex_lower() {
         let mac = MacAddr::from_bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        assert_eq!(mac.to_hex_lower(), "112233445566");
+        // Display through format_args! / format!: no intermediate allocation.
+        assert_eq!(format!("{}", mac.hex_lower()), "112233445566");
+        // Leading-zero handling matches the `Display` colon form.
+        let zero_lead = MacAddr::from_bytes([0x00, 0x0a, 0x00, 0x0b, 0x00, 0x0c]);
+        assert_eq!(format!("{}", zero_lead.hex_lower()), "000a000b000c");
     }
 
     #[test]

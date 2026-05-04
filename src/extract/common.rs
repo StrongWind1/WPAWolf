@@ -267,7 +267,7 @@ pub fn store_eapol_key(
     // M1 PMKID from Key Data KDE. [IEEE 802.11-2024] §12.7.2
     if let Some(pmkid) = key.pmkid {
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-            logger.log_invalid_pmkid(timestamp_us, &ap.to_hex_lower(), &sta.to_hex_lower(), kind);
+            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
         }
         pmkid_store.add(PmkidEntry {
             timestamp: timestamp_us,
@@ -294,7 +294,7 @@ pub fn store_eapol_key(
                 if let Some(rsn) = parse_rsn_ie(ie.value) {
                     for pmkid in rsn.pmkids {
                         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                            logger.log_invalid_pmkid(timestamp_us, &ap.to_hex_lower(), &sta.to_hex_lower(), kind);
+                            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
                         }
                         pmkid_store.add(PmkidEntry {
                             timestamp: timestamp_us,
@@ -631,7 +631,8 @@ mod tests {
         // Inteno/D-Link/TP-Link/ASUS quirk: M1 with KDV=1 (legacy WPA1 MIC) AND a PMKID KDE.
         // The EAPOL must route as Wpa1 (HMAC-MD5 MIC) but the PMKID is computed with
         // HMAC-SHA1 (AKM 2), so the stored PMKID's akm field MUST be Wpa2Psk so it
-        // emits as a Type 2 PMKID line. Documented in `extract/common.rs` (line 191).
+        // emits as a Type 2 PMKID line. The promotion lives in `store_eapol_key`
+        // above (`pmkid_akm = if akm == AkmType::Wpa1 { AkmType::Wpa2Psk } else { akm }`).
         let pmkid_val: [u8; 16] = [0xAB; 16];
         let mut kde = vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
         kde.extend_from_slice(&pmkid_val);
