@@ -586,36 +586,48 @@ pub fn run_output(
             let dropped = unresolved_drops.get(&ap).copied().unwrap_or(0);
             let (first_us, last_us) = ranges.get(&ap).copied().unwrap_or((0, 0));
             let first_us = if first_us == u64::MAX { 0 } else { first_us };
-            logger.log_essid_not_found_summary(&format_mac_hex(ap), dropped, first_us, last_us);
+            logger.log_essid_not_found_summary(format_mac_hex(ap), dropped, first_us, last_us);
         }
     }
     stats.essid_unresolved_aps = unresolved_drops.len() as u64;
 
     // --- Auxiliary outputs ---
+    //
+    // Per CLAUDE.md rule 12 ("I/O errors abort"), every auxiliary writer must
+    // explicitly `flush()?` before its `BufWriter` is dropped. `BufWriter`'s
+    // `Drop` impl swallows flush errors silently, so without an explicit flush
+    // a disk-full mid-write or a closed-pipe event would silently truncate the
+    // file and the process would still exit `0`.
 
     if let Some(path) = &paths.essid_list {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_essid_list(essid_set, &mut f)?;
+        f.flush()?;
     }
     if let Some(path) = &paths.probe_essid_list {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_probe_essid_list(probe_essid_set, &mut f)?;
+        f.flush()?;
     }
     if let Some(path) = &paths.wordlist {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_wordlist(wordlist_store, &mut f)?;
+        f.flush()?;
     }
     if let Some(path) = &paths.identity_list {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_identities(identity_set, &mut f)?;
+        f.flush()?;
     }
     if let Some(path) = &paths.username_list {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_usernames(username_set, &mut f)?;
+        f.flush()?;
     }
     if let Some(path) = &paths.device_info {
         let mut f = BufWriter::new(std::fs::File::create(path)?);
         write_device_info(device_store, &mut f)?;
+        f.flush()?;
     }
 
     Ok(stats)
