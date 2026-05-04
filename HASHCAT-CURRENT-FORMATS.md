@@ -1,5 +1,9 @@
 # Hashcat WPA-PSK Hash Formats Today (Modes 22000 and 37100)
 
+> **Status: reference.** Describes what current hashcat releases accept
+> today. Frozen against hashcat at the time of writing; no design or
+> proposal content is in this file.
+
 A self-contained reference for every WPA-PSK hash-line format the
 current hashcat release accepts, exactly as the modules parse them. This
 document covers state of the world; it does not propose changes.
@@ -230,10 +234,10 @@ Concrete byte values commonly seen on `WPA*02*` / `WPA*04*` lines:
 
 ```
 0x00   N1E2, no flags             clean capture, challenge pair
-0x02   N3E2, no flags             clean capture, authorised
-0x05   N3E4, no flags             clean capture, authorised
-0x13   N2E3, APLESS               AP-less authorised
-0x14   N4E3, APLESS               AP-less authorised
+0x02   N3E2, no flags             clean capture, authorized
+0x05   N3E4, no flags             clean capture, authorized
+0x13   N2E3, APLESS               AP-less authorized
+0x14   N4E3, APLESS               AP-less authorized
 0x82   N3E2 with NC               RC drift required nonce correction
 0x22   N3E2 with LE               RC pair resolved as little-endian
 0x42   N3E2 with BE               RC pair resolved as big-endian

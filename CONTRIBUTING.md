@@ -93,8 +93,8 @@ New findings about upstream bugs land as a regression test in
 Cite the relevant `ARCHITECTURE.md §` if the finding is referenced from
 production code; otherwise the test is its own documentation.
 
-## Authorised use
+## Authorized use
 
-All contributions must be framed for authorised defensive / research use.
+All contributions must be framed for authorized defensive / research use.
 Do not submit features that capture traffic, inject frames, or otherwise
 move this tool out of the "offline pcap analysis" lane.

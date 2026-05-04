@@ -1,5 +1,12 @@
 # Hashcat Proposed Changes: Two New WPA-PSK Modes
 
+> **Status: design proposal, not implemented.** Nothing in this file
+> ships in upstream hashcat today. The wpawolf side already emits the
+> taxonomy described in
+> [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md); this document is
+> the half of the story that lives outside this repository and would
+> require a hashcat module patch to land.
+
 A design sketch for two new hashcat modules that consume the 11-type
 taxonomy from [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) in a
 single pass: one passphrase-input mode and one PMK-direct mode,
@@ -526,7 +533,7 @@ hashcat -m 22003 fixtures/typeNN.taxo pmk_list.txt
 Sources for fixture material:
 
 - Types 1, 2, 3, 5, 6, 7: synthesise from the `[IEEE 802.11-2024]`
-  spec test vectors, or extract from authorised lab captures via
+  spec test vectors, or extract from authorized lab captures via
   `wpawolf -o`. The lifted reference kernels (m22000_aux1..4 and
   m37100_aux1..2) already have known-good test corpora that can be
   re-emitted in the new prefix scheme.

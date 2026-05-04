@@ -1,5 +1,11 @@
 # The 11 New WPA-PSK Hash Formats: How and Why
 
+> **Status: specification.** Defines the 11-type taxonomy that wpawolf
+> emits today on its taxonomy sinks (`-o`, `--wpa1-out`, `--wpa2-out`,
+> ...). The hashcat side of consuming these is sketched separately in
+> [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) and is
+> not yet implemented in upstream hashcat.
+
 A complete reference for the 11-type WPA-PSK hash taxonomy that
 `wpawolf` emits and that a future hashcat module will consume. Every
 PSK-crackable hash defined by `[IEEE 802.11-2024]` gets exactly one
@@ -449,7 +455,7 @@ MIC was computed:
 
 By default emitters write all 6 (resilient against retransmissions
 where one combo's nonce mutated); collapsing to 3 keeps one survivor
-per class chosen by smallest RC gap, then by authorised-combo
+per class chosen by smallest RC gap, then by authorized-combo
 priority (N3E2 over N1E2, N2E3 over N4E3, N3E4 over N1E4 -- M3-sourced
 nonces are canonical because M3 is signed by the AP after its own
 PTK derivation).
@@ -496,10 +502,10 @@ for "session likely had nonce drift".
 
 ```
 0x00   N1E2, no flags             clean capture, challenge pair
-0x02   N3E2, no flags             clean capture, authorised
-0x05   N3E4, no flags             clean capture, authorised
-0x13   N2E3, APLESS               AP-less authorised
-0x14   N4E3, APLESS               AP-less authorised
+0x02   N3E2, no flags             clean capture, authorized
+0x05   N3E4, no flags             clean capture, authorized
+0x13   N2E3, APLESS               AP-less authorized
+0x14   N4E3, APLESS               AP-less authorized
 0x82   N3E2 with NC               RC drift required nonce correction
 0x22   N3E2 with LE               RC pair resolved as little-endian
 0x42   N3E2 with BE               RC pair resolved as big-endian

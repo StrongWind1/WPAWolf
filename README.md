@@ -29,6 +29,13 @@ It is a ground-up Rust rewrite of
 designed to fix the handful of upstream behaviours that silently
 discard valid handshakes.
 
+> **Authorized use only.** `wpawolf` operates on pcap files you already
+> have in hand. It does not capture traffic, inject frames, or touch
+> the radio in any way. Running it on captures you do not own or have
+> written authorization to analyse is illegal in most jurisdictions.
+> Use it for your own networks, CTF challenges, lab research, and
+> authorized engagements.
+
 ## Quick start
 
 ```sh
@@ -48,16 +55,16 @@ SHA-384 captures the legacy format cannot represent.
 
 ## Documentation map
 
-Six focused docs cover the project. Read by audience:
+Six focused docs cover the project:
 
-| Document | Audience | What it covers |
-|----------|----------|----------------|
-| [README.md](README.md) (this file) | every user | What wpawolf does, every CLI flag, examples, hashcat compatibility, build / install |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | contributors | Why everything is the way it is: 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, output fan-out / dedup design, FR-* contracts, stats catalogue |
-| [CHANGELOG.md](CHANGELOG.md) | upgraders, integrators | Per-release summary of what shipped, what changed, and what was removed since the previous version |
-| [HASHCAT-CURRENT-FORMATS.md](HASHCAT-CURRENT-FORMATS.md) | hashcat developers, integrators | Every WPA-PSK hash format current hashcat understands today (modes 22000 + 37100), the four prefixes, the `keyver` trick, message-pair byte (EAPOL + PMKID), per-row mapping of the 11 types onto today's hashcat, support matrix, limitations |
-| [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | hashcat developers, cryptographers | Why the 11-type taxonomy exists and how each row works: encoding rules, per-type cracker math (PBKDF2 -> PMKID / PTK / MIC), hash-line layout (16 B vs 24 B MIC, FT extras), N#E# notation + M#E# translation, message-pair byte spec |
-| [HASHCAT-PROPOSED-CHANGES.md](HASHCAT-PROPOSED-CHANGES.md) | hashcat module maintainers | Sketch of a unified `mode 22001` consuming all 11 types: parsed-line struct widening, loader dispatch, per-kernel work items, migration path |
+| Document | Read this when you want to know |
+|----------|---------------------------------|
+| [README.md](README.md) (this file) | What wpawolf does, every CLI flag, examples, hashcat compatibility, build / install |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Why everything is the way it is: 5-phase runtime pipeline, critical invariants, EAPOL pairing, PMKID extraction, output fan-out / dedup design, FR-* contracts, stats catalogue |
+| [CHANGELOG.md](CHANGELOG.md) | Per-release summary of what shipped, what changed, and what was removed since the previous version |
+| [HASHCAT-CURRENT-FORMATS.md](HASHCAT-CURRENT-FORMATS.md) | Every WPA-PSK hash format current hashcat understands today (modes 22000 + 37100): the four prefixes, the `keyver` trick, message-pair byte (EAPOL + PMKID), per-row mapping of the 11 types onto today's hashcat, support matrix, limitations |
+| [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | Why the 11-type taxonomy exists and how each row works: encoding rules, per-type cracker math (PBKDF2 -> PMKID / PTK / MIC), hash-line layout (16 B vs 24 B MIC, FT extras), N#E# notation + M#E# translation, message-pair byte spec |
+| [HASHCAT-PROPOSED-CHANGES.md](HASHCAT-PROPOSED-CHANGES.md) | The sketch of a unified `mode 22001` consuming all 11 types: parsed-line struct widening, loader dispatch, per-kernel work items, migration path. *(design proposal, not implemented.)* |
 
 ---
 
@@ -404,8 +411,8 @@ and the full message-pair byte spec are in
   consulted before the AKM map, correcting the WPA1+RSN-descriptor+
   PMKID-KDE vendor quirk and other mixed-mode beacon discrepancies
 - Strict clippy (pedantic + nursery + cargo), `make check-all` zero
-  warnings, 712 tests across lib + binary + integration suites
-- Companion [`wpawolf-fixturegen`](tools/fixturegen/) workspace crate
+  warnings, 735 tests across lib + binary + integration suites
+- A companion workspace crate at [`tools/fixturegen/`](tools/fixturegen/)
   emits a deterministic 75-fixture pcap/pcapng corpus covering every
   (hash type x PMKID site x N#E# combo x link-layer x edge case)
   tuple, with cryptographically valid PMK / PMKID / MIC values --
@@ -418,11 +425,16 @@ and the full message-pair byte spec are in
 
 ## Status
 
-Functional. Full pipeline (phases 0 -- 9), all 20 PMKID locations,
-hcxpcapngtool stats parity, the 11-type taxonomy, and the nine-sink
-CLI surface are complete. Superset integration tests plus a 1,788-
-capture regression oracle confirm `wpawolf_output >=
-hcxpcapngtool_output` at hash-content level.
+Current release: `v0.3.x` (see [`CHANGELOG.md`](CHANGELOG.md) for the
+exact patch version). The 5-phase runtime pipeline, all 20 PMKID
+locations, hcxpcapngtool stats parity, the 11-type taxonomy, and the
+nine-sink CLI surface are in place. The superset integration test in
+`tests/integration/superset_test.rs` runs against an in-tree
+deterministic fixture corpus on every CI build and asserts
+`wpawolf_output >= hcxpcapngtool_output` line-for-line. An external
+~1,800-capture / 5.4 GB regression dataset, private to the maintainer
+and not part of this repository, is exercised opportunistically before
+each release.
 
 Known follow-up: the SHA-384 family (types 8 -- 11) needs a dedicated
 hashcat 24 B MIC kernel before those lines crack. The unified `mode
@@ -517,16 +529,6 @@ wpawolf/
 ├── Cargo.toml                    Workspace + crate config + strict lint policy
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
-
----
-
-## Authorized use only
-
-`wpawolf` operates on pcap files you already have in hand. It does not
-capture traffic, inject frames, or touch the radio in any way. Running
-it on captures you do not own or have written authorisation to analyse
-is illegal in most jurisdictions. Use it for your own networks, CTF
-challenges, lab research, and authorised engagements.
 
 ---
 

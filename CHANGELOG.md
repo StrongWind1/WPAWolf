@@ -5,7 +5,8 @@ diary. For per-commit detail, see `git log`. For wire-level behaviour, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md). The "Releases" section below captures
 notable per-version boundaries; the rest of the file describes what the
 current release supports. For semantic-version intent the project follows
-[SemVer](https://semver.org/spec/v2.0.0.html); v1.x is the current line.
+[SemVer](https://semver.org/spec/v2.0.0.html); the project is on the
+`v0.3.x` line and has not yet declared a `1.0` API.
 
 ## Releases
 
@@ -223,7 +224,7 @@ from the upstream tag (`HCXTOOLS_TAG` pinned in `.github/workflows/ci.yml`).
 
 ## Quality bar
 
-- 712 tests (unit + binary + integration, including a superset oracle
+- 735 tests (unit + binary + integration, including a superset oracle
   asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture
   with `hcxpcapngtool >= 7.0.1`,
   a cross-file pairing oracle confirming the shared `MessageStore`
@@ -239,8 +240,11 @@ from the upstream tag (`HCXTOOLS_TAG` pinned in `.github/workflows/ci.yml`).
 - `cargo deny` gates the supply chain (OSI-approved permissive licences only)
 - `make check-all` runs `fmt`, `clippy`, `audit`, `test`, `doc -D warnings`,
   ASCII / LF hygiene, `cargo machete`. Required green before any commit
-- A 1,788-capture regression corpus confirms content-level superset of
-  hcxpcapngtool
+- An external ~1,800-capture / 5.4 GB regression dataset (private to the
+  maintainer, not part of this repository) is exercised opportunistically
+  before each release; it confirms content-level superset of
+  hcxpcapngtool on real-world traffic that is too noisy or
+  legally-encumbered to commit
 
 ## Performance
 
@@ -265,7 +269,7 @@ from the upstream tag (`HCXTOOLS_TAG` pinned in `.github/workflows/ci.yml`).
 - Global SipHash dedup over the significant hash fields
 - Every wire constant cites its IEEE 802.11-2024 / RFC / hcxtools source
 
-## Out of scope (v1)
+## Out of scope
 
 - Capture / injection (file-only tool)
 - Hash cracking (feed output to hashcat)
@@ -278,72 +282,46 @@ from the upstream tag (`HCXTOOLS_TAG` pinned in `.github/workflows/ci.yml`).
 
 ## Trajectory
 
-Major work that has landed: full pipeline (phases 0-9), per-pair AKM
-resolution that correctly routes FT-PSK to mode 37100 even when the AP
-advertises PSK first, all 20 PMKID locations (S1-S20), tiered EAPOL
-direction classification for WDS relay frames, parallel Phase 2 pairing,
+The 5-phase runtime pipeline, all nine implementation milestones
+(input parsers, link-layer strip, 802.11 frame parsing, stores, pairing
+engine, output, CLI, superset tests, stats), per-pair AKM resolution
+that correctly routes FT-PSK to mode 37100 even when the AP advertises
+PSK first, all 20 PMKID locations (S1-S20), tiered EAPOL direction
+classification for WDS relay frames, parallel Phase 4 pairing,
 hcxpcapngtool stats parity (per-AKM assoc/reassoc, per-band, beacon
 channel histogram, malformed MAC header counter), router-endianness
 detection (LE/BE bits in the message_pair byte), the canonical 11-type
 hash taxonomy, and the consolidation of the design / requirements /
-hash-types documents into a single canonical [`ARCHITECTURE.md`](ARCHITECTURE.md).
+hash-types documents into a single canonical
+[`ARCHITECTURE.md`](ARCHITECTURE.md) have all landed on `v0.3.x`.
 
-Recent (v0.3.0): operator-experience pass driven by a 1,797-file regression
-run.
+Notable recent work, summarised here for upgraders; full per-release
+detail is in the *Releases* section above.
 
-- **Multi-file Phase 1 banner.** When the input expands to more than one
-  capture (typical of a recursive directory walk), the Phase 1 stats
-  banner now surfaces `input files processed`, plus
-  `BTreeMap<String, u64>` histograms of `file formats seen`, `endians
-  seen`, `network types seen`, and `last file processed`. Single-file
-  runs keep the original `file name / file format / endian / network
-  type` quartet for hcxpcapngtool parity. Counts and histograms are
-  populated once per opened reader from `FileMetadata`; the histograms
-  are sorted by descending count then key for deterministic display.
-- **Unresolved-SSID hashes are dropped, not emitted (FR-ESSID-3
-  rewrite).** A hash line whose AP has no SSID resolved (no Beacon /
-  Probe Response / Assoc Request / Reassoc Request / directed Probe
-  Request / MLD link-MAC fallback yielded one) is uncrackable -- hashcat
-  derives the PMK from PSK + ESSID. Such lines also trigger
-  `Salt-value exception` in mode 37100 and `Token length exception` in
-  mode 22000 at hashcat parse time. Output now drops the would-be
-  emission, accounts for it via `essid_unresolved_emissions` /
-  `essid_unresolved_aps` in the Phase 3 banner, and writes one
-  `[essid_not_found_summary] ap=... dropped=N first_seen_us=...
-  last_seen_us=...` log line per affected AP. Operators can locate the
-  source frames in the original capture via the timestamp range.
-- **Lazy hash-sink files.** A configured sink (`--22000-out`,
-  `--psk-sha384-out`, ...) no longer calls `File::create` until the
-  first matching hash line is written. A sink whose hash type does not
-  appear in the corpus therefore never materialises an empty file on
-  disk. Previously `--psk-sha384-out` etc. always left a 0-byte file.
-- **Stat-line clarity pass.** Every "issue" stat line now ends with an
-  explicit suffix: `(frame dropped)`, `(frames dropped)`,
-  `(unrecoverable)`, `(recovered)`, `(forgiven; processed)`, or
-  `(diagnostic; ...)`. The biggest semantic fix:
-  `Mesh Data frames with Mesh Control header skipped` ->
-  `Mesh Data frames recovered (Mesh Control header unwrapped)`. The old
-  label read like the frames were skipped (dropped); the counter
-  actually means the opposite -- every increment is a frame whose mesh
-  wrapper was successfully unwrapped so the inner LLC/EAPOL could be
-  processed.
-- **PMKID family counter relabel.** `non-FT PSK family (mode 22000:
-  WPA2-PSK/SHA256/SHA384)` -> `PMKIDs found by AKM family (non-FT:
-  WPA2-PSK/SHA256/SHA384)` (and the FT row in kind). The old label was
-  misleading: the counter increments at PMKID *extraction* time, not at
-  emission, so the value never matches the actual `lines written` to
-  the legacy mode 22000 / 37100 sinks below it.
+- **Operator-experience pass (v0.3.0)** driven by a regression run
+  against the maintainer's external dataset: multi-file Phase 1 banner
+  (file-format / endian / network-type histograms across the whole
+  input set), unresolved-SSID hashes are now dropped rather than
+  silently emitted as uncrackable lines (with an
+  `[essid_not_found_summary]` log entry per affected AP), lazy
+  hash-sink files (configured-but-empty sinks no longer leave 0-byte
+  files on disk), and a stat-line clarity pass that suffixes every
+  issue counter with `(frame dropped)`, `(recovered)`, or
+  `(diagnostic; ...)` so operators can tell loss from recovery at a
+  glance. The biggest semantic relabel: `Mesh Data frames with Mesh
+  Control header skipped` -> `Mesh Data frames recovered (Mesh Control
+  header unwrapped)`.
+- **Nine-sink CLI surface** that surfaces the 11-type taxonomy at the
+  file level: `--22000-out` / `--37100-out` are line-format-identical
+  hashcat drop-ins, the new `-o` is the combined taxonomy file (every
+  emitted hash, prefix `WPA*<type-code>*`), and per-AKM sinks
+  (`--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`,
+  `--psk-sha384-out`, `--ft-psk-sha384-out`) each route a single AKM
+  family. The Phase 4 banner gains one row per sink with file path +
+  lines written + dedup dropped.
 
-Earlier: nine-sink CLI surface that surfaces the 11-type taxonomy at the
-file level. The legacy `-o` / `-f` short flags are now the long-form
-`--22000-out` / `--37100-out` (line-format-identical for hashcat); the new
-`-o` is the combined taxonomy file (every emitted hash, prefix
-`WPA*<type-code>*`). Per-AKM sinks (`--wpa1-out`, `--wpa2-out`,
-`--psk-sha256-out`, `--ft-out`, `--psk-sha384-out`, `--ft-psk-sha384-out`)
-each accept a single AKM family in the new prefix scheme. Phase 4 banner
-gains one row per sink with file path + lines written + dedup dropped.
-
-Wire-level correctness improvements (post nine-sink):
+Wire-level correctness improvements that landed alongside the
+nine-sink surface:
 
 - **KDV-first AKM reconciliation** in `store_eapol_key`. The wire-level
   Key Descriptor Version (KDV bits B0-B2 of EAPOL Key Information per
