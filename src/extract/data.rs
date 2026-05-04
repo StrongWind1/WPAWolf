@@ -220,7 +220,6 @@ pub fn process_data(
         }
     }
 }
-
 /// Processes a single MSDU payload (LLC/SNAP+payload) for EAPOL-Key / EAP.
 ///
 /// Called once per Data frame for non-aggregated MSDUs and once per subframe
@@ -336,5 +335,165 @@ fn process_msdu_payload(
                 }
             }
         }
+    }
+}
+
+// --- Unit tests ---
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        missing_docs,
+        clippy::wildcard_imports,
+        reason = "test module"
+    )]
+
+    use super::*;
+    use crate::ieee80211::frame;
+    use crate::stats::Stats;
+    use crate::store::messages::PendingEapol;
+    use crate::types::MacAddr;
+
+    /// Bundle of every store + stats + logger that `process_data` writes through.
+    /// Test helper only; exists so each test can build a fresh world without 16
+    /// `let mut` lines per case.
+    struct DataWorld {
+        message_store: MessageStore,
+        pmkid_store: PmkidStore,
+        essid_map: EssidMap,
+        akm_map: AkmMap,
+        identity_set: IdentitySet,
+        username_set: UsernameSet,
+        wordlist_store: WordlistStore,
+        stats: Stats,
+        pending_eapol: Vec<PendingEapol>,
+        fragment_store: FragmentStore,
+        logger: Logger,
+    }
+
+    impl DataWorld {
+        fn new() -> Self {
+            Self {
+                message_store: MessageStore::new(),
+                pmkid_store: PmkidStore::new(),
+                essid_map: EssidMap::new(),
+                akm_map: AkmMap::new(),
+                identity_set: IdentitySet::new(),
+                username_set: UsernameSet::new(),
+                wordlist_store: WordlistStore::new(),
+                stats: Stats::new(),
+                pending_eapol: Vec::new(),
+                fragment_store: FragmentStore::new(),
+                logger: Logger::new(None).unwrap(),
+            }
+        }
+    }
+
+    fn data_mac_hdr(direction: frame::FrameDirection, ap: [u8; 6], sta: [u8; 6]) -> frame::MacHeader {
+        frame::MacHeader {
+            ap: MacAddr::from_bytes(ap),
+            sta: MacAddr::from_bytes(sta),
+            frame_type: frame::TYPE_DATA,
+            subtype: 0, // Data
+            protected: false,
+            body_offset: 24,
+            direction,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        }
+    }
+
+    fn run_data(world: &mut DataWorld, mac_hdr: &frame::MacHeader, body: &[u8], cfg: ExtractConfig) {
+        process_data(
+            mac_hdr,
+            body,
+            0,
+            &cfg,
+            &mut world.message_store,
+            &mut world.pmkid_store,
+            &world.essid_map,
+            &mut world.akm_map,
+            &mut world.identity_set,
+            &mut world.username_set,
+            &mut world.wordlist_store,
+            &mut world.stats,
+            &mut world.pending_eapol,
+            &mut world.fragment_store,
+            &mut world.logger,
+        );
+    }
+
+    fn cfg_off() -> ExtractConfig {
+        ExtractConfig {
+            populate_wordlist: false,
+            populate_device: false,
+            populate_identity: false,
+            populate_username: false,
+            scan_ies: false,
+        }
+    }
+
+    #[test]
+    fn empty_body_does_not_panic_or_bump_eapol_llc_invalid() {
+        // A zero-byte body fails the LLC/SNAP gate; nothing should reach the
+        // EAPOL parser and `eapol_llc_invalid` (the silent-drop counter) must
+        // stay at zero. Guards against a regression where an empty body was
+        // ever fed past the gate.
+        let mut world = DataWorld::new();
+        let hdr = data_mac_hdr(frame::FrameDirection::FromSta, [0xAA; 6], [0xBB; 6]);
+        run_data(&mut world, &hdr, &[], cfg_off());
+        assert_eq!(world.stats.eapol_llc_invalid, 0);
+        assert_eq!(world.stats.eapol_tier1_direction, 0);
+        assert_eq!(world.message_store.group_count(), 0);
+        assert!(world.pending_eapol.is_empty());
+    }
+
+    #[test]
+    fn wds_eapol_defers_to_pending_eapol() {
+        // WDS (4-address) data frames have ambiguous transmitter role, so
+        // EAPOL classification is deferred to Phase 1.5. Confirm the LLC/SNAP
+        // EAPOL EtherType triggers the deferral path: `pending_eapol` gains an
+        // entry and `relay_frames` is bumped. The frame must NOT take the
+        // standard tier-1 path (`eapol_tier1_direction` stays at 0).
+        let mut world = DataWorld::new();
+        let hdr = data_mac_hdr(frame::FrameDirection::Wds, [0xAA; 6], [0xBB; 6]);
+        // 8-byte LLC/SNAP with EAPOL EtherType `0x888E`. Body content does not
+        // matter for the deferral path -- only the EtherType.
+        let body = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E, 0x02, 0x03, 0x00, 0x00];
+        run_data(&mut world, &hdr, &body, cfg_off());
+        assert_eq!(world.pending_eapol.len(), 1, "WDS EAPOL must be deferred");
+        assert_eq!(world.stats.relay_frames, 1);
+        assert_eq!(world.stats.eapol_tier1_direction, 0, "WDS must skip tier-1 fast path");
+    }
+
+    #[test]
+    fn wds_non_eapol_body_is_silently_skipped() {
+        // WDS frames whose body is not EAPOL must not be deferred -- the
+        // pending list stays empty. Guards against a regression where every
+        // WDS data frame was queued regardless of content.
+        let mut world = DataWorld::new();
+        let hdr = data_mac_hdr(frame::FrameDirection::Wds, [0xAA; 6], [0xBB; 6]);
+        // 8-byte LLC/SNAP with an arbitrary non-EAPOL EtherType (`0x0800` IPv4).
+        let body = vec![0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+        run_data(&mut world, &hdr, &body, cfg_off());
+        assert!(world.pending_eapol.is_empty(), "non-EAPOL WDS must not defer");
+        assert_eq!(world.stats.relay_frames, 0);
+    }
+
+    #[test]
+    fn protected_data_frame_bumps_wpa_encrypted_counter() {
+        // Protected data frames (B14 set) increment `wpa_encrypted_data` even
+        // when the body is empty -- the counter is wire-bit-driven.
+        let mut world = DataWorld::new();
+        let mut hdr = data_mac_hdr(frame::FrameDirection::FromSta, [0xAA; 6], [0xBB; 6]);
+        hdr.protected = true;
+        run_data(&mut world, &hdr, &[], cfg_off());
+        assert_eq!(world.stats.wpa_encrypted_data, 1);
     }
 }

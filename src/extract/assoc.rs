@@ -298,3 +298,202 @@ pub fn process_assoc_or_reassoc_req(
         }
     }
 }
+
+// --- Unit tests ---
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        missing_docs,
+        clippy::wildcard_imports,
+        reason = "test module"
+    )]
+
+    use super::*;
+    use crate::ieee80211::frame;
+    use crate::stats::Stats;
+    use crate::store::AkmMap;
+
+    fn assoc_world() -> (EssidMap, EssidSet, AkmMap, MldStore, PmkidStore, WordlistStore, Stats, Logger) {
+        (
+            EssidMap::new(),
+            EssidSet::new(),
+            AkmMap::new(),
+            MldStore::new(),
+            PmkidStore::new(),
+            WordlistStore::new(),
+            Stats::new(),
+            Logger::new(None).unwrap(),
+        )
+    }
+
+    fn assoc_hdr(subtype: u8) -> frame::MacHeader {
+        frame::MacHeader {
+            ap: MacAddr::from_bytes([0xAA; 6]),
+            sta: MacAddr::from_bytes([0xBB; 6]),
+            frame_type: frame::TYPE_MANAGEMENT,
+            subtype,
+            protected: false,
+            body_offset: 24,
+            direction: frame::FrameDirection::FromSta,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        }
+    }
+
+    /// Builds an RSN IE (tag 48) with one PSK AKM (`00:0F:AC:02`) and zero PMKIDs.
+    /// Wraps the IE in the tagged-parameter envelope `[id, len, value...]`.
+    fn rsn_ie_psk_no_pmkid() -> Vec<u8> {
+        let mut rsn = Vec::new();
+        rsn.extend_from_slice(&[0x01, 0x00]); // RSN version 1
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]); // group cipher CCMP
+        rsn.extend_from_slice(&[0x01, 0x00]); // pairwise count 1
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]); // pairwise CCMP
+        rsn.extend_from_slice(&[0x01, 0x00]); // AKM count 1
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x02]); // AKM = PSK
+        rsn.extend_from_slice(&[0x00, 0x00]); // RSN capabilities
+        rsn.extend_from_slice(&[0x00, 0x00]); // PMKID count 0
+        let mut tagged = vec![48u8, u8::try_from(rsn.len()).unwrap()];
+        tagged.extend_from_slice(&rsn);
+        tagged
+    }
+
+    /// Same as above but with one PMKID (16 bytes) in the PMKID list.
+    fn rsn_ie_psk_with_pmkid(pmkid: [u8; 16]) -> Vec<u8> {
+        let mut rsn = Vec::new();
+        rsn.extend_from_slice(&[0x01, 0x00]);
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]);
+        rsn.extend_from_slice(&[0x01, 0x00]);
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]);
+        rsn.extend_from_slice(&[0x01, 0x00]);
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x02]);
+        rsn.extend_from_slice(&[0x00, 0x00]);
+        rsn.extend_from_slice(&[0x01, 0x00]); // PMKID count 1
+        rsn.extend_from_slice(&pmkid);
+        let mut tagged = vec![48u8, u8::try_from(rsn.len()).unwrap()];
+        tagged.extend_from_slice(&rsn);
+        tagged
+    }
+
+    #[test]
+    fn assoc_req_with_psk_akm_bumps_per_akm_counter() {
+        // AssocReq with declared PSK AKM (suite type 2) bumps both
+        // `assoc_req_frames` and the per-AKM `assoc_req_wpa2_psk` counter.
+        // The reassoc-side counter must stay zero -- the dispatcher must
+        // tell the two subtypes apart.
+        let (mut em, mut es, mut akm, mut mld, mut pm, mut wl, mut stats, mut logger) = assoc_world();
+        let hdr = assoc_hdr(SUBTYPE_ASSOC_REQ);
+        // Fixed assoc-req body (4 bytes: capability + listen interval) then IEs.
+        let mut body = vec![0u8; ASSOC_REQ_FIXED];
+        body.extend_from_slice(&rsn_ie_psk_no_pmkid());
+        process_assoc_or_reassoc_req(
+            &hdr,
+            &body,
+            0,
+            &mut em,
+            &mut es,
+            &mut akm,
+            &mut mld,
+            &mut pm,
+            &mut wl,
+            &mut stats,
+            &mut logger,
+            false,
+        );
+        assert_eq!(stats.assoc_req_frames, 1);
+        assert_eq!(stats.assoc_req_wpa2_psk, 1);
+        assert_eq!(stats.reassoc_req_frames, 0);
+        assert_eq!(stats.reassoc_req_wpa2_psk, 0);
+    }
+
+    #[test]
+    fn reassoc_req_uses_reassoc_fixed_offset_and_counter() {
+        // ReassocReq uses a 10-byte fixed-field block (capability + listen
+        // interval + current AP address) and bumps the reassoc-side counters.
+        let (mut em, mut es, mut akm, mut mld, mut pm, mut wl, mut stats, mut logger) = assoc_world();
+        let hdr = assoc_hdr(super::super::common::SUBTYPE_REASSOC_REQ);
+        let mut body = vec![0u8; REASSOC_REQ_FIXED];
+        body.extend_from_slice(&rsn_ie_psk_no_pmkid());
+        process_assoc_or_reassoc_req(
+            &hdr,
+            &body,
+            0,
+            &mut em,
+            &mut es,
+            &mut akm,
+            &mut mld,
+            &mut pm,
+            &mut wl,
+            &mut stats,
+            &mut logger,
+            false,
+        );
+        assert_eq!(stats.reassoc_req_frames, 1);
+        assert_eq!(stats.reassoc_req_wpa2_psk, 1);
+        assert_eq!(stats.assoc_req_frames, 0);
+    }
+
+    #[test]
+    fn assoc_req_extracts_pmkid_from_rsn_ie() {
+        // A non-NULL, non-0xFF PMKID inside the RSN IE PMKID List of an
+        // AssocReq must land in the PmkidStore tagged with `AssocRequest`,
+        // and `pmkid_assoc_req` plus `pmkids_found` must increment.
+        let (mut em, mut es, mut akm, mut mld, mut pm, mut wl, mut stats, mut logger) = assoc_world();
+        let pmkid: [u8; 16] = [0xAB; 16];
+        let hdr = assoc_hdr(SUBTYPE_ASSOC_REQ);
+        let mut body = vec![0u8; ASSOC_REQ_FIXED];
+        body.extend_from_slice(&rsn_ie_psk_with_pmkid(pmkid));
+        process_assoc_or_reassoc_req(
+            &hdr,
+            &body,
+            0,
+            &mut em,
+            &mut es,
+            &mut akm,
+            &mut mld,
+            &mut pm,
+            &mut wl,
+            &mut stats,
+            &mut logger,
+            false,
+        );
+        assert_eq!(pm.total_count(), 1);
+        let entry = pm.iter().next().unwrap();
+        assert_eq!(entry.source, PmkidSource::AssocRequest);
+        assert_eq!(entry.pmkid, pmkid);
+        assert_eq!(stats.pmkids_found, 1);
+        assert_eq!(stats.pmkid_assoc_req, 1);
+    }
+
+    #[test]
+    fn assoc_req_without_rsn_ie_does_not_classify_akm() {
+        // No RSN IE -> AKM detection finds nothing; per-AKM counters stay at
+        // zero. Only the frame-level counter bumps.
+        let (mut em, mut es, mut akm, mut mld, mut pm, mut wl, mut stats, mut logger) = assoc_world();
+        let hdr = assoc_hdr(SUBTYPE_ASSOC_REQ);
+        let body = vec![0u8; ASSOC_REQ_FIXED]; // fixed fields only, no IEs
+        process_assoc_or_reassoc_req(
+            &hdr,
+            &body,
+            0,
+            &mut em,
+            &mut es,
+            &mut akm,
+            &mut mld,
+            &mut pm,
+            &mut wl,
+            &mut stats,
+            &mut logger,
+            false,
+        );
+        assert_eq!(stats.assoc_req_frames, 1);
+        assert_eq!(stats.assoc_req_wpa2_psk, 0);
+        assert_eq!(pm.total_count(), 0);
+    }
+}

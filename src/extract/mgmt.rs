@@ -252,3 +252,188 @@ pub fn process_mgmt(
         _ => {}, // subtypes 7 (reserved) and >15
     }
 }
+
+// --- Unit tests ---
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        missing_docs,
+        clippy::wildcard_imports,
+        reason = "test module"
+    )]
+
+    use super::*;
+    use crate::stats::Stats;
+    use crate::store::AkmMap;
+    use crate::types::MacAddr;
+
+    /// Bundle of every store + stats + logger that `process_mgmt` writes through.
+    struct MgmtWorld {
+        essid_map: EssidMap,
+        essid_set: EssidSet,
+        probe_essid_set: ProbeEssidSet,
+        akm_map: AkmMap,
+        mld_store: MldStore,
+        pmkid_store: PmkidStore,
+        wordlist_store: WordlistStore,
+        device_store: DeviceInfoStore,
+        stats: Stats,
+        logger: Logger,
+    }
+
+    impl MgmtWorld {
+        fn new() -> Self {
+            Self {
+                essid_map: EssidMap::new(),
+                essid_set: EssidSet::new(),
+                probe_essid_set: ProbeEssidSet::new(),
+                akm_map: AkmMap::new(),
+                mld_store: MldStore::new(),
+                pmkid_store: PmkidStore::new(),
+                wordlist_store: WordlistStore::new(),
+                device_store: DeviceInfoStore::new(),
+                stats: Stats::new(),
+                logger: Logger::new(None).unwrap(),
+            }
+        }
+    }
+
+    fn mgmt_hdr(subtype: u8, protected: bool) -> frame::MacHeader {
+        frame::MacHeader {
+            ap: MacAddr::from_bytes([0xAA; 6]),
+            sta: MacAddr::from_bytes([0xBB; 6]),
+            frame_type: frame::TYPE_MANAGEMENT,
+            subtype,
+            protected,
+            body_offset: 24,
+            direction: frame::FrameDirection::Ibss,
+            more_fragments: false,
+            sequence_number: 0,
+            fragment_number: 0,
+            is_amsdu: false,
+            mesh_control_present: false,
+        }
+    }
+
+    fn cfg_off() -> ExtractConfig {
+        ExtractConfig {
+            populate_wordlist: false,
+            populate_device: false,
+            populate_identity: false,
+            populate_username: false,
+            scan_ies: false,
+        }
+    }
+
+    fn run_mgmt(world: &mut MgmtWorld, hdr: &frame::MacHeader, body: &[u8]) {
+        process_mgmt(
+            hdr,
+            body,
+            0,
+            &cfg_off(),
+            &mut world.essid_map,
+            &mut world.essid_set,
+            &mut world.probe_essid_set,
+            &mut world.akm_map,
+            &mut world.mld_store,
+            &mut world.pmkid_store,
+            &mut world.wordlist_store,
+            &mut world.device_store,
+            &mut world.stats,
+            &mut world.logger,
+        );
+    }
+
+    #[test]
+    fn dispatcher_counts_deauth() {
+        // Deauth (subtype 12) is a counting-only stub: the dispatcher must bump
+        // exactly `deauth_frames` and touch nothing else.
+        let mut world = MgmtWorld::new();
+        let hdr = mgmt_hdr(SUBTYPE_DEAUTH, false);
+        run_mgmt(&mut world, &hdr, &[]);
+        assert_eq!(world.stats.deauth_frames, 1);
+        assert_eq!(world.stats.disassoc_frames, 0);
+        assert_eq!(world.stats.atim_frames, 0);
+    }
+
+    #[test]
+    fn dispatcher_counts_disassoc_atim_action_no_ack_timing_advert() {
+        // Each counting-only subtype gets one frame; the dispatcher should bump
+        // exactly the matching counter for each. Catches a regression where a
+        // `match` arm's body got copy-pasted to the wrong counter.
+        let cases: &[(u8, fn(&Stats) -> u64)] = &[
+            (SUBTYPE_DISASSOC, |s| s.disassoc_frames),
+            (SUBTYPE_ATIM, |s| s.atim_frames),
+            (SUBTYPE_ACTION_NO_ACK, |s| s.action_no_ack_frames),
+            (SUBTYPE_TIMING_ADVERT, |s| s.timing_advert_frames),
+            (SUBTYPE_MEASUREMENT_PILOT, |s| s.measurement_pilot_frames),
+        ];
+        for &(subtype, getter) in cases {
+            let mut world = MgmtWorld::new();
+            let hdr = mgmt_hdr(subtype, false);
+            run_mgmt(&mut world, &hdr, &[]);
+            assert_eq!(getter(&world.stats), 1, "subtype {subtype} should bump its counter");
+        }
+    }
+
+    #[test]
+    fn protected_action_short_circuits_with_skip_counter() {
+        // PMF-encrypted Action frames (only management subtype permitted to
+        // carry PMF) increment both `mgmt_protected_frames` and the
+        // skip-specific `mgmt_protected_action_skipped`. The body is encrypted
+        // ciphertext and walking it as IEs would pollute the PMKID store, so
+        // the dispatcher must early-return; `action_frames` still counts the
+        // frame for arrival statistics.
+        let mut world = MgmtWorld::new();
+        let hdr = mgmt_hdr(SUBTYPE_ACTION, true);
+        run_mgmt(&mut world, &hdr, &[]);
+        assert_eq!(world.stats.mgmt_protected_frames, 1);
+        assert_eq!(world.stats.mgmt_protected_action_skipped, 1);
+        assert_eq!(world.stats.action_frames, 1);
+        assert_eq!(world.pmkid_store.total_count(), 0);
+    }
+
+    #[test]
+    fn protected_non_action_still_parses() {
+        // PMF Beacon / ProbeResp / Auth / Assoc are spec-excluded -- a
+        // "protected" bit on those is treated as a hardware glitch and parsed.
+        // The protected counter still bumps but the early-return is NOT taken.
+        let mut world = MgmtWorld::new();
+        let hdr = mgmt_hdr(SUBTYPE_BEACON, true);
+        run_mgmt(&mut world, &hdr, &[]);
+        assert_eq!(world.stats.mgmt_protected_frames, 1);
+        assert_eq!(world.stats.mgmt_protected_action_skipped, 0);
+    }
+
+    #[test]
+    fn auth_dispatcher_classifies_by_algo() {
+        // Auth frame with algo=0 (Open System) should bump `auth_frames` and
+        // `auth_open_system` and leave `auth_fbt` / `auth_pasn` untouched.
+        // Body layout: algo (LE u16) + transaction sequence (LE u16) + status.
+        let mut world = MgmtWorld::new();
+        let hdr = mgmt_hdr(SUBTYPE_AUTH, false);
+        let body = vec![0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
+        run_mgmt(&mut world, &hdr, &body);
+        assert_eq!(world.stats.auth_frames, 1);
+        assert_eq!(world.stats.auth_open_system, 1);
+        assert_eq!(world.stats.auth_fbt, 0);
+        assert_eq!(world.stats.auth_pasn, 0);
+    }
+
+    #[test]
+    fn auth_truncated_body_does_not_panic() {
+        // A truncated auth body (under 4 bytes) must not panic; the algo-byte
+        // read short-circuits the rest of the dispatch.
+        let mut world = MgmtWorld::new();
+        let hdr = mgmt_hdr(SUBTYPE_AUTH, false);
+        run_mgmt(&mut world, &hdr, &[]);
+        // No algo byte read -> auth_frames still counted (the bump precedes the
+        // body read), but no algo classifier bumped.
+        assert_eq!(world.stats.auth_frames, 1);
+        assert_eq!(world.stats.auth_open_system, 0);
+    }
+}
