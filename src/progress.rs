@@ -20,7 +20,12 @@
 //! where progress lines would contaminate downstream tools.
 
 use std::fmt::Write as _;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
+// `Read` trait is only used inside the Linux `current_rss_mib` cfg block
+// (the `/proc/self/statm` reader); on macOS / Windows the unused-imports lint
+// would otherwise reject the build. Gate the import to match the only call site.
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
 use std::time::Instant;
 
 // --- Cadence thresholds ---
