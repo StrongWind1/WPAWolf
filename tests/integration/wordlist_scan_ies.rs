@@ -1,17 +1,19 @@
-//! Integration test: `--wordlist-scan-ies` flag behaviour.
+//! Integration test: `--wordlist-scan-ies FILE` standalone output.
 //!
-//! Builds a crafted Beacon frame carrying a vendor-specific IE whose body contains
-//! an ASCII firmware string surrounded by binary padding. Runs `wpawolf` twice --
-//! once without the flag, once with it -- and asserts:
+//! Builds a crafted Beacon frame carrying a vendor-specific IE whose body
+//! contains an ASCII firmware string surrounded by binary padding. Runs
+//! `wpawolf` three times to validate the **separation contract**: the IE-scan
+//! strand goes only to `--wordlist-scan-ies FILE` and is never folded into
+//! `-W`.
 //!
-//! - Without `--wordlist-scan-ies`: the string is not emitted in `-W` (wolf has
-//!   no structured parser for the vendor OUI, so only the Beacon SSID lands).
-//! - With `--wordlist-scan-ies`: the string *is* emitted in `-W` alongside the
-//!   SSID.
+//! - Run A: no `--wordlist-scan-ies` flag -- `-W` carries only the SSID, the
+//!   IE-scan strand is silent (no scan happens).
+//! - Run B: `--wordlist-scan-ies SCAN_FILE` and `-W WORD_FILE` configured to
+//!   different paths -- the firmware string lands in `SCAN_FILE` only, `-W`
+//!   stays clean.
 //!
-//! This validates that the flag is off-by-default, that it touches IE bodies, and
-//! that it filters short runs (the 5-byte ASCII prefix in the padding is below the
-//! 8-byte `WORDLIST_SCAN_IES_MIN_RUN` floor and must not appear).
+//! The 5-byte "short" run must be filtered out in every case (8-byte
+//! `WORDLIST_SCAN_IES_MIN_RUN` floor).
 
 #![allow(
     clippy::unwrap_used,
@@ -116,10 +118,11 @@ fn assert_not_contains(lines: &[String], needle: &str) {
 }
 
 #[test]
-fn wordlist_scan_ies_off_by_default_and_opts_in() {
+fn wordlist_scan_ies_writes_to_dedicated_file_and_not_to_minus_w() {
     let pcap_path = "/tmp/wpawolf_t22_fixture.pcap";
     let wordlist_off = "/tmp/wpawolf_t22_off.wordlist";
     let wordlist_on = "/tmp/wpawolf_t22_on.wordlist";
+    let scan_on = "/tmp/wpawolf_t22_on.scanies";
     // Minimal dummy output so wolf does not error on "no output specified".
     let dummy_hash_off = "/tmp/wpawolf_t22_off.22000";
     let dummy_hash_on = "/tmp/wpawolf_t22_on.22000";
@@ -129,7 +132,8 @@ fn wordlist_scan_ies_off_by_default_and_opts_in() {
 
     fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
 
-    // --- Run 1: no flag. Firmware string must be absent from -W. ---
+    // --- Run A: no flag. Firmware string must be absent from -W. ---
+    let _ = fs::remove_file(wordlist_off);
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--22000-out", dummy_hash_off, "-W", wordlist_off, pcap_path])
         .status()
@@ -140,16 +144,50 @@ fn wordlist_scan_ies_off_by_default_and_opts_in() {
     assert_contains(&lines_off, "TestSSID"); // SSID always lands in -W
     assert_not_contains(&lines_off, "VendorFirmware-1.2.3");
 
-    // --- Run 2: flag on. Firmware string must be present. "short" must remain absent. ---
+    // --- Run B: separation contract. Firmware string must be in scan-ies file
+    //     ONLY, never in -W. ---
+    let _ = fs::remove_file(wordlist_on);
+    let _ = fs::remove_file(scan_on);
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash_on, "-W", wordlist_on, "--wordlist-scan-ies", pcap_path])
+        .args(["--22000-out", dummy_hash_on, "-W", wordlist_on, "--wordlist-scan-ies", scan_on, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
-    assert!(status.success(), "wpawolf (on) exited non-zero: {status}");
+    assert!(status.success(), "wpawolf (separate) exited non-zero: {status}");
 
-    let lines_on = read_lines(Path::new(wordlist_on));
-    assert_contains(&lines_on, "TestSSID");
-    assert_contains(&lines_on, "VendorFirmware-1.2.3");
-    // The 5-byte "short" run must be filtered by the 8-byte min_run floor.
-    assert_not_contains(&lines_on, "short");
+    let lines_w = read_lines(Path::new(wordlist_on));
+    let lines_scan = read_lines(Path::new(scan_on));
+    // -W: SSID still here, firmware string MUST NOT be (separation contract).
+    assert_contains(&lines_w, "TestSSID");
+    assert_not_contains(&lines_w, "VendorFirmware-1.2.3");
+    // Scan file: firmware string here, "short" still filtered by min_run.
+    assert_contains(&lines_scan, "VendorFirmware-1.2.3");
+    assert_not_contains(&lines_scan, "short");
+    // The IE-scan strand picks up the SSID IE value too (it iterates every IE
+    // body, and the SSID IE qualifies on length). The contract we assert here
+    // is *only* that the firmware string flows the right way -- both strands
+    // may legitimately contain the SSID under their own logic.
+}
+
+#[test]
+fn wordlist_scan_ies_runs_independently_of_dash_w() {
+    // Without `-W` configured at all the IE-scan output must still work --
+    // the new flag is no longer a "scan + add to -W" tag-along; it is its
+    // own first-class output. This guards against regressing the new flag
+    // back into a tag-along.
+    let pcap_path = "/tmp/wpawolf_t22_no_w_fixture.pcap";
+    let scan_path = "/tmp/wpawolf_t22_no_w.scanies";
+    let dummy_hash = "/tmp/wpawolf_t22_no_w.22000";
+    let _ = fs::remove_file(scan_path);
+
+    let ssid = b"TestSSID";
+    let firmware = b"VendorFirmware-1.2.3";
+    fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
+        .args(["--22000-out", dummy_hash, "--wordlist-scan-ies", scan_path, pcap_path])
+        .status()
+        .expect("failed to spawn wpawolf");
+    assert!(status.success(), "wpawolf without -W exited non-zero: {status}");
+    let lines_scan = read_lines(Path::new(scan_path));
+    assert_contains(&lines_scan, "VendorFirmware-1.2.3");
 }

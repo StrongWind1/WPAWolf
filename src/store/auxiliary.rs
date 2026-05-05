@@ -12,6 +12,18 @@ use std::collections::HashSet;
 
 use crate::types::{MacAddr, split_on_control_bytes};
 
+/// Coarse heap-bytes estimate for a `HashSet<Vec<u8>>` store.
+///
+/// Sums table-bucket overhead (per-element struct size + 8 B per bucket) plus
+/// every entry `Vec<u8>`'s heap capacity. Shared by `EssidSet`,
+/// `ProbeEssidSet`, `WordlistStore`, and `WordlistScanIesStore` so the
+/// approximation formula stays in one place. See `--mem-stats`.
+fn approx_byte_set(set: &HashSet<Vec<u8>>) -> usize {
+    let table_bytes = set.capacity() * (size_of::<Vec<u8>>() + 8);
+    let entries_bytes: usize = set.iter().map(Vec::capacity).sum();
+    table_bytes + entries_bytes
+}
+
 /// Maximum SSID length per IEEE 802.11-2024 §9.4.2.3.
 ///
 /// SSIDs longer than this come from bit-flipped IE Length bytes or
@@ -111,6 +123,12 @@ impl EssidSet {
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
     }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>() + approx_byte_set(&self.set)
+    }
 }
 
 // --- Probe Request ESSID set (-R) ---
@@ -162,6 +180,12 @@ impl ProbeEssidSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>() + approx_byte_set(&self.set)
     }
 }
 
@@ -235,6 +259,74 @@ impl WordlistStore {
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
     }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>() + approx_byte_set(&self.set)
+    }
+}
+
+// --- IE-scan wordlist (separate strand from `WordlistStore`) ---
+
+/// Unique printable-ASCII runs extracted from management-frame IE bodies via
+/// the `--wordlist-scan-ies FILE` sweep.
+///
+/// This is the dedicated companion strand to `WordlistStore`. Runs come from
+/// `crate::strings_scan::extract_ascii_runs` already filtered to
+/// `[0x20..=0x7E]` and length `>= 8`, so unlike `WordlistStore` no further
+/// control-byte splitting is applied -- the runs are already clean and
+/// splitting them again would waste cycles and produce duplicate sub-runs.
+///
+/// Decoupled from `WordlistStore` (`-W`) by design: `-W` is the curated set
+/// of "things that look like passwords" (ESSIDs, WPS device fields, EAP
+/// identities, vendor AP names). The IE-scan strand is a wider net that
+/// catches printable bytes inside vendor IE bodies wpawolf does not parse
+/// structurally -- mostly noise, occasionally a useful candidate. Operators
+/// triaging IE-scan output should not have to diff against `-W` to find what
+/// the sweep added.
+#[derive(Debug, Default)]
+pub struct WordlistScanIesStore {
+    set: HashSet<Vec<u8>>,
+}
+
+impl WordlistScanIesStore {
+    /// Creates an empty `WordlistScanIesStore`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inserts `run` verbatim (no splitting). Empty input is a no-op.
+    pub fn insert(&mut self, run: Vec<u8>) {
+        if run.is_empty() {
+            return;
+        }
+        self.set.insert(run);
+    }
+
+    /// Iterates over unique runs in arbitrary order.
+    pub fn iter(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.set.iter()
+    }
+
+    /// Returns the number of unique entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.set.len()
+    }
+
+    /// Returns `true` if no entries have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>() + approx_byte_set(&self.set)
+    }
 }
 
 // --- EAP identity set ---
@@ -278,6 +370,14 @@ impl IdentitySet {
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
     }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let table_bytes = self.set.capacity() * (size_of::<String>() + 8);
+        let entries_bytes: usize = self.set.iter().map(String::capacity).sum();
+        size_of::<Self>() + table_bytes + entries_bytes
+    }
 }
 
 // --- EAP username set ---
@@ -320,6 +420,14 @@ impl UsernameSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let table_bytes = self.set.capacity() * (size_of::<String>() + 8);
+        let entries_bytes: usize = self.set.iter().map(String::capacity).sum();
+        size_of::<Self>() + table_bytes + entries_bytes
     }
 }
 
@@ -390,6 +498,22 @@ impl DeviceInfoStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let mut entries_bytes = self.entries.capacity() * size_of::<DeviceInfoEntry>();
+        for e in &self.entries {
+            entries_bytes = entries_bytes
+                .saturating_add(e.manufacturer.capacity())
+                .saturating_add(e.model_name.capacity())
+                .saturating_add(e.model_number.capacity())
+                .saturating_add(e.serial_number.capacity())
+                .saturating_add(e.device_name.capacity())
+                .saturating_add(e.essid.capacity());
+        }
+        size_of::<Self>() + entries_bytes
     }
 }
 

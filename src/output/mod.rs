@@ -22,7 +22,9 @@ use crate::pair::combos::PairConfig;
 use crate::pair::pair_all_groups;
 use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 use crate::store::AkmMap;
-use crate::store::auxiliary::{DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistStore};
+use crate::store::auxiliary::{
+    DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
+};
 use crate::store::messages::MessageStore;
 use crate::store::pmkid::{PmkidEntry, PmkidStore};
 use crate::types::{AkmType, FtFields, HashType, Result};
@@ -30,7 +32,10 @@ use crate::types::{AkmType, FtFields, HashType, Result};
 use self::dedup::{PerSinkDedup, SinkId};
 use self::device_info::write_device_info;
 use self::hashcat::{format_eapol_ft_line, format_eapol_line, format_pmkid_ft_line, format_pmkid_line};
-use self::wordlists::{write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist};
+use self::wordlists::{
+    write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist,
+    write_wordlist_scan_ies,
+};
 
 // --- EssidFilterConfig ---
 
@@ -92,6 +97,10 @@ pub struct OutputPaths {
     pub probe_essid_list: Option<PathBuf>,
     /// Path for leaked-information wordlist output (`-W`).
     pub wordlist: Option<PathBuf>,
+    /// Path for `--wordlist-scan-ies FILE` -- printable-ASCII runs from
+    /// management-frame IE bodies, kept separate from `-W` so the curated
+    /// wordlist is not diluted with vendor-IE noise.
+    pub wordlist_scan_ies: Option<PathBuf>,
     /// Path for EAP identity list output (`-I`).
     pub identity_list: Option<PathBuf>,
     /// Path for EAP username list output (`-U`).
@@ -402,6 +411,7 @@ pub fn run_output(
     essid_set: &EssidSet,
     probe_essid_set: &ProbeEssidSet,
     wordlist_store: &WordlistStore,
+    scan_ies_store: &WordlistScanIesStore,
     identity_set: &IdentitySet,
     username_set: &UsernameSet,
     device_store: &DeviceInfoStore,
@@ -412,225 +422,367 @@ pub fn run_output(
     essid_filter: EssidFilterConfig,
     logger: &mut Logger,
 ) -> Result<OutputStats> {
-    let mut stats = OutputStats::default();
-    let mut dedup = PerSinkDedup::new();
-    let mut sinks = HashSinks::open(paths);
-    let any_sink = sinks.any_configured();
-    // Track APs whose hash lines we declined to emit because no ESSID was ever
-    // observed for them. Such lines are not crackable (hashcat needs the ESSID
-    // to derive the PMK), so they go to `--log` only -- nothing reaches a hash
-    // sink. Map value is the count of would-have-been-emitted lines per AP; the
-    // distinct-AP count is the map's `len()`.
-    let mut unresolved_drops: HashMap<crate::types::MacAddr, u64> = HashMap::new();
+    let mut ctx = OutputContext::new(paths);
+    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter)?;
+    ctx.finalize(
+        paths,
+        essid_set,
+        probe_essid_set,
+        wordlist_store,
+        scan_ies_store,
+        identity_set,
+        username_set,
+        device_store,
+        logger,
+    )
+}
 
-    // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
-    //
-    // Emit one hash line per observed SSID for the AP. Most APs have exactly one SSID,
-    // so this loop body executes once. When an AP advertised multiple SSIDs during the
-    // capture (e.g. a multi-SSID device), each variant needs to be cracked independently
-    // because the PMK is derived from PSK+SSID -- a different SSID is a different PMK.
-    if any_sink {
+// --- OutputContext ---
+
+/// Stateful output pipeline driver -- supports both single-pass (`run_output`)
+/// and per-file (`--per-file`) modes.
+///
+/// In single-pass mode `run_output` constructs a context, calls `emit` once
+/// over the fully populated stores, and finalizes. In `--per-file` mode the
+/// caller constructs the context once, calls `emit` after each input file
+/// (with the per-file store contents), then calls `finalize` after the last
+/// file. Sinks stay open across `emit` calls, dedup state accumulates across
+/// files (so duplicates across captures still collapse), and the per-AP
+/// timestamp ranges needed for `[essid_not_found_summary]` are captured
+/// during `emit` so they survive the post-emit `MessageStore::clear` /
+/// `PmkidStore::clear` calls.
+pub struct OutputContext {
+    stats: OutputStats,
+    dedup: PerSinkDedup,
+    sinks: HashSinks,
+    /// APs whose hash lines we declined to emit because no ESSID was ever
+    /// observed for them. Such lines are not crackable (hashcat needs the
+    /// ESSID to derive the PMK), so they go to `--log` only -- nothing
+    /// reaches a hash sink. Map value is the count of would-have-been-emitted
+    /// lines per AP; the distinct-AP count is the map's `len()`. Accumulates
+    /// across `emit` calls in `--per-file` mode.
+    unresolved_drops: HashMap<crate::types::MacAddr, u64>,
+    /// Per-AP `(first_seen_us, last_seen_us)` ranges captured during `emit`
+    /// for every AP appearing in `unresolved_drops`. Captured here (rather
+    /// than re-scanned in `finalize`) so the values survive the per-file
+    /// `MessageStore::clear` / `PmkidStore::clear` between batches.
+    timestamp_ranges: HashMap<crate::types::MacAddr, (u64, u64)>,
+}
+
+impl std::fmt::Debug for OutputContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // sinks / dedup / stats are intentionally omitted -- they are large,
+        // mutable, and not human-readable; counts are the useful summary.
+        f.debug_struct("OutputContext")
+            .field("unresolved_drops", &self.unresolved_drops.len())
+            .field("timestamp_ranges", &self.timestamp_ranges.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OutputContext {
+    /// Builds a fresh context with sinks lazily configured per `paths`. No
+    /// files are created until the first `emit` call writes a hash line.
+    #[must_use]
+    pub fn new(paths: &OutputPaths) -> Self {
+        Self {
+            stats: OutputStats::default(),
+            dedup: PerSinkDedup::new(),
+            sinks: HashSinks::open(paths),
+            unresolved_drops: HashMap::new(),
+            timestamp_ranges: HashMap::new(),
+        }
+    }
+
+    /// Captures per-AP timestamp ranges for the unresolved set into
+    /// `timestamp_ranges`, merging by min/max. Called after each `emit` so
+    /// the values are available even if `MessageStore` / `PmkidStore` are
+    /// cleared between calls (per-file mode).
+    fn capture_timestamp_ranges(&mut self, message_store: &MessageStore, pmkid_store: &PmkidStore) {
+        if self.unresolved_drops.is_empty() {
+            return;
+        }
+        let wanted: HashSet<crate::types::MacAddr> = self.unresolved_drops.keys().copied().collect();
+        let mut batch: HashMap<crate::types::MacAddr, (u64, u64)> = HashMap::new();
+        message_store.fold_timestamp_range_into(&wanted, &mut batch);
         for entry in pmkid_store.iter() {
-            // Per-source extractors may store entry.akm = Unknown when the
-            // extraction site has no AKM context (e.g. AMPE element in a Mesh
-            // Peering action frame, OSEN IE in an Association Request). When
-            // the BSS still advertises a PSK AKM in its Beacon, fall back on
-            // akm_map.get_best so the PMKID is still crackable. Without this
-            // fallback the PMKID parses successfully and counts in stats but
-            // never emits a hashcat line -- silent loss for the operator.
-            let resolved_akm =
-                if matches!(entry.akm, AkmType::Unknown) || HashType::from_akm_and_attack(entry.akm, true).is_none() {
+            if !wanted.contains(&entry.ap) {
+                continue;
+            }
+            let r = batch.entry(entry.ap).or_insert((u64::MAX, 0));
+            r.0 = r.0.min(entry.timestamp);
+            r.1 = r.1.max(entry.timestamp);
+        }
+        // Merge this batch's ranges into the accumulator with min/max.
+        for (ap, (first, last)) in batch {
+            let r = self.timestamp_ranges.entry(ap).or_insert((u64::MAX, 0));
+            r.0 = r.0.min(first);
+            r.1 = r.1.max(last);
+        }
+    }
+
+    /// Runs PMKID + EAPOL emission for the current contents of
+    /// `message_store` / `pmkid_store`. Safe to call multiple times across
+    /// `--per-file` batches; sinks, dedup, and unresolved-drop bookkeeping
+    /// accumulate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on I/O failure during fan-out.
+    #[allow(clippy::too_many_arguments, reason = "Phase 4 emit pass: every store + tunable is needed once")]
+    pub fn emit(
+        &mut self,
+        message_store: &MessageStore,
+        pmkid_store: &PmkidStore,
+        essid_map: &crate::store::essid::EssidMap,
+        akm_map: &AkmMap,
+        pair_config: &PairConfig,
+        thread_count: usize,
+        essid_filter: EssidFilterConfig,
+    ) -> Result<()> {
+        self.emit_inner(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter)?;
+        self.capture_timestamp_ranges(message_store, pmkid_store);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines, reason = "linear pipeline -- splitting hides intent")]
+    fn emit_inner(
+        &mut self,
+        message_store: &MessageStore,
+        pmkid_store: &PmkidStore,
+        essid_map: &crate::store::essid::EssidMap,
+        akm_map: &AkmMap,
+        pair_config: &PairConfig,
+        thread_count: usize,
+        essid_filter: EssidFilterConfig,
+    ) -> Result<()> {
+        let any_sink = self.sinks.any_configured();
+        let stats = &mut self.stats;
+        let dedup = &mut self.dedup;
+        let sinks = &mut self.sinks;
+        let unresolved_drops = &mut self.unresolved_drops;
+
+        // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
+        //
+        // Emit one hash line per observed SSID for the AP. Most APs have exactly one SSID,
+        // so this loop body executes once. When an AP advertised multiple SSIDs during the
+        // capture (e.g. a multi-SSID device), each variant needs to be cracked independently
+        // because the PMK is derived from PSK+SSID -- a different SSID is a different PMK.
+        if any_sink {
+            for entry in pmkid_store.iter() {
+                // Per-source extractors may store entry.akm = Unknown when the
+                // extraction site has no AKM context (e.g. AMPE element in a Mesh
+                // Peering action frame, OSEN IE in an Association Request). When
+                // the BSS still advertises a PSK AKM in its Beacon, fall back on
+                // akm_map.get_best so the PMKID is still crackable. Without this
+                // fallback the PMKID parses successfully and counts in stats but
+                // never emits a hashcat line -- silent loss for the operator.
+                let resolved_akm = if matches!(entry.akm, AkmType::Unknown)
+                    || HashType::from_akm_and_attack(entry.akm, true).is_none()
+                {
                     let inferred = akm_map.get_best(&entry.ap, &entry.sta);
                     if matches!(inferred, AkmType::Unknown) { entry.akm } else { inferred }
                 } else {
                     entry.akm
                 };
-            let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
-            let ssids =
-                essid_map.ssids_for_emit(&entry.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
-            let is_ft = ht.is_ft();
+                let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
+                let ssids =
+                    essid_map.ssids_for_emit(&entry.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
+                let is_ft = ht.is_ft();
 
-            // For FT-PSK PMKIDs, only write when we have complete FT context (R0KH-ID required).
-            // hashcat mode 37100 requires MDID + R0KH-ID + R1KH-ID to crack the PMK chain.
-            // [hcxpcapngtool:2541] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
-            let ft_ctx: Option<&FtFields> = if is_ft {
-                match entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                    Some(ft) => Some(ft),
-                    None => continue, // FT-PSK PMKID without FT context -- not crackable
-                }
-            } else {
-                None
-            };
-
-            // An empty `ssids` slice means we never observed a beacon / probe-resp /
-            // assoc for this AP. A hash line with a NULL ESSID is not crackable
-            // (hashcat needs the ESSID to derive the PMK), so we drop the would-be
-            // emission, track the AP for the per-AP `[essid_not_found_summary]`
-            // log line at the end of the run, and continue with the next entry.
-            if ssids.is_empty() {
-                *unresolved_drops.entry(entry.ap).or_insert(0) += 1;
-                stats.essid_unresolved_emissions += 1;
-                continue;
-            }
-
-            for essid in ssids {
-                let item = FanItem::Pmkid { entry, ft: ft_ctx, essid };
-                let written = fan_out(&mut sinks, &mut dedup, &mut stats, ht, item)?;
-                if written {
-                    stats.pmkids_written += 1;
-                    *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
+                // For FT-PSK PMKIDs, only write when we have complete FT context (R0KH-ID required).
+                // hashcat mode 37100 requires MDID + R0KH-ID + R1KH-ID to crack the PMK chain.
+                // [hcxpcapngtool:2541] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
+                let ft_ctx: Option<&FtFields> = if is_ft {
+                    match entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                        Some(ft) => Some(ft),
+                        None => continue, // FT-PSK PMKID without FT context -- not crackable
+                    }
                 } else {
-                    stats.dedup_dropped += 1;
+                    None
+                };
+
+                // An empty `ssids` slice means we never observed a beacon / probe-resp /
+                // assoc for this AP. A hash line with a NULL ESSID is not crackable
+                // (hashcat needs the ESSID to derive the PMK), so we drop the would-be
+                // emission, track the AP for the per-AP `[essid_not_found_summary]`
+                // log line at the end of the run, and continue with the next entry.
+                if ssids.is_empty() {
+                    *unresolved_drops.entry(entry.ap).or_insert(0) += 1;
+                    stats.essid_unresolved_emissions += 1;
+                    continue;
+                }
+
+                for essid in ssids {
+                    let item = FanItem::Pmkid { entry, ft: ft_ctx, essid };
+                    let written = fan_out(sinks, dedup, stats, ht, item)?;
+                    if written {
+                        stats.pmkids_written += 1;
+                        *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
+                    } else {
+                        stats.dedup_dropped += 1;
+                    }
                 }
             }
         }
-    }
 
-    // --- Pipeline 2: EAPOL pairs ---
-    //
-    // Same multi-SSID logic as Pipeline 1. The ESSID is part of the EAPOL hash line
-    // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
-    // must produce a separate hash line. Dedup fingerprints include the ESSID field,
-    // so identical (pair + SSID) combinations are still deduplicated correctly.
-    let all_pairs = pair_all_groups(message_store, pair_config, thread_count);
-    if any_sink {
-        for pair in &all_pairs {
-            let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
-            let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
-            let is_ft = ht.is_ft();
+        // --- Pipeline 2: EAPOL pairs ---
+        //
+        // Same multi-SSID logic as Pipeline 1. The ESSID is part of the EAPOL hash line
+        // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
+        // must produce a separate hash line. Dedup fingerprints include the ESSID field,
+        // so identical (pair + SSID) combinations are still deduplicated correctly.
+        let all_pairs = pair_all_groups(message_store, pair_config, thread_count);
+        if any_sink {
+            for pair in &all_pairs {
+                let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
+                let ssids =
+                    essid_map.ssids_for_emit(&pair.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
+                let is_ft = ht.is_ft();
 
-            // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
-            // [hcxpcapngtool:2351] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
-            let ft_ctx: Option<&FtFields> = if is_ft {
-                match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                    Some(ft) => Some(ft),
-                    None => continue, // FT-PSK pair without FT context -- not crackable
-                }
-            } else {
-                None
-            };
-
-            // See pipeline 1 comment: a missing SSID makes the line uncrackable,
-            // so we drop the emission, record the AP for end-of-run logging, and
-            // move on. No fan-out, no per-sink line counter.
-            if ssids.is_empty() {
-                *unresolved_drops.entry(pair.ap).or_insert(0) += 1;
-                stats.essid_unresolved_emissions += 1;
-                continue;
-            }
-
-            for essid in ssids {
-                let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
-                let written = fan_out(&mut sinks, &mut dedup, &mut stats, ht, item)?;
-                if written {
-                    stats.pairs_written += 1;
-                    *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
-
-                    // Per-combo / flag counters for the stats summary, bumped once per
-                    // logical pair that survived at least one sink's dedup.
-                    match pair.combo_type {
-                        ComboType::N1E2 => stats.n1e2 += 1,
-                        ComboType::N3E2 => stats.n3e2 += 1,
-                        ComboType::N1E4 => stats.n1e4 += 1,
-                        ComboType::N2E3 => stats.n2e3 += 1,
-                        ComboType::N4E3 => stats.n4e3 += 1,
-                        ComboType::N3E4 => stats.n3e4 += 1,
+                // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
+                // [hcxpcapngtool:2351] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
+                let ft_ctx: Option<&FtFields> = if is_ft {
+                    match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                        Some(ft) => Some(ft),
+                        None => continue, // FT-PSK pair without FT context -- not crackable
                     }
-                    if pair.message_pair & FLAG_NC != 0 {
-                        stats.pairs_nc += 1;
-                    }
-                    if pair.message_pair & FLAG_LE != 0 {
-                        stats.pairs_le += 1;
-                    }
-                    if pair.message_pair & FLAG_BE != 0 {
-                        stats.pairs_be += 1;
-                    }
-                    stats.rc_gap_max = stats.rc_gap_max.max(pair.rc_gap_magnitude);
                 } else {
-                    stats.dedup_dropped += 1;
+                    None
+                };
+
+                // See pipeline 1 comment: a missing SSID makes the line uncrackable,
+                // so we drop the emission, record the AP for end-of-run logging, and
+                // move on. No fan-out, no per-sink line counter.
+                if ssids.is_empty() {
+                    *unresolved_drops.entry(pair.ap).or_insert(0) += 1;
+                    stats.essid_unresolved_emissions += 1;
+                    continue;
+                }
+
+                for essid in ssids {
+                    let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
+                    let written = fan_out(sinks, dedup, stats, ht, item)?;
+                    if written {
+                        stats.pairs_written += 1;
+                        *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
+
+                        // Per-combo / flag counters for the stats summary, bumped once per
+                        // logical pair that survived at least one sink's dedup.
+                        match pair.combo_type {
+                            ComboType::N1E2 => stats.n1e2 += 1,
+                            ComboType::N3E2 => stats.n3e2 += 1,
+                            ComboType::N1E4 => stats.n1e4 += 1,
+                            ComboType::N2E3 => stats.n2e3 += 1,
+                            ComboType::N4E3 => stats.n4e3 += 1,
+                            ComboType::N3E4 => stats.n3e4 += 1,
+                        }
+                        if pair.message_pair & FLAG_NC != 0 {
+                            stats.pairs_nc += 1;
+                        }
+                        if pair.message_pair & FLAG_LE != 0 {
+                            stats.pairs_le += 1;
+                        }
+                        if pair.message_pair & FLAG_BE != 0 {
+                            stats.pairs_be += 1;
+                        }
+                        stats.rc_gap_max = stats.rc_gap_max.max(pair.rc_gap_magnitude);
+                    } else {
+                        stats.dedup_dropped += 1;
+                    }
                 }
             }
         }
+        Ok(())
     }
 
-    // Flush hash writers before opening auxiliary outputs.
-    sinks.flush_all()?;
+    /// Flushes hash sinks, writes the per-AP `[essid_not_found_summary]` log
+    /// lines, and writes the auxiliary outputs. Consumes `self` and returns
+    /// the final `OutputStats`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on I/O failure during flush or aux output writes.
+    #[allow(clippy::too_many_arguments, reason = "auxiliary output: one writer per configured -E/-R/-W/-I/-U/-D path")]
+    pub fn finalize(
+        mut self,
+        paths: &OutputPaths,
+        essid_set: &EssidSet,
+        probe_essid_set: &ProbeEssidSet,
+        wordlist_store: &WordlistStore,
+        scan_ies_store: &WordlistScanIesStore,
+        identity_set: &IdentitySet,
+        username_set: &UsernameSet,
+        device_store: &DeviceInfoStore,
+        logger: &mut Logger,
+    ) -> Result<OutputStats> {
+        // Flush hash writers before opening auxiliary outputs.
+        self.sinks.flush_all()?;
 
-    // --- Per-AP unresolved-SSID summary ---
-    //
-    // Walk both stores once to collect first/last packet timestamps for every
-    // AP whose hashes we dropped, then write one `[essid_not_found_summary]`
-    // log line per AP. Doing the scan as a single pass over the stores keeps
-    // the cost O(total_messages + total_pmkids) regardless of how many APs
-    // are unresolved -- matters when a corpus contains thousands of hidden
-    // BSSIDs. APs with no remaining frames in either store after the run
-    // (vanishingly rare; would need every owning frame to have been dropped
-    // post-extract) fall back to (0, 0) so the log line is still complete.
-    if !unresolved_drops.is_empty() {
-        let wanted: HashSet<crate::types::MacAddr> = unresolved_drops.keys().copied().collect();
-        let mut ranges: HashMap<crate::types::MacAddr, (u64, u64)> = HashMap::new();
-        message_store.fold_timestamp_range_into(&wanted, &mut ranges);
-        for entry in pmkid_store.iter() {
-            if !wanted.contains(&entry.ap) {
-                continue;
+        // --- Per-AP unresolved-SSID summary ---
+        //
+        // Timestamp ranges were captured during `emit` (so per-file mode
+        // sees correct values even after the stores are cleared). Walk the
+        // accumulated `timestamp_ranges` plus `unresolved_drops` in
+        // sorted-by-MAC order so the log lines are deterministic across runs.
+        if !self.unresolved_drops.is_empty() {
+            let mut aps: Vec<crate::types::MacAddr> = self.unresolved_drops.keys().copied().collect();
+            aps.sort_unstable_by_key(|m| m.0);
+            for ap in aps {
+                let dropped = self.unresolved_drops.get(&ap).copied().unwrap_or(0);
+                let (first_us, last_us) = self.timestamp_ranges.get(&ap).copied().unwrap_or((0, 0));
+                let first_us = if first_us == u64::MAX { 0 } else { first_us };
+                logger.log_essid_not_found_summary(format_mac_hex(ap), dropped, first_us, last_us);
             }
-            let r = ranges.entry(entry.ap).or_insert((u64::MAX, 0));
-            r.0 = r.0.min(entry.timestamp);
-            r.1 = r.1.max(entry.timestamp);
         }
-        // Sort the AP list for deterministic log output (the underlying map is
-        // hash-based, so iteration order is otherwise unstable across runs).
-        let mut aps: Vec<crate::types::MacAddr> = unresolved_drops.keys().copied().collect();
-        aps.sort_unstable_by_key(|m| m.0);
-        for ap in aps {
-            let dropped = unresolved_drops.get(&ap).copied().unwrap_or(0);
-            let (first_us, last_us) = ranges.get(&ap).copied().unwrap_or((0, 0));
-            let first_us = if first_us == u64::MAX { 0 } else { first_us };
-            logger.log_essid_not_found_summary(format_mac_hex(ap), dropped, first_us, last_us);
+        self.stats.essid_unresolved_aps = self.unresolved_drops.len() as u64;
+
+        // --- Auxiliary outputs ---
+        //
+        // Per CLAUDE.md rule 12 ("I/O errors abort"), every auxiliary writer must
+        // explicitly `flush()?` before its `BufWriter` is dropped. `BufWriter`'s
+        // `Drop` impl swallows flush errors silently, so without an explicit flush
+        // a disk-full mid-write or a closed-pipe event would silently truncate the
+        // file and the process would still exit `0`.
+
+        if let Some(path) = &paths.essid_list {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_essid_list(essid_set, &mut f)?;
+            f.flush()?;
         }
-    }
-    stats.essid_unresolved_aps = unresolved_drops.len() as u64;
+        if let Some(path) = &paths.probe_essid_list {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_probe_essid_list(probe_essid_set, &mut f)?;
+            f.flush()?;
+        }
+        if let Some(path) = &paths.wordlist {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_wordlist(wordlist_store, &mut f)?;
+            f.flush()?;
+        }
+        if let Some(path) = &paths.wordlist_scan_ies {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_wordlist_scan_ies(scan_ies_store, &mut f)?;
+            f.flush()?;
+        }
+        if let Some(path) = &paths.identity_list {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_identities(identity_set, &mut f)?;
+            f.flush()?;
+        }
+        if let Some(path) = &paths.username_list {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_usernames(username_set, &mut f)?;
+            f.flush()?;
+        }
+        if let Some(path) = &paths.device_info {
+            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            write_device_info(device_store, &mut f)?;
+            f.flush()?;
+        }
 
-    // --- Auxiliary outputs ---
-    //
-    // Per CLAUDE.md rule 12 ("I/O errors abort"), every auxiliary writer must
-    // explicitly `flush()?` before its `BufWriter` is dropped. `BufWriter`'s
-    // `Drop` impl swallows flush errors silently, so without an explicit flush
-    // a disk-full mid-write or a closed-pipe event would silently truncate the
-    // file and the process would still exit `0`.
-
-    if let Some(path) = &paths.essid_list {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_essid_list(essid_set, &mut f)?;
-        f.flush()?;
+        Ok(self.stats)
     }
-    if let Some(path) = &paths.probe_essid_list {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_probe_essid_list(probe_essid_set, &mut f)?;
-        f.flush()?;
-    }
-    if let Some(path) = &paths.wordlist {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_wordlist(wordlist_store, &mut f)?;
-        f.flush()?;
-    }
-    if let Some(path) = &paths.identity_list {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_identities(identity_set, &mut f)?;
-        f.flush()?;
-    }
-    if let Some(path) = &paths.username_list {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_usernames(username_set, &mut f)?;
-        f.flush()?;
-    }
-    if let Some(path) = &paths.device_info {
-        let mut f = BufWriter::new(std::fs::File::create(path)?);
-        write_device_info(device_store, &mut f)?;
-        f.flush()?;
-    }
-
-    Ok(stats)
 }
 
 // --- Unit tests ---
@@ -647,7 +799,9 @@ mod tests {
     )]
 
     use super::*;
-    use crate::store::auxiliary::{DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistStore};
+    use crate::store::auxiliary::{
+        DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
+    };
     use crate::store::essid::EssidMap;
     use crate::store::messages::MessageStore;
     use crate::store::pmkid::PmkidStore;
@@ -661,6 +815,7 @@ mod tests {
         let essid_set = EssidSet::new();
         let probe_essid_set = ProbeEssidSet::new();
         let wordlist_store = WordlistStore::new();
+        let scan_ies_store = WordlistScanIesStore::new();
         let identity_set = IdentitySet::new();
         let username_set = UsernameSet::new();
         let device_store = DeviceInfoStore::new();
@@ -676,6 +831,7 @@ mod tests {
             &essid_set,
             &probe_essid_set,
             &wordlist_store,
+            &scan_ies_store,
             &identity_set,
             &username_set,
             &device_store,

@@ -101,6 +101,25 @@ impl AkmMap {
         }
         self.get(ap)
     }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    ///
+    /// Approximates `HashMap` overhead as `capacity * (entry_size + 8 B per-bucket)`
+    /// per the hashbrown table layout. Off by a small fraction in practice; the
+    /// purpose is to identify the dominant grower across a corpus run, not to give
+    /// VM-page-accurate numbers.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.ap_map.capacity() * (size_of::<(MacAddr, AkmType)>() + 8)
+            + self.sta_map.capacity() * (size_of::<(MacPair, AkmType)>() + 8)
+    }
+
+    /// Total entry count across both inner maps (for `--mem-stats` reporting).
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.ap_map.len() + self.sta_map.len()
+    }
 }
 
 // --- MldStore: link MAC -> MLD MAC ---
@@ -156,6 +175,12 @@ impl MldStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.link_to_mld.is_empty()
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        size_of::<Self>() + self.link_to_mld.capacity() * (size_of::<(MacAddr, MacAddr)>() + 8)
     }
 }
 

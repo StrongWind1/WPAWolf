@@ -123,6 +123,39 @@ impl MessageStore {
         self.groups.len()
     }
 
+    /// Drops every group and resets the total-message counter.
+    ///
+    /// Used by `--per-file` mode to reclaim store memory after each input
+    /// file's hashes have been emitted. The map's capacity is *not* shrunk so
+    /// the next file reuses the existing buckets (saves a re-alloc when the
+    /// per-file pair count is similar across files).
+    pub fn clear(&mut self) {
+        self.groups.clear();
+        self.total_count = 0;
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    ///
+    /// Sums the `HashMap` bucket overhead, every `Vec<EapolMessage>` allocation,
+    /// every `EapolMessage` struct in the vectors, and every `Arc<[u8]>` payload
+    /// each message holds. The Arc payloads are NOT deduplicated across pairs --
+    /// a message that appears in two groups (rare; happens only for WDS resolution)
+    /// is counted twice. Operators reading the report should treat this as an
+    /// upper-bound on the EAPOL-store footprint.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let groups_cap_bytes = self.groups.capacity() * (size_of::<MacPair>() + size_of::<Vec<EapolMessage>>() + 8);
+        let mut msgs_bytes = 0usize;
+        for v in self.groups.values() {
+            msgs_bytes += v.capacity() * size_of::<EapolMessage>();
+            // Arc<[u8]> heap payload per message: 16-byte ArcInner header + bytes.
+            for m in v {
+                msgs_bytes = msgs_bytes.saturating_add(m.eapol_frame.len() + 16);
+            }
+        }
+        size_of::<Self>() + groups_cap_bytes + msgs_bytes
+    }
+
     /// Rewrites every group key and embedded `(ap, sta)` addresses using `canonicalize`,
     /// then merges groups that collide under the canonical key.
     ///

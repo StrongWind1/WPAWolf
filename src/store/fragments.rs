@@ -184,6 +184,14 @@ impl FragmentStore {
         self.entries.len()
     }
 
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let table_bytes = self.entries.capacity() * (size_of::<FragKey>() + size_of::<FragEntry>() + 8);
+        let body_bytes: usize = self.entries.values().map(|e| e.body.capacity()).sum();
+        size_of::<Self>() + table_bytes + body_bytes
+    }
+
     /// True iff the store holds no in-flight fragments.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use crate::store::auxiliary::{EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistStore};
+use crate::store::auxiliary::{EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore};
 use crate::types::{Result, format_autohex, trim_nul_padding};
 
 /// Writes one wordlist-style line to `out` after applying the project-wide
@@ -87,6 +87,32 @@ pub fn write_probe_essid_list(probe_set: &ProbeEssidSet, out: &mut impl Write) -
     let mut count = 0usize;
     for essid in essids {
         if write_trimmed_autohex(essid, out)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Writes all unique IE-scan printable-ASCII runs to `out`, one autohex-encoded
+/// entry per line.
+///
+/// Output is sorted for deterministic ordering. Same trim + autohex contract as
+/// `write_wordlist`: leading / trailing NUL padding stripped, empty values
+/// silently skipped. Used for `--wordlist-scan-ies FILE` output. Returns the
+/// number of lines written.
+///
+/// Per the `--wordlist-scan-ies FILE` separation contract, this writer drains
+/// the dedicated `WordlistScanIesStore` and never reads from `WordlistStore`.
+///
+/// # Errors
+///
+/// Returns `Err` on I/O failure.
+pub fn write_wordlist_scan_ies(scan_ies_store: &WordlistScanIesStore, out: &mut impl Write) -> Result<usize> {
+    let mut entries: Vec<&Vec<u8>> = scan_ies_store.iter().collect();
+    entries.sort_unstable();
+    let mut count = 0usize;
+    for entry in entries {
+        if write_trimmed_autohex(entry, out)? {
             count += 1;
         }
     }

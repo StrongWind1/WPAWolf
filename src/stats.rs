@@ -107,6 +107,17 @@ pub struct Stats {
     /// unread packet per affected file); the separate counter is kept so future
     /// resync support can show a higher value without changing the file count.
     pub unreadable_packets: u64,
+    /// Input files the ingest loop opened but skipped because their magic bytes
+    /// did not match any supported capture format.
+    ///
+    /// Typical causes: sub-4-byte stub files in a watch directory (e.g.
+    /// `wpa-sec`'s submission staging area) and explicitly-named non-capture
+    /// files. The directory-walk filter (`is_capture_magic`) catches these
+    /// before they reach `open_reader`, so a non-zero count here usually means
+    /// either an explicit-file argument with the wrong content or a TOCTOU
+    /// race (file shrunk between the walk and the open). Per-file detail goes
+    /// to the `--log` sink under the `[skipped_input]` category.
+    pub files_skipped_unknown_format: u64,
     /// Hash lines written to output file(s).
     pub hashes_written: u64,
     /// Hash lines dropped by the dedup filter.
@@ -866,6 +877,7 @@ impl Stats {
         nz!("frames with non-zero Protocol Version (forgiven; processed)", self.lenient_proto_version);
         nz!("capture files with truncated trailing record (earlier records kept)", self.truncated_capture_files);
         nz!("  trailing packets unread (dropped; see --log)", self.unreadable_packets);
+        nz!("input files skipped (magic unrecognised; see --log)", self.files_skipped_unknown_format);
 
         // ======================================================================
         // Phase 2 -- Decode: link/802.11 frame classification, per-band
@@ -1237,6 +1249,7 @@ mod tests {
         assert_eq!(s.fragment_stats.fragments_dropped_overflow, 0);
         assert_eq!(s.truncated_capture_files, 0);
         assert_eq!(s.unreadable_packets, 0);
+        assert_eq!(s.files_skipped_unknown_format, 0);
         assert_eq!(s.hashes_written, 0);
         assert_eq!(s.dedup_dropped, 0);
         assert_eq!(s.essid_count, 0);

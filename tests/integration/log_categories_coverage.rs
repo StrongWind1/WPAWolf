@@ -1,10 +1,10 @@
 //! Integration test: every `--log` category fires from a real binary invocation.
 //!
-//! Six categories are defined in `src/log.rs`. Each gets a fixture that triggers
-//! exactly one call site, then the binary is run with `--log` and the resulting
-//! file is grepped for the expected category prefix. The previous behaviour --
-//! `unknown_akm` and `essid_not_found` were defined but never invoked from
-//! production code -- is the regression this guards against.
+//! Each category in `src/log.rs` gets a fixture that triggers exactly one call
+//! site, then the binary is run with `--log` and the resulting file is grepped
+//! for the expected category prefix. The previous behaviour -- `unknown_akm` and
+//! `essid_not_found` were defined but never invoked from production code -- is
+//! the regression this guards against.
 //!
 //! Categories covered:
 //!
@@ -19,8 +19,11 @@
 //!   which no preceding IDB exists.
 //! * `[unknown_akm]`: Association Request with RSN AKM 26 (out of
 //!   IEEE 802.11-2024 Table 9-190).
-//! * `[essid_not_found]`: handshake emitted for an AP whose SSID was
+//! * `[essid_not_found_summary]`: handshake emitted for an AP whose SSID was
 //!   never observed on the wire.
+//! * `[skipped_input]`: explicit-file argument that does not start with a
+//!   recognised capture magic (typical wpa-sec stub-file noise) -- silenced
+//!   on stderr, surfaced in the log + Phase 1 counter.
 
 #![allow(
     clippy::unwrap_used,
@@ -437,6 +440,131 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
         stderr_contents.contains("frames with non-zero Protocol Version (forgiven"),
         "expected stats line in stderr; got:\n{stderr_contents}"
     );
+}
+
+#[test]
+fn skipped_input_routes_unknown_format_files_through_log_not_stderr() {
+    // wpa-sec corpus pain point: micro-stub files (0/1/2/3 bytes) and non-capture
+    // junk in a watch directory used to spam stderr with `warning: cannot open ...
+    // unrecognised file format` lines. We now route every `Error::UnknownFormat`
+    // result through the `[skipped_input]` log category and increment the
+    // `files_skipped_unknown_format` Phase 1 counter; stderr stays clean.
+    //
+    // Two flavours covered:
+    //   1) explicit-file argument with non-capture content (passed through verbatim
+    //      by `expand_inputs`, fails magic detection in `open_reader`)
+    //   2) explicit-file argument shorter than 4 bytes (also fails magic detection)
+    let dir = "/tmp/wpawolf_logcov_skipped";
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).unwrap();
+
+    // Real pcap so the run completes successfully.
+    let real_pcap = format!("{dir}/real.pcap");
+    let mut real_bytes = Vec::new();
+    real_bytes.extend_from_slice(&pcap_global_header(105));
+    real_bytes.extend_from_slice(&pcap_packet_record(1000, &[0u8; 24]));
+    fs::write(&real_pcap, &real_bytes).unwrap();
+
+    // Two stubs: zero-byte (no magic possible) and 8-byte non-capture.
+    let zero_byte = format!("{dir}/wpakeysAB");
+    let junk = format!("{dir}/notes.txt");
+    fs::write(&zero_byte, b"").unwrap();
+    fs::write(&junk, b"NOTACAP!").unwrap();
+
+    let log = format!("{dir}/run.log");
+    let stderr_path = format!("{dir}/run.stderr");
+    let out_path = format!("{dir}/run.22000");
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&stderr_path);
+    let _ = fs::remove_file(&out_path);
+
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
+        .args(["--log", &log, "--22000-out", &out_path, &zero_byte, &junk, &real_pcap])
+        .stderr(stderr_file)
+        .status()
+        .unwrap();
+    assert!(status.success(), "wpawolf must finish successfully; bad inputs are skips, not aborts");
+
+    // Both unknown-format files must be in the log under [skipped_input].
+    let lines = log_lines_for(&log, "[skipped_input]");
+    assert_eq!(lines.len(), 2, "expected exactly two [skipped_input] lines; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains(&zero_byte)), "expected zero-byte stub in log; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains(&junk)), "expected non-capture file in log; got {lines:?}");
+    assert!(lines.iter().all(|l| l.contains("reason=")), "every line must carry reason=; got {lines:?}");
+
+    // Stderr must NOT carry the legacy `warning: cannot open` noise for these files.
+    let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
+    assert!(
+        !stderr_contents.contains("warning: cannot open"),
+        "unrecognised-format files must not warn on stderr; got:\n{stderr_contents}"
+    );
+    // The Phase 1 summary must reflect the count.
+    assert!(
+        stderr_contents.contains("input files skipped (magic unrecognised"),
+        "expected Phase 1 summary line for skipped files; got:\n{stderr_contents}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn directory_walk_filters_sub_4_byte_stubs_silently() {
+    // Defence in depth: even when a directory contains stubs, `expand_inputs`'s
+    // magic-byte filter (`is_capture_magic`) rejects them before `open_reader`
+    // ever runs. This test seeds a directory with files of size 0..=4 plus one
+    // valid pcap, and asserts:
+    //   * stderr stays clean (no warnings)
+    //   * the [skipped_input] log channel is silent (the walk filtered them out
+    //     pre-open, so `open_reader` never produced an UnknownFormat result)
+    //   * `files_skipped_unknown_format` stays at 0
+    //   * the valid pcap is processed (proves we didn't bail on the directory)
+    let dir = "/tmp/wpawolf_logcov_dirwalk";
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).unwrap();
+
+    // Stubs of every sub-magic length.
+    fs::write(format!("{dir}/stub0"), b"").unwrap();
+    fs::write(format!("{dir}/stub1"), b"X").unwrap();
+    fs::write(format!("{dir}/stub2"), b"XY").unwrap();
+    fs::write(format!("{dir}/stub3"), b"XYZ").unwrap();
+    // 4 bytes but not a capture magic -- exercises the magic check on the boundary.
+    fs::write(format!("{dir}/stub4"), b"BOGS").unwrap();
+    // The real pcap.
+    let real_pcap = format!("{dir}/real.pcap");
+    let mut real_bytes = Vec::new();
+    real_bytes.extend_from_slice(&pcap_global_header(105));
+    real_bytes.extend_from_slice(&pcap_packet_record(1000, &[0u8; 24]));
+    fs::write(&real_pcap, &real_bytes).unwrap();
+
+    let log = format!("{dir}/run.log");
+    let stderr_path = format!("{dir}/run.stderr");
+    let out_path = format!("{dir}/run.22000");
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&stderr_path);
+    let _ = fs::remove_file(&out_path);
+
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
+        .args(["--log", &log, "--22000-out", &out_path, dir])
+        .stderr(stderr_file)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
+    assert!(
+        !stderr_contents.contains("warning: cannot open"),
+        "stubs must be filtered silently; got:\n{stderr_contents}"
+    );
+    // The directory walk caught them, so `[skipped_input]` should be empty here.
+    let log_contents = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !log_contents.lines().any(|l| l.starts_with("[skipped_input]")),
+        "directory walk should filter pre-open; got [skipped_input] lines: {log_contents}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

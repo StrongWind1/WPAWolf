@@ -1,6 +1,6 @@
 //! Shared -- structured logger for malformed-frame events. See ARCHITECTURE.md §4.
 //!
-//! Appends categorised log lines to the file specified by `--log`. Nine categories,
+//! Appends categorised log lines to the file specified by `--log`. Ten categories,
 //! every one wired to a distinct call site:
 //!
 //! - `malformed_frame`    -- truncated or structurally invalid 802.11 / EAPOL data.
@@ -15,6 +15,10 @@
 //!   the AP appeared in. Emitted once per affected AP at end of run.
 //! - `capture_read_error` -- per-file ingest error, typically a truncated trailing
 //!   packet record (FR-IN-10).
+//! - `skipped_input`      -- file passed to the ingest loop whose magic bytes did
+//!   not match any supported capture format (typically a sub-4-byte stub or a
+//!   non-capture file slipped through). Counted in stats and silenced on stderr;
+//!   triage detail goes here.
 //! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3) or
 //!   all-`0xFF` (any).
 //! - `invalid_mic`        -- EAPOL frame discarded: MIC was NULL or all-`0xFF` with
@@ -158,6 +162,20 @@ impl Logger {
         self.write_line(&format!("[capture_read_error] path={} reason={reason}", path.display()));
     }
 
+    /// Logs an input file that the ingest loop opened but could not classify.
+    ///
+    /// Emitted when `open_reader` returns `Error::UnknownFormat`: the file does
+    /// not start with a recognised capture-file magic. Typical causes are
+    /// sub-4-byte stub files in a watch directory, or a regular non-capture
+    /// file that slipped through directory-walk magic filtering due to a TOCTOU
+    /// race (the file shrunk between the walk and the open). The ingest loop
+    /// continues with the next input; the operator's stderr stays clean.
+    /// `reason` is the `Error`'s `Display` form so the magic bytes / cause are
+    /// preserved for triage.
+    pub fn log_skipped_input(&mut self, path: &std::path::Path, reason: &str) {
+        self.write_line(&format!("[skipped_input] path={} reason={reason}", path.display()));
+    }
+
     /// Flushes the log buffer to disk.
     ///
     /// # Errors
@@ -263,6 +281,30 @@ mod tests {
             contents
                 .contains("[capture_read_error] path=/captures/304.pcap reason=pcap packet data: need 30 bytes, got 0"),
             "missing capture_read_error line; got: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn writes_skipped_input() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_skipped_input.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            logger.log_skipped_input(
+                std::path::Path::new("/var/www/wpa-sec/cap/wpakeysXY"),
+                "unrecognised file format (magic bytes: file too short to detect format (< 4 bytes))",
+            );
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(
+            contents.contains(
+                "[skipped_input] path=/var/www/wpa-sec/cap/wpakeysXY reason=unrecognised file format \
+                 (magic bytes: file too short to detect format (< 4 bytes))"
+            ),
+            "missing skipped_input line; got: {contents}"
         );
         let _ = std::fs::remove_file(&tmp);
     }

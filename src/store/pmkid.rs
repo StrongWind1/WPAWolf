@@ -116,6 +116,28 @@ impl PmkidStore {
     pub fn total_count(&self) -> usize {
         self.groups.values().map(Vec::len).sum()
     }
+
+    /// Drops every PMKID entry. Used by `--per-file` mode after the per-file
+    /// emit. The map's capacity is preserved across files so the next file
+    /// reuses the existing buckets.
+    pub fn clear(&mut self) {
+        self.groups.clear();
+    }
+
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    ///
+    /// Counts the `HashMap` bucket overhead, every `Vec<PmkidEntry>` allocation,
+    /// and every `PmkidEntry` struct. Does not count `FtFields` heap, which is
+    /// rare (only FT-PSK PMKIDs).
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let groups_cap_bytes = self.groups.capacity() * (size_of::<MacPair>() + size_of::<Vec<PmkidEntry>>() + 8);
+        let mut entries_bytes = 0usize;
+        for v in self.groups.values() {
+            entries_bytes += v.capacity() * size_of::<PmkidEntry>();
+        }
+        size_of::<Self>() + groups_cap_bytes + entries_bytes
+    }
 }
 
 // --- Unit tests ---

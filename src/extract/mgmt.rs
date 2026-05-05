@@ -5,7 +5,7 @@ use crate::log::Logger;
 use crate::stats::Stats;
 use crate::store::{
     AkmMap, MldStore,
-    auxiliary::{DeviceInfoStore, EssidSet, ProbeEssidSet, WordlistStore},
+    auxiliary::{DeviceInfoStore, EssidSet, ProbeEssidSet, WordlistScanIesStore, WordlistStore},
     essid::EssidMap,
     pmkid::PmkidStore,
 };
@@ -32,17 +32,22 @@ use super::probe::process_probe_req;
 const WORDLIST_SCAN_IES_MIN_RUN: usize = 8;
 
 /// Scans the IE tagged-parameter block `ies` for printable-ASCII runs of length
-/// `>= WORDLIST_SCAN_IES_MIN_RUN` and inserts each run into `wordlist_store`.
+/// `>= WORDLIST_SCAN_IES_MIN_RUN` and inserts each run into `scan_ies_store`.
 ///
-/// Called from `process_mgmt` when `--wordlist-scan-ies` is set and the frame is
-/// plaintext. Iterates IEs via `iter_ies` so the scan looks at element *values*
-/// only -- fixed management-body fields and the 2-byte IE TLV header never enter
-/// the scan, matching the design contract in `ARCHITECTURE.md §9` that the
-/// sweep is "IE body only, not the fixed fields themselves."
-fn scan_ies_for_wordlist(ies: &[u8], wordlist_store: &mut WordlistStore, stats: &mut Stats) {
+/// Called from `process_mgmt` when `--wordlist-scan-ies FILE` is set and the
+/// frame is plaintext. Iterates IEs via `iter_ies` so the scan looks at element
+/// *values* only -- fixed management-body fields and the 2-byte IE TLV header
+/// never enter the scan, matching the design contract in `ARCHITECTURE.md §9`
+/// that the sweep is "IE body only, not the fixed fields themselves."
+///
+/// Per the `--wordlist-scan-ies FILE` separation contract (see
+/// `WordlistScanIesStore`), runs go **only** to the dedicated IE-scan store and
+/// are never folded into `WordlistStore` (`-W`). Operators who want both
+/// streams in one file can point both flags at the same path.
+fn scan_ies_for_wordlist(ies: &[u8], scan_ies_store: &mut WordlistScanIesStore, stats: &mut Stats) {
     for ie in iter_ies(ies) {
         for run in extract_ascii_runs(ie.value, WORDLIST_SCAN_IES_MIN_RUN) {
-            wordlist_store.insert(run.to_vec());
+            scan_ies_store.insert(run.to_vec());
             stats.wordlist_scan_ie_runs += 1;
         }
     }
@@ -68,6 +73,7 @@ pub fn process_mgmt(
     mld_store: &mut MldStore,
     pmkid_store: &mut PmkidStore,
     wordlist_store: &mut WordlistStore,
+    scan_ies_store: &mut WordlistScanIesStore,
     device_store: &mut DeviceInfoStore,
     stats: &mut Stats,
     logger: &mut Logger,
@@ -92,12 +98,15 @@ pub fn process_mgmt(
         }
     }
 
-    // Optional `--wordlist-scan-ies` sweep (wordlist IE-scan): scan plaintext management-frame
-    // IE bodies for printable-ASCII runs. See `ARCHITECTURE.md §9`. The per-subtype
-    // fixed-field length determines where the tagged parameter block begins; subtypes
-    // without a stable IE section (AUTH, ATIM, Measurement Pilot, Timing Advertisement)
-    // are skipped.
-    if cfg.scan_ies && populate_wordlist && !mac_hdr.protected {
+    // Optional `--wordlist-scan-ies FILE` sweep (IE-scan strand): scan plaintext
+    // management-frame IE bodies for printable-ASCII runs into a dedicated store
+    // that is *not* folded into `-W`. See `ARCHITECTURE.md §9`. The per-subtype
+    // fixed-field length determines where the tagged parameter block begins;
+    // subtypes without a stable IE section (AUTH, ATIM, Measurement Pilot,
+    // Timing Advertisement) are skipped. The `--wordlist-scan-ies FILE` flag
+    // sets `cfg.scan_ies` independently of `-W`, so an operator can run with
+    // *only* the IE-scan output and no curated wordlist if they want to.
+    if cfg.scan_ies && !mac_hdr.protected {
         let fixed = match mac_hdr.subtype {
             SUBTYPE_BEACON | SUBTYPE_PROBE_RESP => Some(BEACON_FIXED),
             SUBTYPE_PROBE_REQ => Some(0),
@@ -113,7 +122,7 @@ pub fn process_mgmt(
         };
         if let Some(offset) = fixed {
             if let Some(ies_bytes) = body.get(offset..) {
-                scan_ies_for_wordlist(ies_bytes, wordlist_store, stats);
+                scan_ies_for_wordlist(ies_bytes, scan_ies_store, stats);
             }
         }
     }
@@ -280,6 +289,7 @@ mod tests {
         mld_store: MldStore,
         pmkid_store: PmkidStore,
         wordlist_store: WordlistStore,
+        scan_ies_store: WordlistScanIesStore,
         device_store: DeviceInfoStore,
         stats: Stats,
         logger: Logger,
@@ -295,6 +305,7 @@ mod tests {
                 mld_store: MldStore::new(),
                 pmkid_store: PmkidStore::new(),
                 wordlist_store: WordlistStore::new(),
+                scan_ies_store: WordlistScanIesStore::new(),
                 device_store: DeviceInfoStore::new(),
                 stats: Stats::new(),
                 logger: Logger::new(None).unwrap(),
@@ -342,6 +353,7 @@ mod tests {
             &mut world.mld_store,
             &mut world.pmkid_store,
             &mut world.wordlist_store,
+            &mut world.scan_ies_store,
             &mut world.device_store,
             &mut world.stats,
             &mut world.logger,

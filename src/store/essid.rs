@@ -191,6 +191,23 @@ impl EssidMap {
         self.map.len()
     }
 
+    /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
+    ///
+    /// Sums `HashMap` bucket overhead, every `Vec<EssidEntry>` allocation,
+    /// every `EssidEntry` struct, and the heap bytes of every SSID `Vec<u8>`.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let map_cap_bytes = self.map.capacity() * (size_of::<MacAddr>() + size_of::<Vec<EssidEntry>>() + 8);
+        let mut entries_bytes = 0usize;
+        for v in self.map.values() {
+            entries_bytes += v.capacity() * size_of::<EssidEntry>();
+            for e in v {
+                entries_bytes = entries_bytes.saturating_add(e.essid.capacity());
+            }
+        }
+        size_of::<Self>() + map_cap_bytes + entries_bytes
+    }
+
     /// Returns all unique ESSID byte strings seen across all APs.
     ///
     /// Deduplicates by value -- the same ESSID broadcast by multiple APs appears once.
