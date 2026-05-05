@@ -437,6 +437,14 @@ impl UsernameSet {
 ///
 /// Collected for `--device-output` (`-D`) and written verbatim. Attribute IDs are
 /// defined by the Wi-Fi Protected Setup specification.
+///
+/// `Hash`, `PartialEq`, and `Eq` are implemented manually on the **output-relevant
+/// fields only** (`mac`, `manufacturer`, `model_name`, `serial_number`,
+/// `device_name`, `uuid_e`, `essid`) so two entries that would render to a
+/// byte-identical `-D` line collapse under `DeviceInfoStore`'s row-level dedup.
+/// `model_number` is collected for `-W` (the wordlist) but is **not** in the
+/// `-D` output line, so it is excluded from the equivalence relation. See
+/// `output/device_info.rs::write_device_info` for the column order.
 #[derive(Debug, Clone)]
 pub struct DeviceInfoEntry {
     /// AP MAC address.
@@ -445,7 +453,9 @@ pub struct DeviceInfoEntry {
     pub manufacturer: Vec<u8>,
     /// Device model name bytes. [Wi-Fi Protected Setup spec] attr 0x1023
     pub model_name: Vec<u8>,
-    /// Device model number bytes. [Wi-Fi Protected Setup spec] attr 0x1024
+    /// Device model number bytes. [Wi-Fi Protected Setup spec] attr 0x1024.
+    /// Collected for `-W` (the wordlist) only; **not** part of the `-D` output line
+    /// and **not** part of the dedup equivalence relation. See type-level docs.
     pub model_number: Vec<u8>,
     /// Device serial number bytes. [Wi-Fi Protected Setup spec] attr 0x1042
     pub serial_number: Vec<u8>,
@@ -457,18 +467,62 @@ pub struct DeviceInfoEntry {
     pub essid: Vec<u8>,
 }
 
+impl PartialEq for DeviceInfoEntry {
+    fn eq(&self, other: &Self) -> bool {
+        // model_number deliberately excluded -- not in -D output column set, so two
+        // observations differing only in model_number render to the same line.
+        self.mac == other.mac
+            && self.manufacturer == other.manufacturer
+            && self.model_name == other.model_name
+            && self.serial_number == other.serial_number
+            && self.device_name == other.device_name
+            && self.uuid_e == other.uuid_e
+            && self.essid == other.essid
+    }
+}
+
+impl Eq for DeviceInfoEntry {}
+
+impl std::hash::Hash for DeviceInfoEntry {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Same field set as PartialEq above. Order matters for consistent hashing
+        // across processes; matching the field declaration order keeps it auditable.
+        self.mac.hash(state);
+        self.manufacturer.hash(state);
+        self.model_name.hash(state);
+        self.serial_number.hash(state);
+        self.device_name.hash(state);
+        self.uuid_e.hash(state);
+        self.essid.hash(state);
+    }
+}
+
 /// Collected WPS device metadata entries for `--device-output` (`-D`) output.
 ///
-/// Stores every WPS Beacon / Probe Response observation verbatim -- no dedup by MAC,
-/// no dedup by `(MAC, UUID-E)`, no dedup by full-row equality. Rationale: any dedup
-/// key risks collapsing a richer observation into a sparser one (a sparse WPS Beacon
-/// overwriting a rich Probe Response row, or vice-versa) and the operator cannot
-/// recover information the store threw away. The output file is deterministic after
-/// sort, and the operator can post-process with `sort -u` if they want dedup.
-/// Only populated when `--device-output` is set. See `ARCHITECTURE.md §3.3`.
+/// Dedupes at insertion time on the **output-rendered row identity** -- two pushes
+/// that would produce a byte-identical `-D` line collapse to one stored entry. Keys:
+/// `(mac, manufacturer, model_name, serial_number, device_name, uuid_e, essid)`.
+/// `model_number` is intentionally excluded from the dedup key because it does not
+/// appear in the `-D` output column set; the `-W` wordlist receives every observation
+/// independently before this store is touched (see `extract/beacon.rs`), so dedup here
+/// does not lose model-number strings from the wordlist. Entries with all four primary
+/// string fields empty (`manufacturer`, `model_name`, `serial_number`, `device_name`)
+/// are skipped on insert -- they would be filtered by `write_device_info`'s
+/// all-empty-fields guard at write time anyway, so storing them wastes memory only.
+///
+/// **Why not `(MAC, UUID-E)` or MAC-only as the dedup key.** A sparse WPS Beacon
+/// observation (manufacturer only) would collapse a rich Probe Response observation
+/// (full attribute set) when keyed on identifier alone, and the rich row would be
+/// permanently lost. Full-row equality avoids this: a sparse and a rich observation
+/// for the same AP have non-equal dedup keys (different `model_name` / `serial_number`
+/// / `device_name`) and both survive as distinct lines.
+///
+/// Insertion order is **not** preserved (the writer sorts by manufacturer at output
+/// time, so this is invisible downstream). Only populated when `--device-output` is
+/// set. See `ARCHITECTURE.md §3.3`.
 #[derive(Debug, Default)]
 pub struct DeviceInfoStore {
-    entries: Vec<DeviceInfoEntry>,
+    entries: HashSet<DeviceInfoEntry>,
 }
 
 impl DeviceInfoStore {
@@ -478,17 +532,34 @@ impl DeviceInfoStore {
         Self::default()
     }
 
-    /// Appends `entry` to the store. No dedup.
+    /// Inserts `entry` if (a) at least one of the four primary string fields is
+    /// non-empty AND (b) no byte-identical-rendered row is already stored.
+    /// Otherwise the call is a no-op.
+    ///
+    /// The empty-fields guard mirrors the all-empty-fields skip in
+    /// `output/device_info.rs::write_device_info` so the store does not retain
+    /// observations that the writer would never emit.
     pub fn push(&mut self, entry: DeviceInfoEntry) {
-        self.entries.push(entry);
+        if entry.manufacturer.is_empty()
+            && entry.model_name.is_empty()
+            && entry.serial_number.is_empty()
+            && entry.device_name.is_empty()
+        {
+            return;
+        }
+        self.entries.insert(entry);
     }
 
-    /// Iterates over all device info entries in insertion order.
+    /// Iterates over all stored device info entries.
+    ///
+    /// Iteration order is `HashSet`-iteration order (not deterministic across runs).
+    /// `write_device_info` sorts by manufacturer at output time so this does not
+    /// affect the rendered file.
     pub fn iter(&self) -> impl Iterator<Item = &DeviceInfoEntry> {
         self.entries.iter()
     }
 
-    /// Returns the number of entries (every WPS observation, no dedup).
+    /// Returns the number of unique stored entries.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -503,7 +574,11 @@ impl DeviceInfoStore {
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
     #[must_use]
     pub fn approx_bytes(&self) -> usize {
-        let mut entries_bytes = self.entries.capacity() * size_of::<DeviceInfoEntry>();
+        // HashSet has roughly capacity * entry-slot overhead; entry slots include
+        // the key value plus per-bucket bookkeeping. Use the same per-entry struct
+        // size estimate the prior Vec backing produced and add the per-byte-vec
+        // capacity sums; close enough for the diagnostic output.
+        let mut entries_bytes = self.entries.capacity() * (size_of::<DeviceInfoEntry>() + 8);
         for e in &self.entries {
             entries_bytes = entries_bytes
                 .saturating_add(e.manufacturer.capacity())
@@ -742,33 +817,84 @@ mod tests {
     }
 
     #[test]
-    fn device_info_store_push_and_iter() {
-        // Two entries with DIFFERENT MACs -> both retained in insertion order.
+    fn device_info_store_distinct_macs_both_retained() {
+        // Two entries with DIFFERENT MACs -> both retained.
         let mut store = DeviceInfoStore::new();
         store.push(make_entry_with_mac(0x11, b"Acme"));
         store.push(make_entry_with_mac(0x22, b"Corp"));
         assert_eq!(store.len(), 2);
-        let names: Vec<&[u8]> = store.iter().map(|e| e.manufacturer.as_slice()).collect();
+        // Iteration order is HashSet-order (non-deterministic); collect into a
+        // sorted Vec for a stable assertion.
+        let mut names: Vec<&[u8]> = store.iter().map(|e| e.manufacturer.as_slice()).collect();
+        names.sort_unstable();
         assert_eq!(names, vec![b"Acme".as_slice(), b"Corp".as_slice()]);
     }
 
     #[test]
-    fn device_info_store_no_dedup_by_mac() {
-        // Two entries with the SAME MAC -> both retained (no dedup).
+    fn device_info_store_same_mac_different_rows_both_retained() {
+        // Two entries sharing a MAC but with different manufacturer -> distinct
+        // dedup keys -> both retained. This guards against the prior "MAC-only
+        // dedup" failure mode where a sparse Beacon observation overwrote a rich
+        // Probe Response observation (or vice-versa).
         let mut store = DeviceInfoStore::new();
         store.push(make_entry_with_mac(0x11, b"Acme"));
-        store.push(make_entry_with_mac(0x11, b"Corp")); // same MAC
-        assert_eq!(store.len(), 2, "same MAC should NOT be deduped");
-        let names: Vec<&[u8]> = store.iter().map(|e| e.manufacturer.as_slice()).collect();
-        assert_eq!(names, vec![b"Acme".as_slice(), b"Corp".as_slice()]);
+        store.push(make_entry_with_mac(0x11, b"Corp")); // same MAC, different mfr
+        assert_eq!(store.len(), 2, "same MAC + different fields must be retained");
     }
 
     #[test]
-    fn device_info_store_no_dedup_identical_rows() {
-        // Two byte-identical entries -> both retained (no row-level dedup either).
+    fn device_info_store_dedupes_byte_identical_rows() {
+        // Two byte-identical pushes -> one stored. This is the operator-friendly
+        // contract: the -D output is already deduped, no `sort -u` post-processing
+        // required.
         let mut store = DeviceInfoStore::new();
         store.push(make_entry_with_mac(0x11, b"Acme"));
         store.push(make_entry_with_mac(0x11, b"Acme"));
-        assert_eq!(store.len(), 2, "identical rows should NOT be deduped");
+        assert_eq!(store.len(), 1, "byte-identical rows must collapse to one");
+    }
+
+    #[test]
+    fn device_info_store_dedup_ignores_model_number() {
+        // model_number is collected for -W but is NOT in the -D output column set,
+        // so two entries differing only in model_number render to identical -D
+        // lines and must collapse. The wordlist still sees both model_number
+        // strings via the separate insertion path in extract/beacon.rs.
+        let mut store = DeviceInfoStore::new();
+        let mut e1 = make_entry_with_mac(0x11, b"Acme");
+        e1.model_number = b"v1".to_vec();
+        let mut e2 = make_entry_with_mac(0x11, b"Acme");
+        e2.model_number = b"v2".to_vec();
+        store.push(e1);
+        store.push(e2);
+        assert_eq!(store.len(), 1, "differing model_number alone must not prevent dedup");
+    }
+
+    #[test]
+    fn device_info_store_skips_all_empty_fields_on_insert() {
+        // Mirrors the all-empty-fields skip in write_device_info. Storing such
+        // entries wastes memory because the writer would skip them at output
+        // time anyway.
+        let mut store = DeviceInfoStore::new();
+        let entry = DeviceInfoEntry {
+            mac: MacAddr::from_bytes([0x11; 6]),
+            manufacturer: vec![],
+            model_name: vec![],
+            model_number: vec![], // model_number alone does NOT count as content
+            serial_number: vec![],
+            device_name: vec![],
+            uuid_e: Some([0xAB; 16]), // UUID-E alone does NOT count as content
+            essid: b"NetX".to_vec(),  // ESSID alone does NOT count as content
+        };
+        store.push(entry);
+        assert_eq!(store.len(), 0, "all-primary-string-fields-empty entry must be skipped");
+    }
+
+    #[test]
+    fn device_info_store_keeps_entry_with_only_one_primary_field() {
+        // A single non-empty primary field is enough to retain the entry --
+        // mirrors what write_device_info will emit.
+        let mut store = DeviceInfoStore::new();
+        store.push(make_entry_with_mac(0x11, b"Acme")); // manufacturer only
+        assert_eq!(store.len(), 1);
     }
 }

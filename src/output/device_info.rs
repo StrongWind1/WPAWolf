@@ -218,8 +218,11 @@ mod tests {
     }
 
     #[test]
-    fn write_device_info_no_dedup_by_mac() {
-        // Two pushes for the same MAC -> both entries retained (no dedup).
+    fn write_device_info_keeps_distinct_rows_under_same_mac() {
+        // Two pushes for the same MAC but different manufacturer -> distinct
+        // dedup keys (full-row equality), both retained. This is the safety
+        // contract: same-MAC observations only collapse when the whole rendered
+        // row is byte-identical.
         let mut store = DeviceInfoStore::new();
         let mut e1 = make_entry(0x11, None);
         e1.manufacturer = b"First".to_vec();
@@ -229,9 +232,22 @@ mod tests {
         store.push(e2);
         let mut out = Vec::new();
         let count = write_device_info(&store, &mut out).unwrap();
-        assert_eq!(count, 2, "same MAC should NOT be deduped");
+        assert_eq!(count, 2, "distinct rows under one MAC must both render");
         let text = std::str::from_utf8(&out).unwrap();
         assert!(text.contains("First"), "first entry retained: {text:?}");
         assert!(text.contains("Second"), "second entry retained: {text:?}");
+    }
+
+    #[test]
+    fn write_device_info_dedupes_byte_identical_rows() {
+        // Two byte-identical pushes -> one rendered line. Mirrors what `sort -u`
+        // would do on the post-fix output -- the store now does it eagerly to
+        // save memory.
+        let mut store = DeviceInfoStore::new();
+        store.push(make_entry(0x11, Some([0xAB; 16])));
+        store.push(make_entry(0x11, Some([0xAB; 16])));
+        let mut out = Vec::new();
+        let count = write_device_info(&store, &mut out).unwrap();
+        assert_eq!(count, 1, "byte-identical rows must collapse to one rendered line");
     }
 }
