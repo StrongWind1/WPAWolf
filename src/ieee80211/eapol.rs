@@ -10,7 +10,7 @@
 //! Key Data RSN IEs.
 
 use crate::ieee80211::frame::FrameDirection;
-use crate::types::{MicBytes, MsgType};
+use crate::types::{MicBytes, MsgType, garbage_pattern_kind};
 
 // --- LLC/SNAP constants [IEEE 802.11-2012 Annex P, Table P-2] ---
 
@@ -98,25 +98,26 @@ const LLC_SNAP_LEN: usize = 8;
 
 /// Per-field invalid-value check result, returned by [`check_invalid_fields`].
 ///
-/// Separates NULL (all-`0x00`) from `0xFF` (all-`0xFF`) so callers can increment
-/// distinct statistics counters. M4 NULL nonce and M1 NULL MIC are **not** flagged
-/// because they are spec-valid. See field docs for the governing spec citation.
+/// Each field carries the kind of garbage pattern detected (`"null"`, `"ff"`,
+/// `"repeat_1"`, `"repeat_2"`, `"repeat_4"` -- see [`garbage_pattern_kind`])
+/// or `None` when the field is structurally clean. Callers route the kind
+/// string into stats counters and the `[invalid_*]` log categories.
+///
+/// M4 NULL nonce and M1 NULL MIC are spec-valid and are **never** flagged
+/// here -- see field docs for the governing spec citation.
 #[derive(Debug, Default, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools, reason = "four independent status bits, not a state machine")]
 pub struct InvalidCheck {
-    /// Nonce is all-`0x00` in an M1/M2/M3 frame (spec requires a non-NULL random nonce
-    /// for these). M4 NULL nonce is **not** flagged here because §12.7.6.5 permits it.
-    pub null_nonce: bool,
-    /// Nonce is all-`0xFF` in any EAPOL-Key frame (firmware sentinel, never spec-valid).
-    pub ff_nonce: bool,
-    /// MIC is all-`0x00` when the Key MIC flag (bit B8) is set, i.e. in M2/M3/M4.
-    /// M1 NULL MIC is never flagged (spec: M1 has no MIC).
-    pub null_mic: bool,
-    /// MIC is all-`0xFF` when the Key MIC flag (bit B8) is set.
-    pub ff_mic: bool,
+    /// Garbage-pattern kind detected in the Key Nonce, or `None` when clean.
+    /// M4 frames are exempted from the NULL check per [IEEE 802.11-2024] §12.7.6.5
+    /// (spec mandates an all-zero M4 nonce); every other pattern still flags.
+    pub nonce_garbage: Option<&'static str>,
+    /// Garbage-pattern kind detected in the Key MIC when the Key MIC flag (bit B8)
+    /// is set, or `None` when clean. M1 frames have no MIC by spec and are never
+    /// flagged here -- the gate is `key_mic_flag`, not `msg_type`.
+    pub mic_garbage: Option<&'static str>,
 }
 
-/// Checks for invalid field values (all-NULL or all-`0xFF`) in a raw frame body.
+/// Checks for invalid field values (NULL, `0xFF`, repeating patterns) in a raw frame body.
 ///
 /// Call this on any frame body that has already passed the EAPOL `EtherType` check
 /// before calling [`parse`]. Used by the caller to increment statistics counters for
@@ -164,18 +165,17 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
 
     // Nonce at eapol offset 17. [IEEE 802.11-2024] §12.7.2
     let nonce = data.get(LLC_SNAP_LEN + OFF_NONCE..LLC_SNAP_LEN + OFF_NONCE + 32);
-    // NULL nonce is only invalid for M1/M2/M3; M4 NULL is spec-compliant.
-    let null_nonce = !is_likely_m4 && nonce.is_some_and(|n| n == [0u8; 32]);
-    let ff_nonce = nonce.is_some_and(|n| n == [0xFFu8; 32]);
+    // For M4, NULL nonce is spec-compliant -- map "null" to None there. Every other
+    // garbage pattern (ff, repeat_1, repeat_2, repeat_4) still flags on M4.
+    let nonce_garbage = nonce.and_then(garbage_pattern_kind).filter(|&kind| !(is_likely_m4 && kind == "null"));
 
     // MIC at eapol offset 81 with width 16 or 24. Only relevant when Key MIC flag
     // is set (M2/M3/M4). M1 MIC is legitimately NULL per spec and is never flagged.
     // [IEEE 802.11-2024] §12.7.2 Table 12-11
     let mic = data.get(LLC_SNAP_LEN + OFF_MIC..LLC_SNAP_LEN + OFF_MIC + mic_width);
-    let null_mic = key_mic_flag && mic.is_some_and(|m| m.iter().all(|&b| b == 0));
-    let ff_mic = key_mic_flag && mic.is_some_and(|m| m.iter().all(|&b| b == 0xFF));
+    let mic_garbage = if key_mic_flag { mic.and_then(garbage_pattern_kind) } else { None };
 
-    InvalidCheck { null_nonce, ff_nonce, null_mic, ff_mic }
+    InvalidCheck { nonce_garbage, mic_garbage }
 }
 
 // --- MIC width disambiguation ---
@@ -508,27 +508,29 @@ pub fn parse(data: &[u8], direction: Option<FrameDirection>) -> Option<EapolKey>
     // --- 5. Validate per-message requirements ---
 
     // MIC validation.
-    // M1: no MIC per spec -- NULL MIC in M1 is spec-valid and is NOT checked.
-    // M2/M3/M4: MIC MUST be non-NULL (unauthenticated frame) and non-0xFF (firmware sentinel).
-    // Width is variable (16 or 24 B) per AKM; `MicBytes::is_zero`/`is_ff` examine only
-    // the active prefix. [IEEE 802.11-2024] §12.7.2 Table 12-11
-    if matches!(msg_type, MsgType::M2 | MsgType::M3 | MsgType::M4) && (mic.is_zero() || mic.is_ff()) {
+    // M1: no MIC per spec -- the NULL MIC in M1 is spec-valid and is NOT checked.
+    // M2/M3/M4: MIC MUST carry no garbage pattern (NULL, all-0xFF, or short
+    // repeating period). Width is variable (16 or 24 B) per AKM;
+    // `MicBytes::garbage_pattern_kind` examines only the active prefix.
+    // [IEEE 802.11-2024] §12.7.2 Table 12-11
+    if matches!(msg_type, MsgType::M2 | MsgType::M3 | MsgType::M4) && mic.garbage_pattern_kind().is_some() {
         return None;
     }
 
     // Nonce validation.
     // M4: NULL nonce (all-0x00) is spec-valid per §12.7.6.5 -- the spec says M4 Key Nonce
     //   SHALL be zero. §12.7.2 NOTE 9 acknowledges some non-conforming implementations
-    //   copy M2's SNonce into M4. Both forms are accepted. M4 is excluded from the NULL check.
+    //   copy M2's SNonce into M4. Both forms are accepted. M4 is excluded from the NULL
+    //   branch only; every other garbage pattern still rejects on M4.
     // M1/M2/M3: nonce MUST be a non-NULL cryptographically random value. NULL nonce
-    //   indicates entropy starvation or a firmware bug.
-    // All msg types: all-0xFF nonce is a firmware sentinel (flash erase value) -- never valid.
+    //   indicates entropy starvation or a firmware bug; repeating-byte patterns
+    //   indicate firmware stub values; all-0xFF is a flash-erase sentinel.
     // [IEEE 802.11-2024] §12.7.2, §12.7.6.5
-    if matches!(msg_type, MsgType::M1 | MsgType::M2 | MsgType::M3) && nonce == [0u8; 32] {
-        return None;
-    }
-    if nonce == [0xFF_u8; 32] {
-        return None;
+    if let Some(kind) = garbage_pattern_kind(&nonce) {
+        let m4_null_exception = msg_type == MsgType::M4 && kind == "null";
+        if !m4_null_exception {
+            return None;
+        }
     }
 
     // --- 6. Extract PMKID from M1 Key Data KDE (if present) ---
@@ -803,6 +805,48 @@ mod tests {
     fn parse_m1_zero_nonce_rejected() {
         let frame = make_eapol(true, false, false, false, [0u8; 32], [0u8; 16], &[]);
         assert!(parse(&frame, None).is_none(), "M1 with all-zero nonce must be rejected");
+    }
+
+    #[test]
+    fn parse_m1_repeat_byte_nonce_rejected() {
+        // M1 nonce of all-`0x55` is `repeat_1` garbage -- firmware test stub,
+        // not a cryptographic random nonce. Parser must reject.
+        let frame = make_eapol(true, false, false, false, [0x55u8; 32], [0u8; 16], &[]);
+        assert!(parse(&frame, None).is_none(), "M1 with all-`0x55` nonce must be rejected (repeat_1)");
+    }
+
+    #[test]
+    fn parse_m1_period_2_nonce_rejected() {
+        // 5555AAAA... 2-byte period is `repeat_2` garbage.
+        let mut nonce = [0u8; 32];
+        for chunk in nonce.chunks_exact_mut(2) {
+            chunk[0] = 0x55;
+            chunk[1] = 0xAA;
+        }
+        let frame = make_eapol(true, false, false, false, nonce, [0u8; 16], &[]);
+        assert!(parse(&frame, None).is_none(), "M1 with 2-byte period nonce must be rejected (repeat_2)");
+    }
+
+    #[test]
+    fn parse_m1_period_4_nonce_rejected() {
+        // 01020304... 4-byte period is `repeat_4` garbage.
+        let mut nonce = [0u8; 32];
+        for chunk in nonce.chunks_exact_mut(4) {
+            chunk[0] = 0x01;
+            chunk[1] = 0x02;
+            chunk[2] = 0x03;
+            chunk[3] = 0x04;
+        }
+        let frame = make_eapol(true, false, false, false, nonce, [0u8; 16], &[]);
+        assert!(parse(&frame, None).is_none(), "M1 with 4-byte period nonce must be rejected (repeat_4)");
+    }
+
+    #[test]
+    fn parse_m2_repeat_byte_mic_rejected() {
+        // M2 with all-`0xAB` MIC is `repeat_1` garbage. M2 MICs are HMAC outputs
+        // (random); a uniform-byte MIC indicates a firmware stub.
+        let frame = make_eapol(false, true, false, false, nonce_nonzero(), [0xABu8; 16], &[]);
+        assert!(parse(&frame, None).is_none(), "M2 with all-`0xAB` MIC must be rejected (repeat_1)");
     }
 
     #[test]

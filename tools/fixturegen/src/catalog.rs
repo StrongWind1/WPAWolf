@@ -85,8 +85,17 @@ pub enum Container {
 }
 
 const PSK: &[u8] = b"hashcat!";
-const ANONCE: [u8; 32] = [0xA1; 32];
-const SNONCE: [u8; 32] = [0xB2; 32];
+// Non-uniform nonces: the EAPOL parser rejects uniform-byte nonces (`[0xA1; 32]`
+// flags as `repeat_1`). Real wire nonces are random; the per-byte values below
+// mirror that shape while keeping each side identifiable by its leading byte.
+const ANONCE: [u8; 32] = [
+    0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xA0, 0x91, 0x92, 0x93,
+    0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F, 0x90,
+];
+const SNONCE: [u8; 32] = [
+    0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xB0, 0xB1, 0x82, 0x83, 0x84,
+    0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x80, 0x81,
+];
 
 const TS_BASE_SEC: u32 = 1_700_000_000;
 
@@ -1258,13 +1267,20 @@ fn build_s2_m2_rsn_ie(ap: [u8; 6], sta: [u8; 6], pmkid: &[u8; 16]) -> Vec<Vec<u8
     let ssid = b"wpawolf-s02";
     let bcn = beacon_for_akm(ap, ssid, 2);
     let kd = rsn_ie(2, Some(pmkid));
+    // Non-uniform placeholder MIC: a uniform `vec![0xCDu8; 16]` would now flag
+    // as `repeat_1` garbage and wpawolf's parser would reject the M2 before
+    // the PMKID extractor runs. The wire-real MIC is computed from KCK + body
+    // and carries the random-shape signature of an HMAC output; this fixture
+    // mirrors that property.
+    let placeholder_mic =
+        vec![0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F];
     let spec = KeySpec {
         msg: EapolMsg::M2,
         kdv: 2,
         mic_len: 16,
         replay_counter: 1,
         nonce: SNONCE,
-        mic: vec![0xCDu8; 16],
+        mic: placeholder_mic,
         key_data: kd,
         wpa1: false,
     };

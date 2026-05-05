@@ -593,6 +593,15 @@ impl MicBytes {
     pub fn is_ff(&self) -> bool {
         self.as_slice().iter().all(|&b| b == 0xFF)
     }
+
+    /// Returns the garbage-pattern kind detected in the active MIC bytes, or
+    /// `None` when the MIC is structurally clean. Forwards to the byte-slice
+    /// [`garbage_pattern_kind`] helper. The trailing 8 unused bytes of a 16-B
+    /// MIC stored in the 24-B inline buffer are excluded by `as_slice`.
+    #[must_use]
+    pub fn garbage_pattern_kind(&self) -> Option<&'static str> {
+        garbage_pattern_kind(self.as_slice())
+    }
 }
 
 impl Default for MicBytes {
@@ -743,6 +752,68 @@ pub fn split_on_control_bytes(bytes: &[u8]) -> Vec<&[u8]> {
 #[must_use]
 pub fn is_printable_ascii(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| (0x21..=0x7E).contains(&b) && b != 0x3A)
+}
+
+// --- Garbage-pattern detector ---
+
+/// Classifies a fixed-width cryptographic field (nonce, MIC, PMKID, ...) against
+/// common firmware-stub or test-pattern shapes that have no cracking value.
+///
+/// Returns the matched-pattern kind (a stable string identifier suitable for
+/// stats and log lines) when `bytes` is structurally suspect, or `None` when
+/// the run shows no obvious garbage shape. Empty input always returns `None`
+/// since there is nothing to judge.
+///
+/// Patterns, in priority order:
+///   * `"null"`     -- every byte is `0x00`. Firmware uninitialised / spec NULL sentinel.
+///     Fires at any length (a single `0x00` byte is still a NULL sentinel).
+///   * `"ff"`       -- every byte is `0xFF`. NOR-flash erase value, never spec-valid.
+///     Fires at any length.
+///   * `"repeat_1"` -- every byte equals the first byte (and is neither `0x00`
+///     nor `0xFF`, which already returned earlier). Catches firmware patterns
+///     like all-`0x55`, all-`0xAA`, all-`0x01`. Length must be `>= 4` so that
+///     short legitimate SSIDs (`"X"`, `"AB"`, `"LAN"`) are never flagged.
+///   * `"repeat_2"` -- bytes form a 2-byte repeating period (e.g. `5555AAAA`,
+///     `01010101...`, `0102 0102 0102`). Length must be a multiple of 2 and `>= 4`.
+///   * `"repeat_4"` -- bytes form a 4-byte repeating period. Length must be a
+///     multiple of 4 and `>= 8`.
+///
+/// Cryptographic nonces / MICs / PMKIDs from a healthy stack are uniformly
+/// random, so any of these patterns indicates a synthetic / sentinel / firmware
+/// stub value rather than crackable material. The fixed widths used by 802.11
+/// (32 B nonce, 16 / 24 B MIC, 16 B PMKID) are all multiples of 4, so all three
+/// period checks apply.
+#[must_use]
+pub fn garbage_pattern_kind(bytes: &[u8]) -> Option<&'static str> {
+    let &first = bytes.first()?;
+    if bytes.iter().all(|&b| b == 0x00) {
+        return Some("null");
+    }
+    if bytes.iter().all(|&b| b == 0xFF) {
+        return Some("ff");
+    }
+    // Length >= 4 minimum so single-byte (`"X"`) and short (`"AB"`, `"LAN"`)
+    // SSIDs do not flag as `repeat_1`. Cryptographic fields (nonce 32, MIC
+    // 16/24, PMKID 16) all clear this floor, so the gate is operationally
+    // ESSID-only.
+    if bytes.len() >= 4 && bytes.iter().all(|&b| b == first) {
+        return Some("repeat_1");
+    }
+    if bytes.len() >= 4 && bytes.len() % 2 == 0 {
+        if let Some(p2) = bytes.get(..2) {
+            if bytes.chunks_exact(2).all(|c| c == p2) {
+                return Some("repeat_2");
+            }
+        }
+    }
+    if bytes.len() >= 8 && bytes.len() % 4 == 0 {
+        if let Some(p4) = bytes.get(..4) {
+            if bytes.chunks_exact(4).all(|c| c == p4) {
+                return Some("repeat_4");
+            }
+        }
+    }
+    None
 }
 
 /// Formats `bytes` using the wpawolf autohex convention.
@@ -1224,5 +1295,81 @@ mod tests {
         assert!(!AkmType::PskSha256.is_ft());
         assert!(!AkmType::PskSha384.is_ft());
         assert!(!AkmType::Unknown.is_ft());
+    }
+
+    // --- garbage_pattern_kind ---
+
+    #[test]
+    fn garbage_pattern_empty_returns_none() {
+        assert_eq!(garbage_pattern_kind(&[]), None);
+    }
+
+    #[test]
+    fn garbage_pattern_null_at_any_length() {
+        assert_eq!(garbage_pattern_kind(&[0]), Some("null"));
+        assert_eq!(garbage_pattern_kind(&[0; 16]), Some("null"));
+        assert_eq!(garbage_pattern_kind(&[0; 32]), Some("null"));
+    }
+
+    #[test]
+    fn garbage_pattern_ff_at_any_length() {
+        assert_eq!(garbage_pattern_kind(&[0xFF]), Some("ff"));
+        assert_eq!(garbage_pattern_kind(&[0xFF; 16]), Some("ff"));
+        assert_eq!(garbage_pattern_kind(&[0xFF; 32]), Some("ff"));
+    }
+
+    #[test]
+    fn garbage_pattern_repeat_1_only_at_or_above_4_bytes() {
+        // Short SSIDs ("X", "AB", "LAN") must not flag.
+        assert_eq!(garbage_pattern_kind(b"X"), None);
+        assert_eq!(garbage_pattern_kind(b"AB"), None);
+        assert_eq!(garbage_pattern_kind(b"AAA"), None);
+        // 4 bytes of the same value triggers repeat_1.
+        assert_eq!(garbage_pattern_kind(b"AAAA"), Some("repeat_1"));
+        assert_eq!(garbage_pattern_kind(&[0x55; 16]), Some("repeat_1"));
+        assert_eq!(garbage_pattern_kind(&[0xAB; 32]), Some("repeat_1"));
+    }
+
+    #[test]
+    fn garbage_pattern_repeat_2_alternating_bytes() {
+        // 5555AAAA-style alternation across 32 bytes (16 cycles of 0x55, 0xAA).
+        let mut nonce = [0u8; 32];
+        for chunk in nonce.chunks_exact_mut(2) {
+            chunk[0] = 0x55;
+            chunk[1] = 0xAA;
+        }
+        assert_eq!(garbage_pattern_kind(&nonce), Some("repeat_2"));
+    }
+
+    #[test]
+    fn garbage_pattern_repeat_4_period() {
+        // 4-byte period 01020304 repeated 8 times.
+        let mut nonce = [0u8; 32];
+        for chunk in nonce.chunks_exact_mut(4) {
+            chunk[0] = 0x01;
+            chunk[1] = 0x02;
+            chunk[2] = 0x03;
+            chunk[3] = 0x04;
+        }
+        assert_eq!(garbage_pattern_kind(&nonce), Some("repeat_4"));
+    }
+
+    #[test]
+    fn garbage_pattern_random_bytes_pass() {
+        // A non-uniform 32-byte run mirrors what the parser sees from a real
+        // EAPOL Key Nonce; must not flag.
+        let nonce: [u8; 32] = [
+            0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xA0, 0xA1,
+            0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        ];
+        assert_eq!(garbage_pattern_kind(&nonce), None);
+    }
+
+    #[test]
+    fn garbage_pattern_priority_null_before_repeat() {
+        // All-zero is also trivially repeat_1 / repeat_2 / repeat_4 -- the helper
+        // must return the most specific identifier ("null") so callers route
+        // the rejection into `null_*_rejected` rather than a generic counter.
+        assert_eq!(garbage_pattern_kind(&[0; 16]), Some("null"));
     }
 }

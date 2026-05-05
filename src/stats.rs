@@ -393,17 +393,35 @@ pub struct Stats {
     /// EAPOL frames rejected because the Key Nonce was all-`0xFF`. Applies to all msg types
     /// including M4 (firmware flash-erase sentinel, never spec-valid).
     pub ff_nonce_rejected: u64,
+    /// EAPOL frames rejected because the Key Nonce was a non-NULL non-FF garbage pattern
+    /// (all-same-byte, 2-byte period, or 4-byte period). Catches firmware stub nonces such
+    /// as all-`0x55`, `5555AAAA`-style alternations, and `01020304` repeating slabs.
+    pub repeat_nonce_rejected: u64,
     /// EAPOL frames rejected because the Key MIC was all-NULL (`0x00...00`) with the Key MIC
     /// flag set (M2/M3/M4). NULL MIC means the frame is unauthenticated. M1 NULL MIC is
     /// spec-valid and is never counted.
     pub null_mic_rejected: u64,
     /// EAPOL frames rejected because the Key MIC was all-`0xFF` with the Key MIC flag set.
     pub ff_mic_rejected: u64,
+    /// EAPOL frames rejected because the Key MIC carried a non-NULL non-FF garbage pattern
+    /// (all-same-byte, 2-byte period, or 4-byte period). MICs from a healthy stack are
+    /// uniformly random; any of these patterns indicates a synthetic / sentinel value.
+    pub repeat_mic_rejected: u64,
     /// PMKIDs rejected because the value was all-NULL (`0x00...00`). These are placeholder
     /// entries (AP signalling "no cached PMK") with no cracking value.
     pub null_pmkid_rejected: u64,
     /// PMKIDs rejected because the value was all-`0xFF` (firmware flash-erase sentinel).
     pub ff_pmkid_rejected: u64,
+    /// PMKIDs rejected because the value was a non-NULL non-FF garbage pattern (all-same-byte,
+    /// 2-byte period, or 4-byte period). PMKIDs from a healthy stack are HMAC-SHA1 / HMAC-SHA256
+    /// outputs, which are uniformly random.
+    pub repeat_pmkid_rejected: u64,
+    /// SSIDs rejected because the byte run was a non-`null` non-`ff` garbage pattern
+    /// (all-same-byte, 2-byte period, or 4-byte period). Length-0 SSIDs and SSIDs whose
+    /// first byte is 0x00 are filtered earlier by `passes_hcx_essid_filter` and are NOT
+    /// counted here. Operators chasing real-world SSIDs that happen to look uniform
+    /// (e.g. "AAAA") will see the count surface them via `--log invalid_essid`.
+    pub garbage_essid_rejected: u64,
     /// Maximum time gap between any two EAPOL messages in the same (AP, STA) session (microseconds).
     /// Displayed in milliseconds. [hcxpcapngtool EAPOLTIME gap]
     pub eapol_time_gap_max_us: u64,
@@ -700,22 +718,53 @@ impl Stats {
 
     /// Checks a PMKID value before inserting into the store and increments the
     /// appropriate counter, returning the rejection kind (or `None` if the PMKID is
-    /// valid). NULL PMKIDs are AP-generated placeholders (no cached PMK); `0xFF`
-    /// PMKIDs are firmware flash-erase sentinels. Both have no cracking value.
+    /// structurally clean). Catches NULL placeholders, `0xFF` flash-erase
+    /// sentinels, and non-cryptographic repeating-byte patterns (all-same-byte,
+    /// 2-byte period, 4-byte period). PMKIDs from a healthy stack are uniformly
+    /// random HMAC outputs; any such pattern indicates a firmware stub or test
+    /// fixture rather than a crackable PMK fingerprint.
     ///
-    /// Call this before `PmkidStore::add()`; the store independently rejects both
-    /// forms, so there is no risk of double-insertion. Pass the returned kind to
-    /// `Logger::log_invalid_pmkid` when a logger is in scope.
+    /// Call this before `PmkidStore::add()`; the store independently rejects all
+    /// these forms, so there is no risk of double-insertion. Pass the returned
+    /// kind to `Logger::log_invalid_pmkid` when a logger is in scope.
     pub fn check_pmkid_invalid(&mut self, pmkid: &[u8; 16]) -> Option<&'static str> {
-        if *pmkid == [0u8; 16] {
-            self.null_pmkid_rejected += 1;
-            Some("null")
-        } else if *pmkid == [0xFF_u8; 16] {
-            self.ff_pmkid_rejected += 1;
-            Some("ff")
-        } else {
-            None
+        let kind = crate::types::garbage_pattern_kind(pmkid)?;
+        match kind {
+            "null" => self.null_pmkid_rejected += 1,
+            "ff" => self.ff_pmkid_rejected += 1,
+            _ => self.repeat_pmkid_rejected += 1,
         }
+        Some(kind)
+    }
+
+    /// Bumps the per-pattern nonce-rejection counter. Pass the kind string
+    /// returned by [`check_invalid_fields`](crate::ieee80211::eapol::check_invalid_fields)
+    /// (`"null"`, `"ff"`, `"repeat_1"`, `"repeat_2"`, `"repeat_4"`).
+    pub const fn record_invalid_nonce(&mut self, kind: &str) {
+        match kind.as_bytes() {
+            b"null" => self.null_nonce_rejected += 1,
+            b"ff" => self.ff_nonce_rejected += 1,
+            _ => self.repeat_nonce_rejected += 1,
+        }
+    }
+
+    /// Bumps the per-pattern MIC-rejection counter. See [`Self::record_invalid_nonce`]
+    /// for the kind-string vocabulary.
+    pub const fn record_invalid_mic(&mut self, kind: &str) {
+        match kind.as_bytes() {
+            b"null" => self.null_mic_rejected += 1,
+            b"ff" => self.ff_mic_rejected += 1,
+            _ => self.repeat_mic_rejected += 1,
+        }
+    }
+
+    /// Bumps the SSID garbage-pattern rejection counter. NULL and `0xFF` SSIDs
+    /// are filtered earlier by `passes_hcx_essid_filter` (NULL via
+    /// first-byte-zero, `0xFF` via the same garbage-pattern detector at the
+    /// SSID admission gate); the counter here covers every SSID that slipped
+    /// past the legacy gate but trips the new repeating-pattern check.
+    pub const fn record_invalid_essid(&mut self, _kind: &str) {
+        self.garbage_essid_rejected += 1;
     }
 
     /// Records an EAPOL-Key frame's Key Descriptor Version into the appropriate counter.
@@ -1058,10 +1107,14 @@ impl Stats {
         stat!("  M4 messages", self.eapol_m4);
         nz!("  NULL nonce rejected (frame dropped; M1/M2/M3; M4 NULL is spec-valid)", self.null_nonce_rejected);
         nz!("  0xFF nonce rejected (frame dropped)", self.ff_nonce_rejected);
+        nz!("  garbage-pattern nonce rejected (repeating period; frame dropped)", self.repeat_nonce_rejected);
         nz!("  NULL MIC rejected (frame dropped; M2/M3/M4)", self.null_mic_rejected);
         nz!("  0xFF MIC rejected (frame dropped; M2/M3/M4)", self.ff_mic_rejected);
+        nz!("  garbage-pattern MIC rejected (repeating period; frame dropped)", self.repeat_mic_rejected);
         nz!("  NULL PMKID rejected (placeholder; PMKID dropped)", self.null_pmkid_rejected);
         nz!("  0xFF PMKID rejected (PMKID dropped)", self.ff_pmkid_rejected);
+        nz!("  garbage-pattern PMKID rejected (repeating period; PMKID dropped)", self.repeat_pmkid_rejected);
+        nz!("  garbage-pattern ESSID rejected (repeating period; SSID dropped)", self.garbage_essid_rejected);
         if self.eapol_time_gap_max_us > 0 {
             stat!("  session time gap max (ms)", self.eapol_time_gap_max_us / 1_000);
         }
@@ -1282,10 +1335,14 @@ mod tests {
         assert_eq!(s.eapol_pairs_generated, 0);
         assert_eq!(s.null_nonce_rejected, 0);
         assert_eq!(s.ff_nonce_rejected, 0);
+        assert_eq!(s.repeat_nonce_rejected, 0);
         assert_eq!(s.null_mic_rejected, 0);
         assert_eq!(s.ff_mic_rejected, 0);
+        assert_eq!(s.repeat_mic_rejected, 0);
         assert_eq!(s.null_pmkid_rejected, 0);
         assert_eq!(s.ff_pmkid_rejected, 0);
+        assert_eq!(s.repeat_pmkid_rejected, 0);
+        assert_eq!(s.garbage_essid_rejected, 0);
         assert!(s.last_file.is_empty());
         assert_eq!(s.input_file_count, 0);
         assert!(s.file_formats_seen.is_empty());
@@ -1347,6 +1404,67 @@ mod tests {
         assert_eq!(s.eapol_kdv2, 0);
         assert_eq!(s.eapol_kdv3, 0);
         assert_eq!(s.eapol_kdv_other, 0);
+    }
+
+    #[test]
+    fn check_pmkid_invalid_routes_repeat_to_repeat_counter() {
+        // All-`0x55` PMKID is `repeat_1` garbage (HMAC outputs are never uniform).
+        let mut s = Stats::new();
+        let kind = s.check_pmkid_invalid(&[0x55u8; 16]);
+        assert_eq!(kind, Some("repeat_1"));
+        assert_eq!(s.null_pmkid_rejected, 0);
+        assert_eq!(s.ff_pmkid_rejected, 0);
+        assert_eq!(s.repeat_pmkid_rejected, 1);
+    }
+
+    #[test]
+    fn check_pmkid_invalid_period_2_routes_to_repeat() {
+        // 5555AAAA-style 2-byte period.
+        let mut pmkid = [0u8; 16];
+        for chunk in pmkid.chunks_exact_mut(2) {
+            chunk[0] = 0x55;
+            chunk[1] = 0xAA;
+        }
+        let mut s = Stats::new();
+        let kind = s.check_pmkid_invalid(&pmkid);
+        assert_eq!(kind, Some("repeat_2"));
+        assert_eq!(s.repeat_pmkid_rejected, 1);
+    }
+
+    #[test]
+    fn check_pmkid_invalid_clean_returns_none() {
+        // A non-uniform 16-byte run mirrors a real HMAC output -- no rejection.
+        let pmkid = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F, 0x90];
+        let mut s = Stats::new();
+        let kind = s.check_pmkid_invalid(&pmkid);
+        assert_eq!(kind, None);
+        assert_eq!(s.null_pmkid_rejected, 0);
+        assert_eq!(s.ff_pmkid_rejected, 0);
+        assert_eq!(s.repeat_pmkid_rejected, 0);
+    }
+
+    #[test]
+    fn record_invalid_nonce_routes_kind_to_correct_counter() {
+        let mut s = Stats::new();
+        s.record_invalid_nonce("null");
+        s.record_invalid_nonce("ff");
+        s.record_invalid_nonce("repeat_1");
+        s.record_invalid_nonce("repeat_2");
+        s.record_invalid_nonce("repeat_4");
+        assert_eq!(s.null_nonce_rejected, 1);
+        assert_eq!(s.ff_nonce_rejected, 1);
+        assert_eq!(s.repeat_nonce_rejected, 3, "repeat_1, repeat_2, repeat_4 all flow to repeat counter");
+    }
+
+    #[test]
+    fn record_invalid_mic_routes_kind_to_correct_counter() {
+        let mut s = Stats::new();
+        s.record_invalid_mic("null");
+        s.record_invalid_mic("ff");
+        s.record_invalid_mic("repeat_1");
+        assert_eq!(s.null_mic_rejected, 1);
+        assert_eq!(s.ff_mic_rejected, 1);
+        assert_eq!(s.repeat_mic_rejected, 1);
     }
 
     #[test]

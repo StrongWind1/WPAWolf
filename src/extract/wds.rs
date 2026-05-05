@@ -94,21 +94,13 @@ pub fn resolve_wds_eapol(
         // zero-allocation `Display` views; nothing is built unless a check fires.
         {
             let t = eapol::check_invalid_fields(&p.body);
-            if t.null_nonce {
-                stats.null_nonce_rejected += 1;
-                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), "null");
+            if let Some(kind) = t.nonce_garbage {
+                stats.record_invalid_nonce(kind);
+                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), kind);
             }
-            if t.ff_nonce {
-                stats.ff_nonce_rejected += 1;
-                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), "ff");
-            }
-            if t.null_mic {
-                stats.null_mic_rejected += 1;
-                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), "null");
-            }
-            if t.ff_mic {
-                stats.ff_mic_rejected += 1;
-                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), "ff");
+            if let Some(kind) = t.mic_garbage {
+                stats.record_invalid_mic(kind);
+                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), kind);
             }
         }
         if let Some(key) = eapol::parse(&p.body, resolved_dir) {

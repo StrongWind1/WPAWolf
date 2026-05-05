@@ -16,7 +16,7 @@ use crate::store::{
 };
 use crate::types::PmkidSource;
 
-use super::common::BROADCAST_MAC;
+use super::common::{BROADCAST_MAC, insert_essid};
 
 /// Processes a Probe Request management frame body.
 ///
@@ -58,7 +58,7 @@ pub fn process_probe_req(
             // Directed Probe Requests: BSSID (addr3) in mac_hdr.ap identifies the target AP.
             // [IEEE 802.11-2024] §9.3.3.9
             if is_directed {
-                essid_map.insert(mac_hdr.ap, ie.value.to_vec(), timestamp_us);
+                insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
             }
             essid_set.insert(ie.value);
             probe_essid_set.insert(ie.value);
@@ -74,7 +74,7 @@ pub fn process_probe_req(
         if ie.id == IE_SSID_LIST {
             for ssid in extract_ssid_list(ie.value) {
                 if is_directed {
-                    essid_map.insert(mac_hdr.ap, ssid.clone(), timestamp_us);
+                    insert_essid(essid_map, mac_hdr.ap, ssid.clone(), timestamp_us, stats, logger);
                 }
                 essid_set.insert(&ssid);
                 probe_essid_set.insert(&ssid);

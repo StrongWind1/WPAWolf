@@ -168,8 +168,8 @@ struct Cli {
 
     /// output logfile (malformed frames, link-layer errors, sentinel rejections, ...)
     ///
-    /// Ten categories: `malformed_frame` (truncated or structurally invalid 802.11 /
-    /// EAPOL data), `plcp_error` (link-layer header validation failed -- radiotap /
+    /// Eleven categories: `malformed_frame` (truncated or structurally invalid 802.11
+    /// / EAPOL data), `plcp_error` (link-layer header validation failed -- radiotap /
     /// PPI / Prism / AVS error, or an unsupported DLT), `unknown_linktype` (pcapng
     /// EPB referenced an `interface_id` with no preceding IDB), `unknown_akm`
     /// (suite outside [IEEE 802.11-2024] Table 9-190), `essid_not_found_summary`
@@ -179,10 +179,13 @@ struct Cli {
     /// trailing packet), `skipped_input` (input file whose magic bytes did not
     /// match any supported capture format -- typically a sub-4-byte stub left in a
     /// watch directory; counted but silenced on stderr), `invalid_nonce` /
-    /// `invalid_mic` / `invalid_pmkid` (NULL or all-`0xFF` sentinels rejected at
-    /// extract time). Per-category field layout matches `src/log.rs`: frame-bearing
-    /// categories lead with `timestamp_us`, others (e.g. `unknown_akm`,
-    /// `essid_not_found_summary`) carry only the event-specific field(s).
+    /// `invalid_mic` / `invalid_pmkid` / `invalid_essid` (NULL, all-`0xFF`, or
+    /// short-period repeating-byte garbage rejected at extract time -- nonces and
+    /// MICs from the EAPOL Key parser, PMKIDs from every PMKID-bearing IE, SSIDs
+    /// from every SSID-extract site). Per-category field layout matches `src/log.rs`:
+    /// frame-bearing categories lead with `timestamp_us`, others (e.g.
+    /// `unknown_akm`, `essid_not_found_summary`) carry only the event-specific
+    /// field(s).
     #[arg(long)]
     log: Option<std::path::PathBuf>,
 

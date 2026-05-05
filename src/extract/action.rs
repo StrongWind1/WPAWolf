@@ -15,6 +15,8 @@ use crate::store::{
 };
 use crate::types::{AkmType, MacAddr, PmkidSource};
 
+use super::common::insert_essid;
+
 // Action frame constants
 /// Action Category: Radio Measurement. [IEEE 802.11-2024] §9.6.6, Table 9-81
 const ACTION_CAT_RADIO_MEAS: u8 = 5;
@@ -169,7 +171,7 @@ pub fn process_action(
             if ie.id == IE_MESH_ID && !ie.value.is_empty() {
                 // Mesh ID is the network name for this mesh BSS. Goes to -E (essid_set)
                 // and -W (wordlist). Not in -R (client-side). [IEEE 802.11-2024] §9.4.2.39
-                essid_map.insert(mac_hdr.ap, ie.value.to_vec(), timestamp_us);
+                insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
                 essid_set.insert(ie.value);
                 if populate_wordlist {
                     wordlist_store.insert(ie.value.to_vec());
@@ -219,7 +221,7 @@ pub fn process_action(
             if ie.id == 0 && !ie.value.is_empty() {
                 // NR Request is client-side -- the STA names the network it wants neighbors for.
                 // Goes to probe_essid_set (-R), not essid_set (-E).
-                essid_map.insert(mac_hdr.ap, ie.value.to_vec(), timestamp_us);
+                insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
                 probe_essid_set.insert(ie.value);
                 if populate_wordlist {
                     wordlist_store.insert(ie.value.to_vec());
@@ -296,7 +298,7 @@ pub fn process_action(
         let Some(ssid_bytes) = body.get(FILS_DISCOVERY_SSID_OFFSET..ssid_end) else { return };
         let ssid = ssid_bytes.to_vec();
         // The AP transmits FILS Discovery -- its BSSID is in Address 3 (mac_hdr.ap).
-        essid_map.insert(mac_hdr.ap, ssid.clone(), timestamp_us);
+        insert_essid(essid_map, mac_hdr.ap, ssid.clone(), timestamp_us, stats, logger);
         essid_set.insert(&ssid);
         if populate_wordlist {
             wordlist_store.insert(ssid);

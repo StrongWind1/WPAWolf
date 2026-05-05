@@ -19,17 +19,23 @@
 //!   not match any supported capture format (typically a sub-4-byte stub or a
 //!   non-capture file slipped through). Counted in stats and silenced on stderr;
 //!   triage detail goes here.
-//! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3) or
-//!   all-`0xFF` (any).
-//! - `invalid_mic`        -- EAPOL frame discarded: MIC was NULL or all-`0xFF` with
-//!   the Key MIC flag set (M2/M3/M4).
-//! - `invalid_pmkid`      -- PMKID discarded: NULL or all-`0xFF`.
+//! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3),
+//!   all-`0xFF`, or a short-period repeating pattern (`repeat_1` / `repeat_2`
+//!   / `repeat_4`). M4 NULL nonce is spec-valid and is NOT discarded.
+//! - `invalid_mic`        -- EAPOL frame discarded: MIC was NULL, all-`0xFF`, or
+//!   a short-period repeating pattern when the Key MIC flag was set (M2/M3/M4).
+//! - `invalid_pmkid`      -- PMKID discarded: NULL, all-`0xFF`, or short-period
+//!   repeating pattern.
+//! - `invalid_essid`      -- SSID discarded: byte run was all-`0xFF`, all-same-byte,
+//!   or a short-period repeating pattern. Length-0 and first-byte-zero SSIDs
+//!   are filtered silently by the legacy hcx admission gate and are NOT logged.
 //!
 //! Line format: `[category] <category-specific fields...>`. Each `Logger::log_*`
 //! method defines its own field layout -- frame-bearing categories
 //! (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`,
-//! `invalid_pmkid`) lead with `timestamp_us`; the rest carry only the field(s)
-//! relevant to the event (e.g. `unknown_akm` carries just the AKM byte).
+//! `invalid_pmkid`, `invalid_essid`) lead with `timestamp_us`; the rest carry
+//! only the field(s) relevant to the event (e.g. `unknown_akm` carries just
+//! the AKM byte).
 //! Only opened when `--log` is specified on the CLI; otherwise every method is
 //! a no-op.
 
@@ -150,6 +156,18 @@ impl Logger {
         kind: &str,
     ) {
         self.write_line(&format!("[invalid_pmkid] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
+    }
+
+    /// Logs an SSID dropped because its byte run matched a garbage shape that
+    /// would emit an uncrackable hash line (all-`0xFF`, all-same-byte, 2-byte
+    /// period, 4-byte period). Length-zero / first-byte-zero SSIDs are filtered
+    /// silently by the legacy hcx admission gate and are NOT logged here.
+    /// `kind` is the pattern identifier returned by
+    /// [`garbage_pattern_kind`](crate::types::garbage_pattern_kind). Fires from
+    /// every SSID-extract site (Beacon, Probe Request / Response, Association /
+    /// Reassociation Request, Action Measurement IE, OWE Transition Mode).
+    pub fn log_invalid_essid(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, kind: &str) {
+        self.write_line(&format!("[invalid_essid] {timestamp_us} ap={ap_hex} kind={kind}"));
     }
 
     /// Logs a per-file capture read error.

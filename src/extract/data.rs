@@ -251,21 +251,13 @@ fn process_msdu_payload(
         // (most frames trigger no sentinel) builds no `String` at all, and a
         // firing branch only allocates the single log-line `String` inside the
         // logger.
-        if t.null_nonce {
-            stats.null_nonce_rejected += 1;
-            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "null");
+        if let Some(kind) = t.nonce_garbage {
+            stats.record_invalid_nonce(kind);
+            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
         }
-        if t.ff_nonce {
-            stats.ff_nonce_rejected += 1;
-            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "ff");
-        }
-        if t.null_mic {
-            stats.null_mic_rejected += 1;
-            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "null");
-        }
-        if t.ff_mic {
-            stats.ff_mic_rejected += 1;
-            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), "ff");
+        if let Some(kind) = t.mic_garbage {
+            stats.record_invalid_mic(kind);
+            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
         }
     }
     // Surface the preauth EtherType (0x88C7) separately from regular EAPOL (0x888E)

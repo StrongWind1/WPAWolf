@@ -10,10 +10,37 @@ use crate::log::Logger;
 use crate::stats::Stats;
 use crate::store::{
     AkmMap,
+    essid::EssidMap,
     messages::{EapolMessage, MessageStore},
     pmkid::{PmkidEntry, PmkidStore},
 };
 use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
+
+// --- ESSID admission with structured rejection reporting ---
+
+/// Inserts `essid` into `essid_map` for `ap`, routing garbage-pattern rejections
+/// through the stats counters and the `[invalid_essid]` log category.
+///
+/// Wraps `EssidMap::insert` so every SSID-extract site (Beacon, Probe Request /
+/// Response, Association / Reassociation Request, Action Measurement,
+/// OWE Transition Mode) reports rejections uniformly. Length-zero / first-byte-
+/// zero SSIDs are filtered silently by the legacy hcx admission gate inside
+/// `EssidMap::insert` and do **not** route through this reporter -- they have
+/// dedicated upstream counters (`beacon_ssid_wildcard`, `beacon_ssid_zeroed`)
+/// for diagnostic visibility.
+pub fn insert_essid(
+    essid_map: &mut EssidMap,
+    ap: MacAddr,
+    essid: Vec<u8>,
+    timestamp_us: u64,
+    stats: &mut Stats,
+    logger: &mut Logger,
+) {
+    if let Some(kind) = essid_map.insert(ap, essid, timestamp_us) {
+        stats.record_invalid_essid(kind);
+        logger.log_invalid_essid(timestamp_us, ap.hex_lower(), kind);
+    }
+}
 
 // --- Management frame subtype constants ---
 // [IEEE 802.11-2024] §9.2.4.1.3, Table 9-1
@@ -471,6 +498,19 @@ mod tests {
 
     // --- store_eapol_key: KDV-driven AKM reconciliation ---
 
+    /// Non-uniform 16-byte MIC fixture for tests. The garbage-pattern detector
+    /// rejects uniform-byte MICs (`[0xAB; 16]` would flag as `repeat_1`); real
+    /// MICs are HMAC outputs (uniformly random), so the fixture mirrors that.
+    const MIC16_FIXTURE: [u8; 16] =
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+
+    /// Non-uniform 24-byte MIC fixture for SHA-384-family tests. Same rationale
+    /// as `MIC16_FIXTURE`.
+    const MIC24_FIXTURE: [u8; 24] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01, 0x12,
+        0x23, 0x34, 0x45, 0x56, 0x67, 0x78,
+    ];
+
     fn mac(b: u8) -> MacAddr {
         MacAddr::from_bytes([b; 6])
     }
@@ -546,7 +586,10 @@ mod tests {
             0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, // AKM: 1x PSK (AKM 2)
             0x00, 0x00, // RSN caps
         ];
-        let mic = [0xAB; 16];
+        // Varied MIC bytes: a uniform [0xAB; 16] would now flag as `repeat_1`
+        // garbage and be rejected by the parser. Real MICs are HMAC outputs
+        // (uniformly random); the test fixture mirrors that property.
+        let mic = MIC16_FIXTURE;
         let key = make_key(2, false, false, mic, &rsn_ie); // M2, KDV=2
         let mut akm_map = AkmMap::new();
         let mut messages = MessageStore::new();
@@ -576,7 +619,7 @@ mod tests {
             0xAC, 0x06, // AKM: PSK-SHA256 (AKM 6)
             0x00, 0x00,
         ];
-        let key = make_key(3, false, false, [0xAB; 16], &rsn_ie);
+        let key = make_key(3, false, false, MIC16_FIXTURE, &rsn_ie);
         let mut akm_map = AkmMap::new();
         let mut messages = MessageStore::new();
         let mut pmkids = PmkidStore::new();
@@ -709,7 +752,7 @@ mod tests {
         // SHA-384 family: 24-B MIC must be carried through to the message store
         // unchanged. Verifies the wire MIC is not silently truncated.
         // Build a 24-B-MIC frame manually because make_key only supports 16-B.
-        let mic24: [u8; 24] = [0xAB; 24];
+        let mic24: [u8; 24] = MIC24_FIXTURE;
         let mut frame = Vec::with_capacity(8 + 107);
         frame.extend_from_slice(&[0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E]);
         frame.push(0x02);
