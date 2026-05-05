@@ -7,6 +7,8 @@
 //! default mode, the "authorized" combo within each equivalence class survives; in `--all`
 //! mode, all six are emitted. See `ARCHITECTURE.md §5` and `ARCHITECTURE.md §8` FR-PAIR-5.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use super::{ComboType, PairedHash};
@@ -46,29 +48,62 @@ pub fn collapse(pairs: Vec<PairedHash>, all_combos: bool) -> Vec<PairedHash> {
     }
 
     // Group pairs by (nonce, eapol_frame). Within each group, keep the best pair.
-    // Use a Vec-based approach since pair counts are tiny (<= 6 per session).
+    //
+    // O(n) via a HashMap keyed on (nonce, Arc<[u8]>). `Hash` for Arc<[u8]> defers to
+    // <[u8] as Hash>::hash (byte-content hash, not pointer hash); `PartialEq`
+    // short-circuits via Arc::ptr_eq when allocations are shared (the common
+    // N1E2/N3E2-reference-the-same-M2 case) and falls back to byte equality
+    // otherwise. This preserves the §5.8 / FR-PAIR-5 equivalence semantics exactly:
+    // two pairs collide iff their nonce bytes are equal AND their EAPOL frame bytes
+    // are equal -- the same predicate the prior nested-Vec scan computed.
+    //
+    // `kept: Vec<PairedHash>` preserves insertion order so downstream emit order is
+    // unchanged (sha256 of output files matches the prior implementation byte for
+    // byte). The HashMap stores indices into `kept`; the survivor logic mutates
+    // `kept[idx]` in place exactly as the previous code did.
+    //
+    // Why `Arc<[u8]>` directly and not a u64 SipHash truncation: a 64-bit hash
+    // collision rate of 2^-32 over millions of frames in a corpus would produce
+    // false merges (combining hashes from cryptographically distinct sessions),
+    // which would be a correctness regression. Byte-equality keying via Arc<[u8]>
+    // costs one refcount bump per insert and one O(frame_size) hash per lookup
+    // (~120 ns for typical 120-byte EAPOL bodies); negligible vs the O(n^2) scan
+    // it replaces, which observed 5x slowdown on a 390 MB subset and could not
+    // complete within the 5-min cap on a 5.4 GB corpus during the May 2026 sweep.
+    //
+    // Note: pair_one_group is called per (AP, STA), not per session, and group
+    // sizes scale with corpus size, not 4-way handshake size. The "tiny <= 6"
+    // assumption that motivated the original Vec scan held for a single session
+    // but breaks at corpus scale.
     let mut kept: Vec<PairedHash> = Vec::with_capacity(pairs.len());
+    let mut group_index: HashMap<([u8; 32], Arc<[u8]>), usize> = HashMap::with_capacity(pairs.len());
 
-    'outer: for pair in pairs {
-        for existing in &mut kept {
-            // Two pairs are equivalent iff both their nonce and EAPOL bytes match.
-            // Arc::ptr_eq gives O(1) fast-path when both pairs share the same frame allocation
-            // (common: N1E2 and N3E2 both reference the same M2's eapol_frame Arc).
-            let frames_equal =
-                Arc::ptr_eq(&existing.eapol_frame, &pair.eapol_frame) || existing.eapol_frame == pair.eapol_frame;
-            if existing.nonce == pair.nonce && frames_equal {
-                // Priority 1: smaller RC gap magnitude (exact match over tolerance).
-                // Priority 2: authorized combo as tie-breaker.
-                let should_replace = pair.rc_gap_magnitude < existing.rc_gap_magnitude
-                    || (pair.rc_gap_magnitude == existing.rc_gap_magnitude
-                        && authorized_priority(pair.combo_type) < authorized_priority(existing.combo_type));
-                if should_replace {
-                    *existing = pair;
+    for pair in pairs {
+        let key = (pair.nonce, Arc::clone(&pair.eapol_frame));
+        match group_index.entry(key) {
+            Entry::Occupied(e) => {
+                let idx = *e.get();
+                // Indices in `group_index` are produced by `kept.len()` immediately before the
+                // matching `kept.push` and `kept` is never resized smaller, so the index is
+                // always in-bounds. `get_mut` returns `Option`; the `if let` keeps the lint
+                // policy clean (no panic, no expect, no indexing).
+                if let Some(existing) = kept.get_mut(idx) {
+                    // Priority 1: smaller RC gap magnitude (exact match over tolerance).
+                    // Priority 2: authorized combo as tie-breaker.
+                    let should_replace = pair.rc_gap_magnitude < existing.rc_gap_magnitude
+                        || (pair.rc_gap_magnitude == existing.rc_gap_magnitude
+                            && authorized_priority(pair.combo_type) < authorized_priority(existing.combo_type));
+                    if should_replace {
+                        *existing = pair;
+                    }
                 }
-                continue 'outer;
-            }
+            },
+            Entry::Vacant(e) => {
+                let idx = kept.len();
+                e.insert(idx);
+                kept.push(pair);
+            },
         }
-        kept.push(pair);
     }
 
     kept
@@ -262,5 +297,72 @@ mod tests {
         assert!(combos.contains(&ComboType::N1E2), "N1E2 wins Hash-A (gap=0 < N3E2 gap=2)");
         assert!(combos.contains(&ComboType::N4E3), "N4E3 wins Hash-B (gap=0 < N2E3 gap=3)");
         assert!(combos.contains(&ComboType::N1E4), "N1E4 wins Hash-C (gap=0 < N3E4 gap=1)");
+    }
+
+    /// Insertion order must be preserved so downstream emit order does not change
+    /// across the `HashMap` rewrite. The output `Vec` orders survivors by first-seen
+    /// position in the input; a later replacement under the survivor logic mutates
+    /// in place and does NOT move the entry to the back.
+    #[test]
+    fn collapse_preserves_first_seen_insertion_order() {
+        // Three distinct equivalence classes; the input order is class-A, class-B,
+        // class-C, then a replacement for class-A (lower rc_gap). The output must
+        // be [class-A-survivor, class-B-survivor, class-C-survivor] in that order.
+        let pairs = vec![
+            make_pair_with_gap(ComboType::N3E2, 0xAA, 0x01, 5), // class A, fallback (later replaced)
+            make_pair_with_gap(ComboType::N2E3, 0xBB, 0x02, 0), // class B
+            make_pair_with_gap(ComboType::N3E4, 0xCC, 0x03, 0), // class C
+            make_pair_with_gap(ComboType::N1E2, 0xAA, 0x01, 0), // class A, replaces survivor
+        ];
+        let result = collapse(pairs, false);
+        assert_eq!(result.len(), 3);
+        // Class A is at index 0 (first-seen); the replacement keeps the slot.
+        assert_eq!(result[0].combo_type, ComboType::N1E2, "class A replacement at slot 0");
+        assert_eq!(result[1].combo_type, ComboType::N2E3, "class B at slot 1");
+        assert_eq!(result[2].combo_type, ComboType::N3E4, "class C at slot 2");
+    }
+
+    /// Performance regression guard for T-13. The pre-fix nested-Vec scan was
+    /// `O(n^2)` per (AP, STA) group; once group sizes scale with corpus size
+    /// (rather than handshake size), a single noisy AP-STA pair could carry
+    /// thousands of EAPOL messages and balloon `collapse()` into multi-second
+    /// territory. The `HashMap` rewrite is `O(n * frame_bytes)`; 1000 mixed
+    /// non-equivalent pairs must complete well under 100 ms even on slow CI
+    /// hardware. A regression here means the scan came back.
+    #[test]
+    fn collapse_is_linear_at_thousand_pair_scale() {
+        use std::time::Instant;
+
+        // Build 1000 distinct equivalence classes by varying the nonce byte
+        // (so every pair lands in its own bucket -- worst case for HashMap
+        // hashing throughput, since no early-exit on shared Arc allocation).
+        // Each pair has a 256-byte EAPOL frame to exercise the byte-content
+        // hash path realistically.
+        let mut pairs = Vec::with_capacity(1000);
+        for i in 0..1000_u32 {
+            let mut nonce = [0u8; 32];
+            nonce[0..4].copy_from_slice(&i.to_le_bytes());
+            let mut frame = vec![0u8; 256];
+            frame[0..4].copy_from_slice(&i.to_le_bytes());
+            pairs.push(PairedHash {
+                ap: MacAddr::from_bytes([0x11; 6]),
+                sta: MacAddr::from_bytes([0x22; 6]),
+                combo_type: ComboType::N1E2,
+                nonce,
+                eapol_frame: Arc::from(frame),
+                mic: MicBytes::ZERO_16,
+                message_pair: 0,
+                akm: AkmType::Wpa2Psk,
+                ft: None,
+                rc_gap_magnitude: 0,
+            });
+        }
+
+        let start = Instant::now();
+        let result = collapse(pairs, false);
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.len(), 1000, "all 1000 distinct classes must survive");
+        assert!(elapsed.as_millis() < 100, "collapse(1000 pairs) must finish in < 100 ms; took {elapsed:?}");
     }
 }
