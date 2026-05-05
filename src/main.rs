@@ -248,27 +248,31 @@ struct Cli {
     #[arg(long = "wordlist-scan-ies", value_name = "FILE")]
     wordlist_scan_ies: Option<std::path::PathBuf>,
 
-    /// [output filter] only collapse multi-SSID APs with more than N recorded SSIDs (default 3)
+    /// [output filter] only collapse SSID variants when an AP has more than N SSIDs (default 3)
     ///
-    /// First half of the multi-SSID inflation guard. APs with `<=` N distinct SSIDs
-    /// always ship every SSID unchanged -- so dual-band and 3-SSID rollouts are
-    /// unaffected. Raise to keep more SSIDs (e.g. `--essid-fanout-threshold 16`
-    /// for CTF-style APs); pair with `--essid-dominance-ratio 1` to disable the
-    /// collapse entirely. See README "Multi-SSID inflation" and
-    /// `ARCHITECTURE.md §9`.
-    #[arg(long = "essid-fanout-threshold", value_name = "N", default_value_t = 3)]
-    essid_fanout_threshold: usize,
+    /// One AP can show up under several SSID names: a few legitimately (dual-band
+    /// routers, segmented rollouts), and more rarely many at once when noisy RF
+    /// flips bits in beacon bodies and each corrupted variant decodes to a
+    /// different SSID. This flag is the gate for the collapse: APs whose recorded
+    /// SSID count is N or fewer always ship every SSID unchanged. Raise to keep
+    /// more SSIDs (e.g. `--essid-collapse-min 16` for CTF-style APs that broadcast
+    /// many real SSIDs); pair with `--essid-collapse-ratio 1` to disable the
+    /// collapse entirely. See README "When one AP shows up under many SSIDs"
+    /// and `ARCHITECTURE.md §9`.
+    #[arg(long = "essid-collapse-min", value_name = "N", default_value_t = 3)]
+    essid_collapse_min: usize,
 
-    /// [output filter] collapse to top SSID when its count is N times the runner-up's (default 10)
+    /// [output filter] collapse to the most-seen SSID when it appears N times more often than the runner-up (default 10)
     ///
-    /// Second half of the multi-SSID inflation guard. Once an AP passes
-    /// `--essid-fanout-threshold`, the top and second-most observed SSIDs are
-    /// compared: `top >= N * second` -> emit only the top; otherwise emit all.
-    /// Empirical RF-rot has top counts 10^3-10^4 vs rot variants at 1-10, a ratio
-    /// well above 10. Set < 2 to disable. See README "Multi-SSID inflation" and
-    /// `ARCHITECTURE.md §9`.
-    #[arg(long = "essid-dominance-ratio", value_name = "N", default_value_t = 10)]
-    essid_dominance_ratio: u64,
+    /// Once an AP passes `--essid-collapse-min`, the most-seen and second-most-seen
+    /// SSIDs are compared: if the top count is at least N times the runner-up's,
+    /// only the top SSID is written; otherwise every SSID is written. RF-corrupted
+    /// APs in the wild show top counts of thousands against runner-ups of single
+    /// digits (well above the default 10x), while genuinely multi-network APs
+    /// stay within an order of magnitude of 1. Set below 2 to disable. See README
+    /// "When one AP shows up under many SSIDs" and `ARCHITECTURE.md §9`.
+    #[arg(long = "essid-collapse-ratio", value_name = "N", default_value_t = 10)]
+    essid_collapse_ratio: u64,
 
     /// [output filter] deduplicate equivalent N#E# hash combos within each session
     ///
@@ -465,7 +469,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     );
 
     let essid_filter =
-        EssidFilterConfig { fanout_threshold: cli.essid_fanout_threshold, dominance_ratio: cli.essid_dominance_ratio };
+        EssidFilterConfig { collapse_min: cli.essid_collapse_min, collapse_ratio: cli.essid_collapse_ratio };
 
     // Hash-output state: opens lazily, accumulates dedup + per-AP unresolved-SSID
     // bookkeeping across calls. Per-file mode calls `emit` once per file; non-per-file

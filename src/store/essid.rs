@@ -131,21 +131,21 @@ impl EssidMap {
     /// Algorithm (matching the pseudocode reviewed against `/root/ALL_CAPS`):
     ///
     /// ```text
-    /// if num_ssids <= fanout_threshold:
-    ///     keep all SSIDs                           # singletons + small captures
-    /// elif dominance_ratio < 2:
-    ///     keep all SSIDs                           # filter disabled
-    /// elif primary.count >= dominance_ratio * second.count:
-    ///     keep only primary                        # RF-rot collapse
+    /// if num_ssids <= collapse_min:
+    ///     keep all SSIDs                          # singletons + small captures
+    /// elif collapse_ratio < 2:
+    ///     keep all SSIDs                          # filter disabled
+    /// elif primary.count >= collapse_ratio * second.count:
+    ///     keep only primary                       # RF-rot collapse
     /// else:
-    ///     keep all SSIDs                           # legit multi-network AP
+    ///     keep all SSIDs                          # legit multi-network AP
     /// ```
     ///
-    /// `fanout_threshold` (default 3) is the gate -- APs with `<=` that many SSIDs are
+    /// `collapse_min` (default 3) is the gate -- APs with `<=` that many SSIDs are
     /// untouched. This preserves singleton-SSID APs (small captures with 1 beacon
     /// plus a handshake) and the long tail of legit dual-band / 3-SSID setups.
     ///
-    /// `dominance_ratio` (default 10) is the trigger -- the primary SSID's observation
+    /// `collapse_ratio` (default 10) is the trigger -- the primary SSID's observation
     /// count must be at least `N x` the second-most-frequent's count. Empirical
     /// finding from the reference corpus: real RF-rot APs show ratios of 10^2 to 10^4,
     /// while legit multi-network APs (e.g. a CTF AP advertising 11 distinct SSIDs)
@@ -157,14 +157,14 @@ impl EssidMap {
     /// expected to drop the would-be hash line (no ESSID = uncrackable) and
     /// account for it via the per-AP `[essid_not_found_summary]` log line.
     #[must_use]
-    pub fn ssids_for_emit(&self, ap: &MacAddr, fanout_threshold: usize, dominance_ratio: u64) -> Vec<&[u8]> {
+    pub fn ssids_for_emit(&self, ap: &MacAddr, collapse_min: usize, collapse_ratio: u64) -> Vec<&[u8]> {
         let Some(entries) = self.map.get(ap) else { return Vec::new() };
-        if entries.len() <= fanout_threshold || dominance_ratio < 2 {
+        if entries.len() <= collapse_min || collapse_ratio < 2 {
             return entries.iter().map(|e| e.essid.as_slice()).collect();
         }
         let mut sorted: Vec<&EssidEntry> = entries.iter().collect();
         sorted.sort_by_key(|e| std::cmp::Reverse(e.count));
-        // entries.len() > fanout_threshold guarantees fanout >= 2 for any
+        // entries.len() > collapse_min guarantees fanout >= 2 for any
         // non-zero threshold; the bounds-checked accessors below also cover
         // the threshold == 0 case where fanout could be 1 (still safe -- a
         // 1-entry vec returns at the .get(1) None branch and falls through
@@ -172,7 +172,7 @@ impl EssidMap {
         let (Some(primary), Some(second)) = (sorted.first().copied(), sorted.get(1).copied()) else {
             return sorted.iter().map(|e| e.essid.as_slice()).collect();
         };
-        if primary.count >= dominance_ratio.saturating_mul(second.count) {
+        if primary.count >= collapse_ratio.saturating_mul(second.count) {
             vec![primary.essid.as_slice()]
         } else {
             sorted.iter().map(|e| e.essid.as_slice()).collect()
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn ssids_for_emit_passthrough_at_or_below_fanout_threshold() {
+    fn ssids_for_emit_passthrough_at_or_below_collapse_min() {
         // 3 SSIDs is the default threshold; even with extreme dominance the
         // filter must not collapse this AP (it's the legit-multi-network case).
         let mut m = EssidMap::new();

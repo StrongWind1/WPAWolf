@@ -145,8 +145,8 @@ These narrow what gets written to the hash output files; they have no effect on 
 | `--eapoltimeout [N]`       | unlimited | Maximum EAPOL session window in seconds. Bare flag uses 600 s. |
 | `--rc-drift [N]`           | off       | Discard pairs whose replay-counter delta deviates by more than `N` from the expected sequence. Bare flag uses tolerance 8. Not the same as hashcat's `--nonce-error-corrections`. |
 | `--dedup-hash-combos`      | off       | Collapse the six N#E# combos per session to the three cryptographically unique ones. |
-| `--essid-fanout-threshold N` | `3`     | Multi-SSID guard fires only on APs with more than `N` recorded SSIDs. See worked example below. |
-| `--essid-dominance-ratio N`  | `10`    | When the guard fires, write only the top SSID iff `top_count >= N * second_count`. `< 2` disables. |
+| `--essid-collapse-min N`   | `3`     | Only collapse SSID variants when an AP has more than `N` recorded SSIDs. See worked example below. |
+| `--essid-collapse-ratio N` | `10`    | When the guard fires, write only the top SSID iff `top_count >= N * second_count`. `< 2` disables. |
 
 ### Runtime options
 
@@ -205,7 +205,7 @@ wpawolf --22000-out hashes.22000 \
 
 A single bit-flip in a beacon body decodes to a different SSID for the same physical AP. Most APs broadcast one to three stable SSIDs across an entire capture; an AP whose beacons arrived through a noisy channel can produce dozens of slightly-corrupted variants. `wpawolf` records every SSID it ever saw for an AP and writes one hash line per SSID. Without a guard, a single crackable handshake on a corrupted AP can spread into six or more lines, only one of which has the SSID that actually derives the correct PMK.
 
-The `--essid-fanout-threshold` and `--essid-dominance-ratio` flags collapse that spread when the corruption pattern is unambiguous: if an AP has more than `N` recorded SSIDs and the most-frequent one dominates the runner-up by a factor of at least `M`, `wpawolf` writes only the dominant SSID's line. Defaults are `N=3` and `M=10`.
+The `--essid-collapse-min` and `--essid-collapse-ratio` flags collapse that spread when the corruption pattern is unambiguous: if an AP has more than `N` recorded SSIDs and the most-frequent one outweighs the runner-up by a factor of at least `M`, `wpawolf` writes only that SSID's line. Defaults are `N=3` and `M=10`.
 
 | AP                  | Observed SSIDs                                                       | Top count | Second count | What wpawolf writes by default |
 |---------------------|----------------------------------------------------------------------|-----------|--------------|--------------------------------|
@@ -218,14 +218,14 @@ Tuning:
 
 ```sh
 # Keep more SSIDs per AP (e.g. CTF capture with intentional spread).
-wpawolf --22000-out h.22000 --essid-fanout-threshold 16 capture.pcap
+wpawolf --22000-out h.22000 --essid-collapse-min 16 capture.pcap
 
 # Disable the collapse entirely (every recorded SSID always ships).
-wpawolf --22000-out h.22000 --essid-dominance-ratio 1 capture.pcap
+wpawolf --22000-out h.22000 --essid-collapse-ratio 1 capture.pcap
 
-# Tighten: collapse on any AP with > 1 SSID and a 5x dominance gap.
+# Tighten: collapse on any AP with > 1 SSID and a 5x ratio gap.
 wpawolf --22000-out h.22000 \
-        --essid-fanout-threshold 1 --essid-dominance-ratio 5 \
+        --essid-collapse-min 1 --essid-collapse-ratio 5 \
         capture.pcap
 ```
 

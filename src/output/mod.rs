@@ -42,26 +42,26 @@ use self::wordlists::{
 /// Tunables for the multi-ESSID inflation filter applied at hash emit time.
 ///
 /// See `EssidMap::ssids_for_emit` for the full algorithm. Both fields originate
-/// in CLI flags (`--essid-fanout-threshold`, `--essid-dominance-ratio`) with
-/// defaults that pass through ~99.98% of hash-producing APs untouched and only
-/// collapse the small set of RF-corrupted APs that produce 4+ bit-flipped SSID
-/// variants of the same real broadcast.
+/// in CLI flags (`--essid-collapse-min`, `--essid-collapse-ratio`) with defaults
+/// that pass through ~99.98% of hash-producing APs untouched and only collapse
+/// the small set of RF-corrupted APs that produce 4+ bit-flipped SSID variants
+/// of the same real broadcast.
 #[derive(Debug, Clone, Copy)]
 pub struct EssidFilterConfig {
     /// Filter only triggers on APs whose `EssidMap` fanout strictly exceeds this
     /// value. Default 3 -- preserves singleton-SSID APs (small captures with
     /// 1 beacon + a handshake), 2-SSID dual-band routers, and 3-SSID setups.
-    pub fanout_threshold: usize,
+    pub collapse_min: usize,
     /// Primary SSID's observation count must be at least this many times the
     /// second-most-frequent SSID's count to trigger the collapse to primary-only.
     /// Default 10. A value below 2 disables the filter (every recorded SSID is
     /// emitted, matching pre-filter behaviour).
-    pub dominance_ratio: u64,
+    pub collapse_ratio: u64,
 }
 
 impl Default for EssidFilterConfig {
     fn default() -> Self {
-        Self { fanout_threshold: 3, dominance_ratio: 10 }
+        Self { collapse_min: 3, collapse_ratio: 10 }
     }
 }
 
@@ -586,8 +586,7 @@ impl OutputContext {
                     entry.akm
                 };
                 let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
-                let ssids =
-                    essid_map.ssids_for_emit(&entry.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
+                let ssids = essid_map.ssids_for_emit(&entry.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                 let is_ft = ht.is_ft();
 
                 // For FT-PSK PMKIDs, only write when we have complete FT context (R0KH-ID required).
@@ -636,8 +635,7 @@ impl OutputContext {
         if any_sink {
             for pair in &all_pairs {
                 let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
-                let ssids =
-                    essid_map.ssids_for_emit(&pair.ap, essid_filter.fanout_threshold, essid_filter.dominance_ratio);
+                let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                 let is_ft = ht.is_ft();
 
                 // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
