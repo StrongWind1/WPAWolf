@@ -196,6 +196,13 @@ struct Cli {
     ///
     /// Two EAPOL messages more than this many seconds apart cannot form a pair and are
     /// discarded. hcxpcapngtool default is ~3 seconds (`--eapoltimeout=3`).
+    ///
+    /// Bare-flag note: clap parses this as an optional-positional, so the bare form
+    /// (no `=N`) needs another `--`-prefixed flag to follow before any positional
+    /// argument. `wpawolf --eapoltimeout capture.pcap` fails with exit 2 because clap
+    /// tries to consume `capture.pcap` as the timeout value. Use `--eapoltimeout=`
+    /// (explicit empty `=`) or place another flag in between, e.g.
+    /// `wpawolf --eapoltimeout --22000-out hashes.22000 capture.pcap`.
     #[arg(long, num_args = 0..=1, default_missing_value = "600")]
     eapoltimeout: Option<u64>,
 
@@ -217,6 +224,12 @@ struct Cli {
     /// the ANonce/SNonce *bytes* during cracking to compensate for firmware that mutates
     /// the nonce between M1 and M3. RC drift is in the EAPOL-Key header sequence field
     /// only -- it has no effect on the nonce bytes and is not used in key derivation.
+    ///
+    /// Bare-flag note: same clap optional-positional gotcha as `--eapoltimeout`. The
+    /// bare form (no `=N`) needs another `--`-prefixed flag to follow before any
+    /// positional argument; otherwise clap consumes the trailing positional as the
+    /// drift value and fails with exit 2. Use `--rc-drift=` or
+    /// `--rc-drift --22000-out hashes.22000 capture.pcap`.
     #[arg(long, num_args = 0..=1, default_missing_value = "8")]
     rc_drift: Option<u8>,
 

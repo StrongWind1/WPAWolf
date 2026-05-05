@@ -262,6 +262,27 @@ Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, NULL/
 
 ---
 
+## Progress reporting
+
+During Phase 1 (ingest) `wpawolf` prints periodic progress lines to stderr so an operator can confirm the run is making forward progress without watching `top`. The lines are on by default; pass `--quiet` (see Runtime options) to suppress them when running under `tee`, in CI, or in a pipeline where stderr noise is unwanted. The closing Phase 1-5 stats banner is unaffected by `--quiet`.
+
+```
+[progress] elapsed=15s files=312 packets=4823910 eapol=8412 pmkids=193 rss=287MiB
+```
+
+Cadence is hybrid: a line prints whenever 5 seconds OR 2,000,000 packets have elapsed since the previous one, whichever fires first. Small captures (under a few seconds) print at most one line at the end of Phase 1; corpus-scale runs get steady throughput feedback. Fields:
+
+- `elapsed=<s>` -- wall-clock seconds since the run started.
+- `files=<n>` -- input capture files opened so far.
+- `packets=<n>` -- total packets seen across all files.
+- `eapol=<n>` -- EAPOL-Key frames extracted (M1/M2/M3/M4 sum).
+- `pmkids=<n>` -- PMKIDs harvested across the 20 spec-defined extraction sites.
+- `rss=<n>MiB` -- resident-set size from `/proc/self/statm` (Linux only; field omitted on other platforms).
+
+Every line is prefixed `[progress]` so `grep -v '^\[progress\]' run.log` strips them cleanly.
+
+---
+
 ## Proposed hashcat format changes
 
 `wpawolf` writes nine output files. The two legacy ones (`--22000-out`, `--37100-out`) match what `hcxpcapngtool` writes today and feed straight into hashcat modes 22000 and 37100. The other seven (`-o` plus the six per-family flags) write a newer line format that splits every PSK-crackable hash the IEEE 802.11-2024 specification defines into eleven self-contained categories:
