@@ -1,10 +1,13 @@
 //! Phase 4 -- Emit: WPS device info (-D) writer. See ARCHITECTURE.md §3.4 + §9.
 //!
 //! Writes device metadata entries collected from WPS vendor IEs (tag 221, OUI `00:50:F2`,
-//! type 4) to the configured output file (`-D`). Column order matches hcxpcapngtool:
-//! MAC, manufacturer, model name, serial number, device name, UUID-E (if present), ESSID.
-//! All string fields use autohex encoding (printable ASCII as-is, else `$HEX[...]`).
-//! Entries are sorted by manufacturer and deduplicated by AP MAC.
+//! type 4) to the configured output file (`-D`). Column order:
+//! MAC, manufacturer, model name, **model number**, serial number, device name,
+//! UUID-E (if present), ESSID. The `model_number` column is a wpawolf addition --
+//! hcxpcapngtool does not collect WPS attribute 0x1024, so its `-D` lacks it. All
+//! string fields use autohex encoding (printable ASCII as-is, else `$HEX[...]`).
+//! Entries are sorted by manufacturer; row-level dedup happens at the store layer
+//! (see `store::auxiliary::DeviceInfoStore`).
 //!
 
 use std::io::Write;
@@ -37,12 +40,17 @@ fn write_device_field(bytes: &[u8], out: &mut impl Write) -> Result<()> {
 
 /// Writes device info entries to `out`, one per line.
 ///
-/// Column order (tab-separated, matching hcxpcapngtool `outputdeviceinfolist()`):
-/// `{mac_hex}\t{manufacturer}\t{model_name}\t{serial}\t{device_name}[\t{uuid_hex}]\t{essid}\n`
+/// Column order (tab-separated):
+/// `{mac_hex}\t{manufacturer}\t{model_name}\t{model_number}\t{serial}\t{device_name}[\t{uuid_hex}]\t{essid}\n`
+///
+/// The `model_number` column is a wpawolf addition over hcxpcapngtool's `-D`,
+/// which does not collect WPS attribute 0x1024 at all. Two WPS observations
+/// from the same AP that differ only in model number now produce distinct
+/// rows (whereas hcxpcapngtool would emit them as identical lines).
 ///
 /// String fields use autohex encoding. UUID is written as raw hex (no `$HEX[]` wrapper)
-/// only when present. ESSID uses autohex encoding. Entries with no non-empty string
-/// fields are skipped. Sorted by manufacturer. Returns the number of lines written.
+/// only when present. ESSID uses autohex encoding. Entries with no non-empty primary
+/// string field are skipped. Sorted by manufacturer. Returns the number of lines written.
 ///
 /// # Errors
 ///
@@ -54,9 +62,12 @@ pub fn write_device_info(store: &DeviceInfoStore, out: &mut impl Write) -> Resul
 
     let mut count = 0usize;
     for entry in entries {
-        // Skip entries where all string fields are empty (matches hcxpcapngtool guard).
+        // Skip entries where all primary string fields are empty. Mirrors the
+        // store-layer guard so a writer never sees an all-empty entry, but kept
+        // here defensively for direct callers (tests, other consumers).
         if entry.manufacturer.is_empty()
             && entry.model_name.is_empty()
+            && entry.model_number.is_empty()
             && entry.serial_number.is_empty()
             && entry.device_name.is_empty()
         {
@@ -66,11 +77,12 @@ pub fn write_device_info(store: &DeviceInfoStore, out: &mut impl Write) -> Resul
         let mac_hex = bytes_to_hex_string(&entry.mac.0);
         out.write_all(mac_hex.as_bytes())?;
         write_device_field(&entry.manufacturer, out)?;
-        write_device_field(&entry.model_name, out)?; // model name only (no model_number column)
+        write_device_field(&entry.model_name, out)?;
+        write_device_field(&entry.model_number, out)?; // wpawolf addition: WPS attr 0x1024
         write_device_field(&entry.serial_number, out)?;
         write_device_field(&entry.device_name, out)?;
         // UUID-E: written as raw hex (no $HEX[] wrapper), tab-prefixed, only if present.
-        // Matches hcxpcapngtool enrollee field. [Wi-Fi Protected Setup spec attr 0x1047]
+        // [Wi-Fi Protected Setup spec attr 0x1047]
         if let Some(uuid) = &entry.uuid_e {
             out.write_all(b"\t")?;
             out.write_all(bytes_to_hex_string(uuid).as_bytes())?;
@@ -104,7 +116,7 @@ mod tests {
             mac: MacAddr::from_bytes([mac_byte; 6]),
             manufacturer: b"Acme".to_vec(),
             model_name: b"Router9000".to_vec(),
-            model_number: b"R9K".to_vec(), // not in -D output, but stored for -W
+            model_number: b"R9K".to_vec(),
             serial_number: b"SN123".to_vec(),
             device_name: b"HomeAP".to_vec(),
             uuid_e,
@@ -129,21 +141,15 @@ mod tests {
         let count = write_device_info(&store, &mut out).unwrap();
         assert_eq!(count, 1);
         let text = std::str::from_utf8(&out).unwrap();
-        // MAC: 111111111111
+        // Column order: mac \t mfr \t model_name \t model_number \t serial \t dev_name \t uuid \t essid
         assert!(text.starts_with("111111111111\t"), "MAC should be first field: {text:?}");
-        // manufacturer (autohex: plain ASCII)
         assert!(text.contains("\tAcme\t"), "manufacturer field: {text:?}");
-        // model_name (no model_number column in -D output)
-        assert!(text.contains("\tRouter9000\t"), "model_name field: {text:?}");
-        // No model_number column - serial follows model_name directly
-        assert!(text.contains("\tRouter9000\tSN123\t"), "serial follows model_name: {text:?}");
-        // UUID: 16 bytes of 0xAB -> 32 hex chars "ab" x 16 (no $HEX[] wrapper)
+        // model_name then model_number then serial: triplet must appear in order.
+        assert!(text.contains("\tRouter9000\tR9K\tSN123\t"), "model_name -> model_number -> serial sequence: {text:?}");
+        // device_name then UUID then ESSID at the end.
         let uuid_hex = "ab".repeat(16);
-        let uuid_field = format!("\t{uuid_hex}\t");
-        assert!(text.contains(&uuid_field), "UUID raw hex: {text:?}");
-        // ESSID: "MyNet" = autohex (pure ASCII) = "MyNet"
-        assert!(text.trim_end().ends_with("\tMyNet"), "ESSID autohex: {text:?}");
-        assert!(text.ends_with('\n'));
+        let tail = format!("\tHomeAP\t{uuid_hex}\tMyNet\n");
+        assert!(text.ends_with(&tail), "device_name -> uuid -> essid tail: {text:?}");
     }
 
     #[test]
@@ -154,10 +160,30 @@ mod tests {
         let count = write_device_info(&store, &mut out).unwrap();
         assert_eq!(count, 1);
         let text = std::str::from_utf8(&out).unwrap();
-        // When UUID is absent, no UUID field is written at all (no empty tab pair).
-        // Fields: mac \t mfr \t model_name \t serial \t dev_name \t essid
-        // dev_name then ESSID directly (no uuid tab).
+        // Column order with UUID absent:
+        // mac \t mfr \t model_name \t model_number \t serial \t dev_name \t essid
+        // device_name then ESSID directly (no uuid tab pair).
         assert!(text.contains("\tHomeAP\tMyNet"), "no UUID tab when absent: {text:?}");
+    }
+
+    #[test]
+    fn write_device_info_emits_model_number_column() {
+        // Two entries that share everything except model_number must produce two
+        // distinct lines, and each line must carry its own model_number value.
+        // Direct guard against accidentally dropping the column back to hcx parity.
+        let mut store = DeviceInfoStore::new();
+        let mut e1 = make_entry(0x11, None);
+        e1.model_number = b"v1".to_vec();
+        let mut e2 = make_entry(0x11, None);
+        e2.model_number = b"v2".to_vec();
+        store.push(e1);
+        store.push(e2);
+        let mut out = Vec::new();
+        let count = write_device_info(&store, &mut out).unwrap();
+        assert_eq!(count, 2, "differing model_number must render two lines");
+        let text = std::str::from_utf8(&out).unwrap();
+        assert!(text.contains("\tRouter9000\tv1\tSN123\t"), "v1 model_number rendered: {text:?}");
+        assert!(text.contains("\tRouter9000\tv2\tSN123\t"), "v2 model_number rendered: {text:?}");
     }
 
     #[test]
