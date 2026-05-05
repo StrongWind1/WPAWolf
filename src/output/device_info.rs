@@ -1,15 +1,23 @@
 //! Phase 4 -- Emit: WPS device info (-D) writer. See ARCHITECTURE.md §3.4 + §9.
 //!
 //! Writes device metadata entries collected from WPS vendor IEs (tag 221, OUI `00:50:F2`,
-//! type 4) to the configured output file (`-D`). Column order:
+//! type 4) to the configured output file (`-D`). The output is **fixed 11 columns**
+//! per row, tab-separated, in this order:
 //!
-//! `MAC \t manufacturer \t model_name \t model_number \t serial_number \t
-//!   device_name \t os_version \t primary_device_type \t
-//!   secondary_device_type_list [\t uuid_e] \t essid`
+//! ```text
+//! 1: MAC                          7: os_version
+//! 2: manufacturer                 8: primary_device_type
+//! 3: model_name                   9: secondary_device_type_list
+//! 4: model_number                10: uuid_e
+//! 5: serial_number               11: essid
+//! 6: device_name
+//! ```
 //!
-//! Four columns are wpawolf additions over hcxpcapngtool's `-D`, which only
-//! emits `MAC / manufacturer / model_name / serial_number / device_name /
-//! [uuid_e] / essid`:
+//! Every column is always emitted (with an empty value when the attribute was
+//! absent in the WPS body) so an operator can `awk -F'\t' '{print $7}'` without
+//! per-row column-count surprises. Four columns are wpawolf additions over
+//! hcxpcapngtool's `-D`, which only emits `MAC / manufacturer / model_name /
+//! serial_number / device_name / [uuid_e] / essid`:
 //! * `model_number` (WPS attr 0x1024) -- hcxtools does not even parse this attribute.
 //! * `os_version` (WPS attr 0x102D) -- 4-byte big-endian uint32 rendered as 8 lowercase hex.
 //! * `primary_device_type` (WPS attr 0x1054) -- 8-byte structured value rendered as 16 lowercase hex.
@@ -19,10 +27,9 @@
 //! All string fields use autohex encoding (printable ASCII as-is, else `$HEX[...]`).
 //! Binary fields (UUID-E, OS Version, Primary Device Type, Secondary Device Type
 //! List) use raw lowercase hex without the `$HEX[...]` wrapper. An absent
-//! optional field renders as an empty cell (just the leading `\t`); UUID-E
-//! remains conditional (no tab when absent) for back-compat with prior `-D`
-//! parsers. Entries are sorted by manufacturer; row-level dedup happens at the
-//! store layer (see `store::auxiliary::DeviceInfoStore`).
+//! optional field renders as an empty cell (just the leading `\t`).
+//! Entries are sorted by manufacturer; row-level dedup happens at the store
+//! layer (see `store::auxiliary::DeviceInfoStore`).
 //!
 
 use std::io::Write;
@@ -70,14 +77,15 @@ fn write_device_hex_field(bytes: &[u8], out: &mut impl Write) -> Result<()> {
 
 /// Writes device info entries to `out`, one per line.
 ///
-/// Column order (tab-separated):
-/// `{mac}\t{mfr}\t{model_name}\t{model_number}\t{serial}\t{device_name}\t{os_version}\t{primary_device_type}\t{secondary_device_type_list}[\t{uuid_hex}]\t{essid}\n`
+/// Each row emits **exactly 11 tab-separated columns** so operators can
+/// `awk -F'\t' '{print $N}'` without conditional-column logic. Column order:
+///
+/// `{mac}\t{mfr}\t{model_name}\t{model_number}\t{serial}\t{device_name}\t{os_version}\t{primary_device_type}\t{secondary_device_type_list}\t{uuid_hex}\t{essid}\n`
 ///
 /// String fields use autohex encoding. Binary fields (OS Version, Primary
-/// Device Type, Secondary Device Type List) use raw lowercase hex without the
-/// `$HEX[...]` wrapper; an absent value renders as an empty cell. UUID-E uses
-/// raw hex too but its tab is conditional (only emitted when present), kept
-/// that way for back-compat with prior `-D` parsers.
+/// Device Type, Secondary Device Type List, UUID-E) use raw lowercase hex
+/// without the `$HEX[...]` wrapper; an absent value renders as an empty cell
+/// (the leading tab is still emitted to keep column count stable).
 ///
 /// Entries with every primary content field empty are skipped. Sorted by
 /// manufacturer. Returns the number of lines written.
@@ -123,14 +131,11 @@ pub fn write_device_info(store: &DeviceInfoStore, out: &mut impl Write) -> Resul
         // Secondary Device Type List: concatenated 8-byte entries; empty when absent.
         // [WSC §12 attr 0x1055]
         write_device_hex_field(&entry.secondary_device_type_list, out)?;
-        // UUID-E: written as raw hex (no $HEX[] wrapper), tab-prefixed, only if present.
-        // The conditional tab is kept for back-compat with parsers built against the
-        // pre-T-15.1 column set; new optional fields above always emit their tab.
-        // [Wi-Fi Protected Setup spec attr 0x1047]
-        if let Some(uuid) = &entry.uuid_e {
-            out.write_all(b"\t")?;
-            out.write_all(bytes_to_hex_string(uuid).as_bytes())?;
-        }
+        // UUID-E: 16 bytes -> 32 hex chars, or empty cell when absent. Always
+        // emits its tab to keep the column count fixed at 11; operators can
+        // `cut -f10` without conditional-column logic. [Wi-Fi Protected Setup
+        // spec attr 0x1047]
+        write_device_hex_field(entry.uuid_e.as_ref().map_or(&[][..], |v| v.as_slice()), out)?;
         write_device_field(&entry.essid, out)?;
         out.write_all(b"\n")?;
         count += 1;
@@ -188,7 +193,7 @@ mod tests {
         let count = write_device_info(&store, &mut out).unwrap();
         assert_eq!(count, 1);
         let text = std::str::from_utf8(&out).unwrap();
-        // Column order: mac \t mfr \t model_name \t model_number \t serial \t
+        // Fixed 11 columns: mac \t mfr \t model_name \t model_number \t serial \t
         //   dev_name \t os_ver \t prim_dt \t sec_dt_list \t uuid \t essid
         // make_entry leaves os_version / primary_device_type / sec_dt_list empty,
         // so columns 7-9 render as three empty cells (just tabs).
@@ -200,21 +205,45 @@ mod tests {
         let uuid_hex = "ab".repeat(16);
         let tail = format!("\tHomeAP\t\t\t\t{uuid_hex}\tMyNet\n");
         assert!(text.ends_with(&tail), "device_name -> 3 empty WPS-extra tabs -> uuid -> essid tail: {text:?}");
+        // 10 tabs separate the 11 columns. Verify the row has exactly that many.
+        assert_eq!(text.matches('\t').count(), 10, "fixed 11 columns means exactly 10 tabs: {text:?}");
     }
 
     #[test]
-    fn write_device_info_uuid_absent() {
+    fn write_device_info_uuid_absent_still_emits_empty_uuid_column() {
         let mut store = DeviceInfoStore::new();
         store.push(make_entry(0x22, None));
         let mut out = Vec::new();
         let count = write_device_info(&store, &mut out).unwrap();
         assert_eq!(count, 1);
         let text = std::str::from_utf8(&out).unwrap();
-        // Column order with UUID absent:
-        // mac \t mfr \t model_name \t model_number \t serial \t dev_name \t
-        //   os_ver \t prim_dt \t sec_dt_list \t essid
-        // device_name then three empty new-column tabs then ESSID directly (no uuid tab pair).
-        assert!(text.ends_with("\tHomeAP\t\t\t\tMyNet\n"), "no UUID tab when absent: {text:?}");
+        // UUID-E absent still emits its empty column to preserve the fixed
+        // 11-column layout. Tail therefore shows: device_name \t os_ver(empty) \t
+        // prim_dt(empty) \t sec_dt_list(empty) \t uuid_e(empty) \t essid.
+        assert!(
+            text.ends_with("\tHomeAP\t\t\t\t\tMyNet\n"),
+            "fixed-width row keeps the UUID column even when value is absent: {text:?}"
+        );
+        assert_eq!(text.matches('\t').count(), 10, "every row has exactly 10 tabs: {text:?}");
+    }
+
+    #[test]
+    fn write_device_info_column_count_is_fixed_across_rows() {
+        // Three rows with different attribute population patterns must each
+        // emit exactly 11 columns (10 tabs). Operator-parsing contract.
+        let mut store = DeviceInfoStore::new();
+        store.push(make_entry(0x11, Some([0xAB; 16]))); // UUID present
+        store.push(make_entry(0x22, None)); // UUID absent
+        let mut e3 = make_entry(0x33, None);
+        e3.os_version = Some([0x80, 0x12, 0x34, 0x56]);
+        e3.primary_device_type = Some([0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01]);
+        store.push(e3); // OS Version + Primary Device Type populated
+        let mut out = Vec::new();
+        write_device_info(&store, &mut out).unwrap();
+        let text = std::str::from_utf8(&out).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            assert_eq!(line.matches('\t').count(), 10, "row {i} must have exactly 10 tabs (11 columns): {line:?}");
+        }
     }
 
     #[test]
