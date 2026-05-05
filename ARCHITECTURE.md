@@ -320,27 +320,41 @@ A single `(AP, STA)` session can legitimately yield up to four distinct hashcat 
 
 Enforcement: `emit_pmkids(&PmkidStore)` runs to completion before `emit_pairs(&MessageStore, &EssidMap)` even starts. The two functions take disjoint store references and write into the same `BufWriter` only after the dedup filter accepts the line. No control-flow path collapses the two.
 
-### 7. NULL / 0xFF nonce / MIC / PMKID rejected unconditionally
+### 7. Garbage-pattern nonce / MIC / PMKID / ESSID rejected unconditionally
 
-Invalid sentinel values are rejected at parse time and store insertion. There is no flag to disable these rejections; they are firmware artifacts with no cracking value.
+Invalid sentinel values and short-period repeating patterns are rejected at parse time and store insertion. There is no flag to disable these rejections; they are firmware artifacts with no cracking value. Real wire bytes from a healthy stack are HMAC outputs / random nonces and never carry these shapes.
 
-| Field | NULL | 0xFF |
-|-------|------|------|
-| Nonce M1, M2, M3 | rejected | rejected |
-| Nonce M4 | accepted (per §12.7.6.5 NOTE 9) | rejected |
-| MIC on frame with `Key MIC Present` set | rejected | rejected |
-| MIC on M1 (`Key MIC Present` cleared) | not checked | not checked |
-| PMKID (any source) | rejected | rejected |
+The detector (`types::garbage_pattern_kind`) classifies a byte run into one of five mutually-exclusive kinds, in priority order:
+
+| Kind | Pattern | Notes |
+|---|---|---|
+| `null` | every byte is `0x00` | Fires at any length |
+| `ff` | every byte is `0xFF` | Fires at any length; NOR-flash erase value |
+| `repeat_1` | every byte equals the first byte (other than `0x00` / `0xFF`) | Length `>= 4` so single-byte SSIDs (`"X"`) and short ones (`"AB"`) are never flagged |
+| `repeat_2` | 2-byte alternating period (e.g. `5555AAAA`) | Length multiple of 2 and `>= 4` |
+| `repeat_4` | 4-byte repeating period (e.g. `01020304...`) | Length multiple of 4 and `>= 8` |
+
+Per-field rejection matrix:
+
+| Field | Rejected kinds | Spec-valid exception |
+|-------|----------------|----------------------|
+| Nonce M1, M2, M3 | every kind | -- |
+| Nonce M4 | `ff`, `repeat_1`, `repeat_2`, `repeat_4` | `null` accepted per §12.7.6.5 NOTE 9 |
+| MIC on frame with `Key MIC Present` set (M2/M3/M4) | every kind | -- |
+| MIC on M1 (`Key MIC Present` cleared) | not checked | M1 MIC is legitimately zero |
+| PMKID (any source) | every kind | -- |
+| ESSID | every kind on top of the legacy hcx admission gate (length 1-32, first byte non-zero) | Short SSIDs (1-3 bytes) of all-same-byte stay accepted via the `repeat_1` length floor |
 
 Each rejection increments a dedicated counter:
 
 ```
-stats.null_nonce_rejected   stats.ff_nonce_rejected
-stats.null_mic_rejected     stats.ff_mic_rejected
-stats.null_pmkid_rejected   stats.ff_pmkid_rejected
+stats.null_nonce_rejected   stats.ff_nonce_rejected   stats.repeat_nonce_rejected
+stats.null_mic_rejected     stats.ff_mic_rejected     stats.repeat_mic_rejected
+stats.null_pmkid_rejected   stats.ff_pmkid_rejected   stats.repeat_pmkid_rejected
+stats.garbage_essid_rejected
 ```
 
-Rejected frames generate `[invalid_nonce]` / `[invalid_mic]` / `[invalid_pmkid]` log entries when `--log` is set.
+Rejected frames / SSIDs generate `[invalid_nonce]` / `[invalid_mic]` / `[invalid_pmkid]` / `[invalid_essid]` log entries when `--log` is set; the line carries the kind string so downstream tooling can filter by pattern.
 
 ### 8. Every wire constant cites the spec
 
@@ -808,11 +822,11 @@ These mirror the `PMKID_AP`, `PMKID_APPSK256`, `PMKID_CLIENT`, `PMKID_AP_FTPSK`,
 
 Every PMKID goes through three gates before being stored:
 
-1. **NULL / 0xFF rejection** (§4 invariant 7): an all-zero or all-0xFF 16-byte PMKID is rejected unconditionally, with separate counters `null_pmkid_rejected` and `ff_pmkid_rejected`.
+1. **Garbage-pattern rejection** (§4 invariant 7): a 16-byte PMKID matching `null` (all-zero), `ff` (all-0xFF), `repeat_1` (all-same-byte), `repeat_2` (2-byte period), or `repeat_4` (4-byte period) is rejected unconditionally. Separate counters `null_pmkid_rejected`, `ff_pmkid_rejected`, and `repeat_pmkid_rejected` surface the breakdown.
 2. **Per-(AP, STA) deduplication**: if the same 16-byte PMKID value has already been stored for this `(AP MAC, STA MAC)` pair, the duplicate is dropped silently. Different PMKID values for the same pair are all kept.
 3. **Length sanity for FT**: emitting `WPA*06*` / `WPA*10*` requires non-empty MDID, R0KH-ID, and R1KH-ID. PMKIDs from FT locations with missing FT material are stored but not emitted to `--37100-out` / `--ft-out` / `--ft-psk-sha384-out`.
 
-hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-zero or all-0xFF, treating these as PLCP bit errors. We do not apply that heuristic - the NULL / 0xFF checks above cover the deterministic cases, and a partial-window check is heuristic (no heuristic encoding decisions; check the flag that drives the choice).
+hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-zero or all-0xFF, treating these as PLCP bit errors. wpawolf's whole-field period-2 / period-4 checks cover the deterministic synthetic-pattern cases that motivated hcx's window heuristic; we do not extend the check to arbitrary 4-byte windows because that becomes heuristic (a real HMAC output occasionally has an internal 4-byte run that matches `null` or `ff` but is not garbage as a whole).
 
 ### §6.9  Known issues
 
@@ -1121,11 +1135,12 @@ Detect nonce endianness. Compare replay counters across M1->M2 or M3->M4. If the
 #### FR-PAIR-7
 Invalid value rejection (unconditional, not a flag). Per §4 invariant 7:
 
-- All-zero or all-0xFF Key Nonce: M1/M2/M3 always rejected at parse time. M4 NULL accepted (§12.7.6.5 NOTE 9); M4 0xFF rejected.
-- All-zero or all-0xFF MIC bytes when Key MIC Present (B8) is set: rejected. M1 MIC is legitimately zero and is not checked.
-- All-zero or all-0xFF PMKIDs: rejected at store insertion.
+- Key Nonce matching any garbage-pattern kind (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`): M1/M2/M3 always rejected at parse time. M4 accepts `null` per §12.7.6.5 NOTE 9; every other kind still rejects on M4.
+- MIC matching any garbage-pattern kind when Key MIC Present (B8) is set: rejected. M1 MIC is legitimately zero and is not checked.
+- PMKIDs matching any garbage-pattern kind: rejected at store insertion.
+- ESSIDs matching any garbage-pattern kind on top of the legacy hcx admission gate (length 1-32, first byte non-zero): rejected at `EssidMap::insert` time. Length floors keep single-byte SSIDs (`"X"`) and short ones (`"AB"`, `"LAN"`) accepted.
 
-Counters: `null_nonce_rejected`, `ff_nonce_rejected`, `null_mic_rejected`, `ff_mic_rejected`, `null_pmkid_rejected`, `ff_pmkid_rejected`.
+Counters: `null_nonce_rejected`, `ff_nonce_rejected`, `repeat_nonce_rejected`, `null_mic_rejected`, `ff_mic_rejected`, `repeat_mic_rejected`, `null_pmkid_rejected`, `ff_pmkid_rejected`, `repeat_pmkid_rejected`, `garbage_essid_rejected`.
 
 ### §8.7  ESSID and output formatting - FR-ESSID-*, FR-OUT-*, FR-DEDUP-*
 
@@ -1261,11 +1276,12 @@ Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary 
 - `unknown_akm`         - AKM suite type outside [IEEE 802.11-2024] Table 9-190
 - `essid_not_found_summary` - per-AP summary: the AP's SSID was never observed, so every would-have-been-emitted hash line for it was dropped at output time as uncrackable. One line per affected AP at end of run; carries `ap=`, `dropped=N`, `first_seen_us=`, `last_seen_us=` so the operator can locate the source frames in the original capture
 - `capture_read_error`  - per-file ingest error (typically a truncated trailing packet record per FR-IN-10); the file is closed and the run continues
-- `invalid_nonce`       - EAPOL frame discarded: nonce was NULL (M1/M2/M3) or all-`0xFF` (any). M4 NULL nonce is spec-valid and is NOT logged
-- `invalid_mic`         - EAPOL frame discarded: MIC was NULL or all-`0xFF` with the Key MIC flag set (M2/M3/M4)
-- `invalid_pmkid`       - PMKID discarded: NULL or all-`0xFF`
+- `invalid_nonce`       - EAPOL frame discarded: nonce matched a garbage pattern (`null` on M1/M2/M3, `ff` on any, `repeat_1` / `repeat_2` / `repeat_4` on any). M4 `null` nonce is spec-valid and is NOT logged. The kind string travels with the line so downstream tooling can filter by pattern
+- `invalid_mic`         - EAPOL frame discarded: MIC matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`) with the Key MIC flag set (M2/M3/M4)
+- `invalid_pmkid`       - PMKID discarded: matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`)
+- `invalid_essid`       - SSID dropped before insertion: matched a garbage pattern (`ff`, `repeat_1`, `repeat_2`, `repeat_4`). Length-0 / first-byte-zero SSIDs are filtered silently by the legacy hcx admission gate and are NOT logged
 
-Format: `[category] <category-specific fields>`. Per-category field layout matches the `Logger::log_*` method signatures. Frame-bearing categories (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`, `invalid_pmkid`) lead with `timestamp_us`; `unknown_linktype`, `unknown_akm`, `essid_not_found_summary`, and `capture_read_error` do not (the event has no single packet timestamp; the summary line carries its own `first_seen_us` / `last_seen_us` range fields).
+Format: `[category] <category-specific fields>`. Per-category field layout matches the `Logger::log_*` method signatures. Frame-bearing categories (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`, `invalid_pmkid`, `invalid_essid`) lead with `timestamp_us`; `unknown_linktype`, `unknown_akm`, `essid_not_found_summary`, and `capture_read_error` do not (the event has no single packet timestamp; the summary line carries its own `first_seen_us` / `last_seen_us` range fields).
 
 ### §8.9  Correctness, performance, dependencies, build, threading
 
@@ -1391,7 +1407,7 @@ In a corpus with RF-rotted captures, one physical AP can produce 4-30+ "distinct
 - Max EAPOL authentication length seen per message type.
 - Replay-counter gap histogram, EAPOLTIME gap (max ms).
 - ANonce error corrections, M4 zeroed-nonce count, M1 4E4 authorized variants.
-- Rejection counters: `null_nonce_rejected`, `ff_nonce_rejected`, `null_mic_rejected`, `ff_mic_rejected`, `null_pmkid_rejected`, `ff_pmkid_rejected`, `bad_kdv_count`.
+- Rejection counters: `null_nonce_rejected`, `ff_nonce_rejected`, `repeat_nonce_rejected`, `null_mic_rejected`, `ff_mic_rejected`, `repeat_mic_rejected`, `null_pmkid_rejected`, `ff_pmkid_rejected`, `repeat_pmkid_rejected`, `garbage_essid_rejected`, `bad_kdv_count`.
 - WDS direction tier breakdown: `eapol_tier1_direction`, `eapol_tier1b_essid`, `eapol_tier2_ack_discovery`, `eapol_tier3_flag_fallback`, `eapol_ack_mismatches`.
 - `eapol_preauth_frames` -- LLC/SNAP `EtherType` `0x88C7` frames per [IEEE 802.11-2024] §12.3.2; counted alongside standard `0x888E` so inter-AP preauth traffic is visible.
 - `eapol_llc_invalid` -- frames where the LLC/SNAP `EtherType` was `0x888E` / `0x88C7` AND the EAPOL Packet Type byte was 3 (EAPOL-Key) but the EAPOL-Key parser bailed (truncated body, bad descriptor, sentinel-rejected MIC/nonce). EAP-Packet (type 0), EAPOL-Start (1), and EAPOL-Logoff (2) are legitimate non-key frames and do **not** increment this counter.

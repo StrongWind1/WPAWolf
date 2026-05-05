@@ -4,7 +4,7 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ## Releases
 
-### v0.3.3 -- unreleased
+### v0.3.3 -- 2026-05-05
 
 Operator-facing improvements driven by corpus-scale testing feedback (May 2026). No change to the hashcat-line output format; existing 22000 / 37100 / taxonomy lines are byte-identical.
 
