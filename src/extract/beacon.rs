@@ -218,6 +218,9 @@ pub fn process_beacon_or_probe_resp(
                     model_number: wps.model_number,
                     serial_number: wps.serial_number,
                     device_name: wps.device_name,
+                    os_version: wps.os_version,
+                    primary_device_type: wps.primary_device_type,
+                    secondary_device_type_list: wps.secondary_device_type_list,
                     uuid_e: wps.uuid_e,
                     essid,
                 });

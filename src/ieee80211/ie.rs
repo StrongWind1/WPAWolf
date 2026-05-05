@@ -142,6 +142,10 @@ const WPS_ATTR_NEW_DEVICE_NAME: u16 = 0x1029;
 const WPS_ATTR_NEW_PASSWORD: u16 = 0x102A;
 /// WPS attribute: Out-of-Band Device Password. [WSC §12; Wireshark `WPS_TLV_TYPE_OOB_DEVICE_PASSWORD`]
 const WPS_ATTR_OOB_DEVICE_PASSWORD: u16 = 0x102C;
+/// WPS attribute: OS Version. 4-byte big-endian uint32. The high bit is reserved
+/// per WSC §12; the lower 31 bits are vendor-specific. [WSC §12; Wireshark
+/// `WPS_TLV_TYPE_OS_VERSION` -- `packet-wps.c` decodes as `ENC_BIG_ENDIAN` 4-byte int]
+const WPS_ATTR_OS_VERSION: u16 = 0x102D;
 /// WPS attribute: Serial Number string. [WSC §12 0x1042]
 const WPS_ATTR_SERIAL_NUMBER: u16 = 0x1042;
 /// WPS attribute: SSID (network name). [WSC §12; Wireshark `WPS_TLV_TYPE_SSID`]
@@ -152,6 +156,15 @@ const WPS_ATTR_UUID_E: u16 = 0x1047;
 const WPS_ATTR_UUID_R: u16 = 0x1048;
 /// WPS attribute: EAP Identity (text). [WSC §12; Wireshark `WPS_TLV_TYPE_EAP_IDENTITY`]
 const WPS_ATTR_EAP_IDENTITY: u16 = 0x104D;
+/// WPS attribute: Primary Device Type. 8-byte structured field --
+/// `category(2) | OUI(4) | sub-category(2)` per WSC §12. [Wireshark
+/// `WPS_TLV_TYPE_PRIMARY_DEVICE_TYPE` -- 8-byte fixed-length value with WFA-
+/// specific category/sub-category enums for OUI = `00:50:F2:04`]
+const WPS_ATTR_PRIMARY_DEVICE_TYPE: u16 = 0x1054;
+/// WPS attribute: Secondary Device Type List. Variable length up to 128 bytes;
+/// list of 8-byte device-type entries (same structure as Primary Device Type).
+/// [Wireshark `WPS_TLV_TYPE_SECONDARY_DEVICE_TYPE_LIST` -- length-bounded blob]
+const WPS_ATTR_SECONDARY_DEVICE_TYPE_LIST: u16 = 0x1055;
 
 /// WPS IE type byte within the Wi-Fi Alliance OUI namespace.
 /// Vendor IE OUI=`00:50:F2`, type=4 identifies a WPS IE. [Wi-Fi Protected Setup spec] §12.
@@ -159,7 +172,7 @@ pub const WPS_IE_TYPE: u8 = 4;
 
 /// Device metadata extracted from a WPS vendor IE.
 ///
-/// The first six fields populate the `-D` device-info row and are spec-defined
+/// The typed fields populate the `-D` device-info row and are spec-defined
 /// AP-discovery attributes. The remaining `wordlist_values` list collects every
 /// other text-bearing or credential-bearing attribute observed during the same
 /// TLV walk -- including the `Network Key` (0x1027), `New Password` (0x102A),
@@ -179,6 +192,21 @@ pub struct WpsInfo {
     pub serial_number: Vec<u8>,
     /// Device name (friendly name). [WSC §12] attribute 0x1011.
     pub device_name: Vec<u8>,
+    /// OS Version. 4-byte big-endian uint32 -- the spec reserves the high bit
+    /// and leaves the lower 31 bits vendor-specific, so we keep the raw bytes
+    /// here and let the writer hex-encode them. `None` when the attribute was
+    /// absent or had an unexpected length. [WSC §12] attribute 0x102D.
+    pub os_version: Option<[u8; 4]>,
+    /// Primary Device Type. 8-byte structured field:
+    /// `category(2) | OUI(4) | sub-category(2)`. The standard WFA OUI is
+    /// `00:50:F2:04`; non-WFA OUIs carry vendor-specific sub-categories.
+    /// `None` when absent or unexpected length. [WSC §12] attribute 0x1054.
+    pub primary_device_type: Option<[u8; 8]>,
+    /// Secondary Device Type List. Concatenation of zero or more 8-byte
+    /// device-type entries (same layout as Primary Device Type). The spec
+    /// caps total length at 128 bytes. Empty when absent. [WSC §12]
+    /// attribute 0x1055.
+    pub secondary_device_type_list: Vec<u8>,
     /// UUID-E (Enrollee UUID), 16 bytes. [WSC §12] attribute 0x1047.
     pub uuid_e: Option<[u8; 16]>,
     /// Additional wordlist candidates harvested from the same TLV walk.
@@ -255,6 +283,29 @@ fn walk_wps_tlvs(body: &[u8], info: &mut WpsInfo, depth: u8) {
             WPS_ATTR_MODEL_NUMBER => info.model_number = value.to_vec(),
             WPS_ATTR_SERIAL_NUMBER => info.serial_number = value.to_vec(),
             WPS_ATTR_DEVICE_NAME => info.device_name = value.to_vec(),
+            WPS_ATTR_OS_VERSION => {
+                // Spec-fixed at 4 bytes (big-endian uint32). Anything else is
+                // a malformed attribute; drop it rather than guess.
+                if let Ok(arr) = value.try_into() {
+                    info.os_version = Some(arr);
+                }
+            },
+            WPS_ATTR_PRIMARY_DEVICE_TYPE => {
+                // Spec-fixed at 8 bytes (category | OUI | sub-category).
+                if let Ok(arr) = value.try_into() {
+                    info.primary_device_type = Some(arr);
+                }
+            },
+            WPS_ATTR_SECONDARY_DEVICE_TYPE_LIST => {
+                // Variable length, capped at 128 bytes by the spec; each entry
+                // is 8 bytes. Truncate any trailing partial entry by rounding
+                // down to the nearest 8-byte boundary so the writer can render
+                // a clean concatenation.
+                let usable = value.len() - (value.len() % 8);
+                if let Some(slice) = value.get(..usable) {
+                    info.secondary_device_type_list = slice.to_vec();
+                }
+            },
             WPS_ATTR_UUID_E => {
                 if let Ok(uuid) = value.try_into() {
                     info.uuid_e = Some(uuid);
@@ -1086,6 +1137,111 @@ mod tests {
         let body = wps_attr(WPS_ATTR_UUID_E, &uuid);
         let info = parse_wps_body(&body);
         assert_eq!(info.uuid_e, Some(uuid));
+    }
+
+    #[test]
+    fn wps_parse_os_version_4_bytes() {
+        // WSC §12: OS Version is a 4-byte big-endian uint32 with the high bit
+        // reserved. We round-trip the raw bytes and let the writer hex-encode.
+        let bytes: [u8; 4] = [0x80, 0x00, 0x00, 0x10];
+        let body = wps_attr(WPS_ATTR_OS_VERSION, &bytes);
+        let info = parse_wps_body(&body);
+        assert_eq!(info.os_version, Some(bytes));
+    }
+
+    #[test]
+    fn wps_parse_os_version_wrong_length_drops() {
+        // Spec-fixed at 4 bytes; anything else is malformed -> os_version stays None.
+        for bad in [&[][..], &[0x80][..], &[0x80, 0x00, 0x00][..], &[0x80, 0x00, 0x00, 0x00, 0x00][..]] {
+            let body = wps_attr(WPS_ATTR_OS_VERSION, bad);
+            let info = parse_wps_body(&body);
+            assert!(info.os_version.is_none(), "malformed OS Version (len {}) must be dropped", bad.len());
+        }
+    }
+
+    #[test]
+    fn wps_parse_primary_device_type_8_bytes() {
+        // WSC §12: 8-byte structured field -- category(2) | OUI(4) | sub-category(2).
+        // Test value is the standard WFA Network Infrastructure / AP code.
+        let bytes: [u8; 8] = [0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01];
+        let body = wps_attr(WPS_ATTR_PRIMARY_DEVICE_TYPE, &bytes);
+        let info = parse_wps_body(&body);
+        assert_eq!(info.primary_device_type, Some(bytes));
+    }
+
+    #[test]
+    fn wps_parse_primary_device_type_wrong_length_drops() {
+        // Spec-fixed at 8 bytes -> anything else is malformed.
+        let bad: [u8; 7] = [0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00];
+        let body = wps_attr(WPS_ATTR_PRIMARY_DEVICE_TYPE, &bad);
+        let info = parse_wps_body(&body);
+        assert!(info.primary_device_type.is_none());
+    }
+
+    #[test]
+    fn wps_parse_secondary_device_type_list_two_entries() {
+        // 16 bytes = two 8-byte device-type entries. Stored verbatim.
+        let mut list = vec![];
+        list.extend_from_slice(&[0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01]);
+        list.extend_from_slice(&[0x00, 0x07, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x02]);
+        let body = wps_attr(WPS_ATTR_SECONDARY_DEVICE_TYPE_LIST, &list);
+        let info = parse_wps_body(&body);
+        assert_eq!(info.secondary_device_type_list, list);
+    }
+
+    #[test]
+    fn wps_parse_real_capture_probe_response_body() {
+        // Reconstructs a real WPS Probe Response body observed in the
+        // /root/ALL_CAPS corpus from a TP-LINK TL-WR841N AP, augmented with
+        // synthetic OS Version (0x102D) and Secondary Device Type List
+        // (0x1055) attributes so all three new -D columns get exercised in
+        // the same body the production parser would walk. Field ordering and
+        // attribute layout match the wire-observed bytes 1:1; only the OS
+        // Version and Secondary list are inserted artificially because that
+        // particular AP did not emit them.
+        let mut body = Vec::new();
+        body.extend_from_slice(&wps_attr(0x104A, &[0x10])); // Version
+        body.extend_from_slice(&wps_attr(0x1044, &[0x02])); // WPS State
+        body.extend_from_slice(&wps_attr(0x1047, &[0xAB; 16])); // UUID-E
+        body.extend_from_slice(&wps_attr(WPS_ATTR_MANUFACTURER, b"TP-LINK"));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_MODEL_NAME, b"TL-WR841N"));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_MODEL_NUMBER, b"8.0"));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_SERIAL_NUMBER, b"1.0"));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_OS_VERSION, &[0x80, 0x12, 0x34, 0x56]));
+        body.extend_from_slice(&wps_attr(
+            WPS_ATTR_PRIMARY_DEVICE_TYPE,
+            &[0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01],
+        ));
+        body.extend_from_slice(&wps_attr(
+            WPS_ATTR_SECONDARY_DEVICE_TYPE_LIST,
+            &[0x00, 0x07, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x02],
+        ));
+        body.extend_from_slice(&wps_attr(WPS_ATTR_DEVICE_NAME, b"Wireless Router TL-WR841N"));
+
+        let info = parse_wps_body(&body);
+        assert_eq!(info.manufacturer, b"TP-LINK");
+        assert_eq!(info.model_name, b"TL-WR841N");
+        assert_eq!(info.model_number, b"8.0");
+        assert_eq!(info.serial_number, b"1.0");
+        assert_eq!(info.device_name, b"Wireless Router TL-WR841N");
+        assert_eq!(info.os_version, Some([0x80, 0x12, 0x34, 0x56]));
+        assert_eq!(info.primary_device_type, Some([0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01]));
+        assert_eq!(info.secondary_device_type_list, &[0x00, 0x07, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x02]);
+        assert_eq!(info.uuid_e, Some([0xAB; 16]));
+    }
+
+    #[test]
+    fn wps_parse_secondary_device_type_list_truncates_partial_entry() {
+        // Spec-defined entries are 8 bytes; a body length not divisible by 8 has a
+        // trailing partial entry that is malformed. Round down to the nearest
+        // 8-byte boundary so the writer can render a clean concatenation.
+        let mut list = vec![];
+        list.extend_from_slice(&[0x00, 0x06, 0x00, 0x50, 0xF2, 0x04, 0x00, 0x01]); // full entry
+        list.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // 3 trailing bytes -> dropped
+        let body = wps_attr(WPS_ATTR_SECONDARY_DEVICE_TYPE_LIST, &list);
+        let info = parse_wps_body(&body);
+        assert_eq!(info.secondary_device_type_list.len(), 8, "trailing partial entry must be truncated");
+        assert_eq!(info.secondary_device_type_list, &list[..8]);
     }
 
     #[test]

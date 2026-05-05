@@ -456,6 +456,15 @@ pub struct DeviceInfoEntry {
     pub serial_number: Vec<u8>,
     /// Device friendly name bytes. [Wi-Fi Protected Setup spec] attr 0x1011
     pub device_name: Vec<u8>,
+    /// OS Version: 4-byte big-endian uint32 with the high bit reserved.
+    /// `None` when absent. [Wi-Fi Protected Setup spec] attr 0x102D
+    pub os_version: Option<[u8; 4]>,
+    /// Primary Device Type: 8 bytes -- `category(2) | OUI(4) | sub-category(2)`.
+    /// `None` when absent. [Wi-Fi Protected Setup spec] attr 0x1054
+    pub primary_device_type: Option<[u8; 8]>,
+    /// Secondary Device Type List: zero or more 8-byte device-type entries
+    /// (concatenated). Empty when absent. [Wi-Fi Protected Setup spec] attr 0x1055
+    pub secondary_device_type_list: Vec<u8>,
     /// UUID-E (16 bytes). [Wi-Fi Protected Setup spec] attr 0x1047
     pub uuid_e: Option<[u8; 16]>,
     /// AP ESSID at the time of the WPS IE observation.
@@ -466,12 +475,14 @@ pub struct DeviceInfoEntry {
 ///
 /// Dedupes at insertion time on the **output-rendered row identity** -- two pushes
 /// that would produce a byte-identical `-D` line collapse to one stored entry. The
-/// dedup key is the full set of fields in the output column order:
-/// `(mac, manufacturer, model_name, model_number, serial_number, device_name,
-/// uuid_e, essid)`. Entries with all five primary string fields empty
-/// (`manufacturer`, `model_name`, `model_number`, `serial_number`, `device_name`)
-/// are skipped on insert -- they would be filtered by `write_device_info`'s
-/// all-empty-fields guard at write time anyway, so storing them wastes memory only.
+/// dedup key is the full set of fields in the output column order. Entries with
+/// every primary content field empty (`manufacturer`, `model_name`,
+/// `model_number`, `serial_number`, `device_name`, `os_version`,
+/// `primary_device_type`, `secondary_device_type_list`) are skipped on insert --
+/// they would be filtered by `write_device_info`'s all-empty-fields guard at
+/// write time anyway, so storing them wastes memory only. UUID-E and ESSID
+/// alone are not "primary content" because they convey only an identifier and
+/// the AP's own SSID respectively, not device identity.
 ///
 /// **Why not `(MAC, UUID-E)` or MAC-only as the dedup key.** A sparse WPS Beacon
 /// observation (manufacturer only) would collapse a rich Probe Response observation
@@ -495,9 +506,9 @@ impl DeviceInfoStore {
         Self::default()
     }
 
-    /// Inserts `entry` if (a) at least one of the five primary string fields is
-    /// non-empty AND (b) no byte-identical-rendered row is already stored.
-    /// Otherwise the call is a no-op.
+    /// Inserts `entry` if (a) at least one primary content field is populated
+    /// AND (b) no byte-identical-rendered row is already stored. Otherwise the
+    /// call is a no-op.
     ///
     /// The empty-fields guard mirrors the all-empty-fields skip in
     /// `output/device_info.rs::write_device_info` so the store does not retain
@@ -508,6 +519,9 @@ impl DeviceInfoStore {
             && entry.model_number.is_empty()
             && entry.serial_number.is_empty()
             && entry.device_name.is_empty()
+            && entry.os_version.is_none()
+            && entry.primary_device_type.is_none()
+            && entry.secondary_device_type_list.is_empty()
         {
             return;
         }
@@ -775,6 +789,9 @@ mod tests {
             model_number: vec![],
             serial_number: vec![],
             device_name: vec![],
+            os_version: None,
+            primary_device_type: None,
+            secondary_device_type_list: vec![],
             uuid_e: None,
             essid: vec![],
         }
@@ -837,8 +854,8 @@ mod tests {
     fn device_info_store_skips_all_empty_fields_on_insert() {
         // Mirrors the all-empty-fields skip in write_device_info. Storing such
         // entries wastes memory because the writer would skip them at output
-        // time anyway. Both UUID-E and ESSID alone are NOT primary content --
-        // the writer's all-empty guard ignores them.
+        // time anyway. UUID-E and ESSID alone are NOT primary content -- the
+        // writer's all-empty guard ignores them.
         let mut store = DeviceInfoStore::new();
         let entry = DeviceInfoEntry {
             mac: MacAddr::from_bytes([0x11; 6]),
@@ -847,6 +864,9 @@ mod tests {
             model_number: vec![],
             serial_number: vec![],
             device_name: vec![],
+            os_version: None,
+            primary_device_type: None,
+            secondary_device_type_list: vec![],
             uuid_e: Some([0xAB; 16]),
             essid: b"NetX".to_vec(),
         };
@@ -876,10 +896,35 @@ mod tests {
             model_number: b"v1".to_vec(),
             serial_number: vec![],
             device_name: vec![],
+            os_version: None,
+            primary_device_type: None,
+            secondary_device_type_list: vec![],
             uuid_e: None,
             essid: vec![],
         };
         store.push(entry);
         assert_eq!(store.len(), 1, "model_number alone counts as primary content");
+    }
+
+    #[test]
+    fn device_info_store_keeps_entry_with_only_primary_device_type() {
+        // Primary Device Type alone is primary content -- it identifies the
+        // device class even when no string fields are populated.
+        let mut store = DeviceInfoStore::new();
+        let entry = DeviceInfoEntry {
+            mac: MacAddr::from_bytes([0x11; 6]),
+            manufacturer: vec![],
+            model_name: vec![],
+            model_number: vec![],
+            serial_number: vec![],
+            device_name: vec![],
+            os_version: None,
+            primary_device_type: Some([0, 6, 0x00, 0x50, 0xF2, 0x04, 0, 1]),
+            secondary_device_type_list: vec![],
+            uuid_e: None,
+            essid: vec![],
+        };
+        store.push(entry);
+        assert_eq!(store.len(), 1, "primary_device_type alone counts as primary content");
     }
 }
