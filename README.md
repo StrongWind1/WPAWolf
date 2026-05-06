@@ -233,6 +233,41 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) §9 for the algorithm and the corpus co
 
 ---
 
+## Why a hash gets discarded
+
+`wpawolf`'s defaults are deliberately wide -- the operator filters at output time, not at extract time. Even so, four rejection paths in the current code can drop a candidate PMKID or EAPOL hash before it ever reaches an output file. Every rejection bumps a stats counter (visible in the closing banner) and, when `--log FILE` is configured, emits a structured line carrying the rejected bytes in lowercase hex so the source capture can be grepped for the exact sequence.
+
+A hash is discarded when **any** of the following is true:
+
+| # | Reason | Field | Counters | `--log` category | Spec exception |
+|---|--------|-------|----------|------------------|----------------|
+| 1 | Key Nonce is structurally broken: all-`0x00` (entropy starvation), all-`0xFF` (firmware flash-erase sentinel), or a short-period repeating pattern (`repeat_1` = every byte equal, `repeat_2` = 2-byte period, `repeat_4` = 4-byte period) -- none of these are HMAC outputs from a healthy stack | EAPOL Key Nonce, 32 B | `null_nonce_rejected`, `ff_nonce_rejected`, `repeat_nonce_rejected` | `[invalid_nonce] ... kind=<k> nonce_hex=<32 B hex>` | M4 NULL nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5 NOTE 9 and is **never** discarded; every other pattern still rejects on M4 |
+| 2 | Key MIC is structurally broken: same five patterns as above | EAPOL Key MIC, 16 B (most AKMs) or 24 B (SHA-384 family) | `null_mic_rejected`, `ff_mic_rejected`, `repeat_mic_rejected` | `[invalid_mic] ... kind=<k> mic_hex=<16/24 B hex>` | Only checked when the Key MIC flag (bit B8) is set, i.e. on M2 / M3 / M4. M1 has no MIC by spec and is **never** flagged |
+| 3 | PMKID is structurally broken: same five patterns as above | 16-byte PMKID at any of the 20 spec-defined extraction sites (M1 KDE, M2 RSN IE, AssocReq / ReassocReq, FT / FILS / PASN Auth, FT Action, Probe Request, Beacon, ProbeResp, Mesh Peering, OSEN IE) | `null_pmkid_rejected`, `ff_pmkid_rejected`, `repeat_pmkid_rejected` | `[invalid_pmkid] ... kind=<k> pmkid_hex=<16 B hex>` | None |
+| 4 | No SSID was ever observed for this AP across the whole run, so the hash line cannot be written without inventing an ESSID | ESSID at hash-emit time | `essids_not_found` | `[essid_not_found_summary] ap=<mac> dropped=<n> first_seen_us=<t> last_seen_us=<t>` (one per affected AP at end of run) | None -- happens when the capture started mid-handshake or the Beacon channel was missed |
+
+Reasons 1-3 fire at **extract time** (Phase 3); reason 4 fires at **emit time** (Phase 4). Real wire bytes from a healthy stack are HMAC outputs (PMKID, MIC) or cryptographically-random nonces, so any of the structural patterns above is firmware stub data, test fixtures, or a mid-flight bit-corruption event -- not crackable material.
+
+The `[invalid_*]` log lines are intended for forensic triage: an operator who wants to see *which* AP / STA / capture-time emitted the bad bytes can grep the log file by any of `kind=`, `ap=`, `sta=`, or the literal hex string. Example:
+
+```sh
+wpawolf --22000-out hashes.22000 --log run.log captures/
+grep -F 'kind=repeat_1' run.log | wc -l
+grep 'pmkid_hex=00000000000000000000000000000000' run.log | head
+```
+
+Things that are **not** rejected (despite some of them being unusual):
+
+- **WDS / 4-address relay frames** -- always processed; upstream `hcxpcapngtool` skips them without `--all`.
+- **EAPOL frames over 255 bytes** -- always emitted; upstream drops them via `EAPOL_AUTHLEN_OLD_MAX`.
+- **Cross-file pairing** -- M1 in file A pairs with M2 in file B.
+- **Legacy WPA1 vendor IE handshakes** -- emitted as Type 1.
+- **SSIDs with bytes in the ASCII C0 control range (`0x00..=0x1F`)** -- the SSID is still stored and emitted, but a non-fatal `[essid_control_bytes]` log line is written so the operator can audit the source frame. SSIDs that fail the spec-driven length / first-byte-zero gate (length 0, length > 32, or first byte = 0) are silently dropped as wildcard / hidden / spec-invalid; that drop has no `--log` line by design (the volume on noisy captures would be untriageable).
+
+For deeper detail on per-AKM hash routing, dedup behaviour, and the full Phase-1-through-Phase-5 stats catalogue, see [`ARCHITECTURE.md`](ARCHITECTURE.md) §4-§9.
+
+---
+
 ## Stats output
 
 Every run prints a closing summary to stderr. There is no toggle — `--quiet` only silences the per-frame progress lines. The Phase 4 and Phase 5 banners are the part most operators care about:
@@ -258,7 +293,7 @@ distinct hash types observed........................: 2
 - Output files are created lazily — configuring `--psk-sha384-out` on a capture with no SHA-384 sessions leaves no zero-byte artefact on disk.
 - Each "issue" stat is suffixed with **dropped**, **recovered**, or **diagnostic** so a real loss is distinguishable from a capture-quality note.
 
-Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs / ESSIDs, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source. A translation table is in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6.
+Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs, ESSID control-byte warnings, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source. A translation table is in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6. For a category-by-category list of every reason a hash gets discarded, see "Why a hash gets discarded" above.
 
 ---
 

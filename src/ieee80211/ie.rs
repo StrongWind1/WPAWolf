@@ -1191,14 +1191,13 @@ mod tests {
 
     #[test]
     fn wps_parse_real_capture_probe_response_body() {
-        // Reconstructs a real WPS Probe Response body observed in the
-        // /root/ALL_CAPS corpus from a TP-LINK TL-WR841N AP, augmented with
-        // synthetic OS Version (0x102D) and Secondary Device Type List
-        // (0x1055) attributes so all three new -D columns get exercised in
-        // the same body the production parser would walk. Field ordering and
-        // attribute layout match the wire-observed bytes 1:1; only the OS
-        // Version and Secondary list are inserted artificially because that
-        // particular AP did not emit them.
+        // Reconstructs a real WPS Probe Response body observed from a TP-LINK
+        // TL-WR841N AP, augmented with synthetic OS Version (0x102D) and
+        // Secondary Device Type List (0x1055) attributes so all three new -D
+        // columns get exercised in the same body the production parser would
+        // walk. Field ordering and attribute layout match the wire-observed
+        // bytes 1:1; only the OS Version and Secondary list are inserted
+        // artificially because that particular AP did not emit them.
         let mut body = Vec::new();
         body.extend_from_slice(&wps_attr(0x104A, &[0x10])); // Version
         body.extend_from_slice(&wps_attr(0x1044, &[0x02])); // WPS State

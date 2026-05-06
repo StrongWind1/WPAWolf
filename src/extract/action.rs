@@ -139,7 +139,7 @@ pub fn process_action(
             };
             for pmkid in pmkids {
                 if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                    logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
+                    logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                 }
                 pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,
@@ -189,7 +189,13 @@ pub fn process_action(
                     PmkidSource::MeshPeeringConfirm
                 };
                 if let Some(kind) = stats.check_pmkid_invalid(&pmkid_bytes) {
-                    logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
+                    logger.log_invalid_pmkid(
+                        timestamp_us,
+                        mac_hdr.ap.hex_lower(),
+                        mac_hdr.sta.hex_lower(),
+                        kind,
+                        &pmkid_bytes,
+                    );
                 }
                 pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::store::auxiliary::passes_hcx_essid_filter;
-use crate::types::{MacAddr, garbage_pattern_kind};
+use crate::types::MacAddr;
 
 /// A single ESSID observation with its first-seen timestamp and observation count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,13 +47,7 @@ impl EssidMap {
         Self::default()
     }
 
-    /// Records an SSID observation for `ap` at `timestamp`. Returns `Some(kind)`
-    /// when the SSID was rejected because it matched a garbage-pattern shape
-    /// (`"ff"`, `"repeat_1"`, `"repeat_2"`, `"repeat_4"` -- see
-    /// [`garbage_pattern_kind`]); the caller should bump the
-    /// `garbage_essid_rejected` counter and emit a `[invalid_essid]` log line.
-    /// Returns `None` when the SSID was accepted **or** silently rejected by
-    /// the legacy `passes_hcx_essid_filter` gate (length 0/>32, first-byte 0).
+    /// Records an SSID observation for `ap` at `timestamp`.
     ///
     /// If the same SSID bytes are already recorded for this AP, updates the stored
     /// timestamp if the new observation is earlier (preserves the earliest-seen time).
@@ -75,25 +69,22 @@ impl EssidMap {
     ///   salt cannot derive a PMK that matches any real network, so the hash
     ///   is uncrackable. Mirrors hcxtools `fileops.c:79`.
     ///
-    /// On top of that legacy gate, `wpawolf` rejects SSIDs whose byte run is a
-    /// garbage pattern: all-`0xFF`, all-same-byte (e.g. `0x55` * N), 2-byte
-    /// period (`5555AAAA`), or 4-byte period (`01020304` repeating). These are
-    /// firmware test fixtures that pad the SSID element to broadcast-time
-    /// length without carrying a real network name. Returning `Some(kind)` here
-    /// gives the caller the hook for the closing-summary stats counter and the
-    /// per-rejection log line.
+    /// SSIDs that contain ASCII C0 control bytes (`0x00..=0x1F`) but pass the
+    /// gate above are stored unchanged -- the cracker may still recover the
+    /// right PMK, and short-period repeating patterns or all-byte values are
+    /// not invariants of "garbage" for SSIDs the way they are for
+    /// cryptographic fields. The `extract::common::insert_essid` helper warns
+    /// the operator when it sees such an SSID; this method itself does no
+    /// garbage classification.
     ///
     /// The same gate is applied to `EssidSet` (`-E`) and `ProbeEssidSet` (`-R`)
     /// in `src/store/auxiliary.rs`, so admission is uniform across every store
     /// that participates in hash emission. `WordlistStore` (`-W`) keeps a broader
     /// rule (control-byte splitting, sub-`min_len` runs) because its purpose is
     /// leaked-text salvage, not hash-salt material.
-    pub fn insert(&mut self, ap: MacAddr, essid: Vec<u8>, timestamp: u64) -> Option<&'static str> {
+    pub fn insert(&mut self, ap: MacAddr, essid: Vec<u8>, timestamp: u64) {
         if !passes_hcx_essid_filter(&essid) {
-            return None;
-        }
-        if let Some(kind) = garbage_pattern_kind(&essid) {
-            return Some(kind);
+            return;
         }
         let entries = self.map.entry(ap).or_default();
         if let Some(existing) = entries.iter_mut().find(|e| e.essid == essid) {
@@ -107,7 +98,6 @@ impl EssidMap {
         } else {
             entries.push(EssidEntry { essid, timestamp, count: 1 });
         }
-        None
     }
 
     /// Returns the SSID for `ap` whose timestamp is closest to `target_timestamp`.
@@ -146,7 +136,7 @@ impl EssidMap {
     /// 1-6 times each). Without the filter, every variant produces an independent
     /// hashcat line during emit, blowing up output by 100x or more for affected APs.
     ///
-    /// Algorithm (matching the pseudocode reviewed against `/root/ALL_CAPS`):
+    /// Algorithm:
     ///
     /// ```text
     /// if num_ssids <= collapse_min:
@@ -271,12 +261,8 @@ impl EssidMap {
             for entry in entries {
                 // Reuse the same dedup-by-bytes / earliest-timestamp semantics as
                 // `insert`. The hcx-essid filter was already applied at original
-                // insert time, so re-checking here is a no-op for accepted
-                // entries. The garbage-pattern check is also no-op for entries
-                // already in the map (rejected entries never made it in to begin
-                // with), so the returned `Option<&'static str>` is uniformly
-                // `None` in this loop and is intentionally discarded.
-                let _ = self.insert(canon, entry.essid, entry.timestamp);
+                // insert time, so re-checking here is a no-op for accepted entries.
+                self.insert(canon, entry.essid, entry.timestamp);
             }
         }
         merged_link_macs
@@ -330,11 +316,11 @@ mod tests {
         // the new `repeat_1` garbage check and short-circuit before the
         // length gate, masking what this test is actually meant to assert.
         let oversized: Vec<u8> = (0..33u8).map(|i| b'A' + (i % 26)).collect();
-        let _ = m.insert(ap, oversized, 100);
+        m.insert(ap, oversized, 100);
         assert_eq!(m.resolve(&ap, 100), None, "33-byte SSID must be rejected");
         // Boundary: exactly 32 bytes is spec-valid and must be accepted.
         let at_limit: Vec<u8> = (0..32u8).map(|i| b'A' + (i % 26)).collect();
-        let _ = m.insert(ap, at_limit, 200);
+        m.insert(ap, at_limit, 200);
         assert!(m.resolve(&ap, 200).is_some(), "32-byte SSID is at the spec limit");
     }
 
@@ -502,46 +488,41 @@ mod tests {
     }
 
     #[test]
-    fn insert_all_ff_essid_rejected() {
-        // All-`0xFF` SSIDs are firmware sentinels, not real network names.
+    fn insert_all_ff_essid_accepted_no_garbage_filter() {
+        // wpawolf does NOT garbage-filter SSIDs. An all-`0xFF` SSID is unusual
+        // but not a hash invariant -- the cracker may still recover the right
+        // PMK from it. The store accepts it; the operator gets a separate
+        // control-byte warning at extract time only when the SSID contains
+        // bytes 0x00-0x1F, which all-`0xFF` does not satisfy.
         let mut m = EssidMap::new();
         let ap = mac(0xF0);
-        let kind = m.insert(ap, vec![0xFFu8; 16], 100);
-        assert_eq!(kind, Some("ff"), "all-`0xFF` SSID must be rejected with kind=ff");
-        assert_eq!(m.resolve(&ap, 100), None, "rejected SSID must not appear in the map");
-    }
-
-    #[test]
-    fn insert_repeat_byte_essid_rejected_when_long_enough() {
-        // 4+ bytes of the same byte trip `repeat_1`. Mirrors the "AAAA AAAA"
-        // firmware-stub shape some test fixtures use.
-        let mut m = EssidMap::new();
-        let ap = mac(0xF1);
-        let kind = m.insert(ap, vec![0x55u8; 8], 100);
-        assert_eq!(kind, Some("repeat_1"), "8 bytes of `0x55` must flag as repeat_1");
-        assert_eq!(m.resolve(&ap, 100), None);
+        m.insert(ap, vec![0xFFu8; 16], 100);
+        assert_eq!(m.resolve(&ap, 100), Some([0xFFu8; 16].as_slice()));
     }
 
     #[test]
     fn insert_short_uniform_essid_accepted() {
         // 1-3 byte SSIDs with all-same-byte ("X", "AA", "XXX") are legitimate
-        // and must NOT trigger the garbage check (length floor on `repeat_1`).
+        // network names -- the store stores them unchanged, no rejection.
         let mut m = EssidMap::new();
         let ap = mac(0xF2);
-        assert_eq!(m.insert(ap, b"X".to_vec(), 100), None, "1-byte 'X' must be accepted");
-        assert_eq!(m.insert(ap, b"AA".to_vec(), 200), None, "2-byte 'AA' must be accepted");
-        assert_eq!(m.insert(ap, b"XXX".to_vec(), 300), None, "3-byte 'XXX' must be accepted");
+        m.insert(ap, b"X".to_vec(), 100);
+        m.insert(ap, b"AA".to_vec(), 200);
+        m.insert(ap, b"XXX".to_vec(), 300);
+        assert_eq!(m.all_for_ap(&ap).len(), 3, "all three SSIDs must be retained");
     }
 
     #[test]
-    fn insert_period_2_essid_rejected() {
-        // 4-byte SSID with 2-byte period (`5555` -> 0x55,0x55,0x55,0x55) is
-        // covered by `repeat_1`; an actual 2-byte period needs distinct bytes.
-        // Use a 4-byte SSID with bytes 0x55,0xAA,0x55,0xAA.
+    fn insert_repeat_byte_essid_accepted_no_garbage_filter() {
+        // 8 bytes of `0x55` was previously rejected as `repeat_1` garbage; the
+        // store now stores any byte run that the legacy hcx gate accepts.
+        // Operators running into firmware-stub SSIDs surface them via the
+        // separate `[essid_control_bytes]` warning when control bytes are
+        // present (`0x55` is printable, so no warning fires here).
         let mut m = EssidMap::new();
-        let ap = mac(0xF3);
-        let kind = m.insert(ap, vec![0x55, 0xAA, 0x55, 0xAA], 100);
-        assert_eq!(kind, Some("repeat_2"), "0x55,0xAA period must flag as repeat_2");
+        let ap = mac(0xF1);
+        m.insert(ap, vec![0x55u8; 8], 100);
+        assert_eq!(m.resolve(&ap, 100), Some([0x55u8; 8].as_slice()));
     }
 
     #[test]

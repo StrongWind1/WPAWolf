@@ -416,12 +416,16 @@ pub struct Stats {
     /// 2-byte period, or 4-byte period). PMKIDs from a healthy stack are HMAC-SHA1 / HMAC-SHA256
     /// outputs, which are uniformly random.
     pub repeat_pmkid_rejected: u64,
-    /// SSIDs rejected because the byte run was a non-`null` non-`ff` garbage pattern
-    /// (all-same-byte, 2-byte period, or 4-byte period). Length-0 SSIDs and SSIDs whose
-    /// first byte is 0x00 are filtered earlier by `passes_hcx_essid_filter` and are NOT
-    /// counted here. Operators chasing real-world SSIDs that happen to look uniform
-    /// (e.g. "AAAA") will see the count surface them via `--log invalid_essid`.
-    pub garbage_essid_rejected: u64,
+    /// SSIDs that passed the spec-driven admission gate (length 1-32, first byte
+    /// non-zero) but contained at least one byte in `0x00..=0x1F` (the full
+    /// ASCII C0 control range, NUL through US -- every control character).
+    /// The SSID is stored and emitted unchanged -- a cracker may still
+    /// recover the right PMK -- but the operator gets a `[essid_control_bytes]`
+    /// log line with the SSID rendered in lowercase hex so they can audit
+    /// the source frame. SSIDs are NOT garbage-filtered the way nonces /
+    /// MICs / PMKIDs are; this counter is the warning surface, not a
+    /// rejection counter.
+    pub essid_control_bytes_warned: u64,
     /// Maximum time gap between any two EAPOL messages in the same (AP, STA) session (microseconds).
     /// Displayed in milliseconds. [hcxpcapngtool EAPOLTIME gap]
     pub eapol_time_gap_max_us: u64,
@@ -756,15 +760,6 @@ impl Stats {
             b"ff" => self.ff_mic_rejected += 1,
             _ => self.repeat_mic_rejected += 1,
         }
-    }
-
-    /// Bumps the SSID garbage-pattern rejection counter. NULL and `0xFF` SSIDs
-    /// are filtered earlier by `passes_hcx_essid_filter` (NULL via
-    /// first-byte-zero, `0xFF` via the same garbage-pattern detector at the
-    /// SSID admission gate); the counter here covers every SSID that slipped
-    /// past the legacy gate but trips the new repeating-pattern check.
-    pub const fn record_invalid_essid(&mut self, _kind: &str) {
-        self.garbage_essid_rejected += 1;
     }
 
     /// Records an EAPOL-Key frame's Key Descriptor Version into the appropriate counter.
@@ -1114,7 +1109,10 @@ impl Stats {
         nz!("  NULL PMKID rejected (placeholder; PMKID dropped)", self.null_pmkid_rejected);
         nz!("  0xFF PMKID rejected (PMKID dropped)", self.ff_pmkid_rejected);
         nz!("  garbage-pattern PMKID rejected (repeating period; PMKID dropped)", self.repeat_pmkid_rejected);
-        nz!("  garbage-pattern ESSID rejected (repeating period; SSID dropped)", self.garbage_essid_rejected);
+        nz!(
+            "  ESSID control-byte warnings (0x00-0x1F in body; SSID retained, [essid_control_bytes] log line emitted)",
+            self.essid_control_bytes_warned
+        );
         if self.eapol_time_gap_max_us > 0 {
             stat!("  session time gap max (ms)", self.eapol_time_gap_max_us / 1_000);
         }
@@ -1342,7 +1340,7 @@ mod tests {
         assert_eq!(s.null_pmkid_rejected, 0);
         assert_eq!(s.ff_pmkid_rejected, 0);
         assert_eq!(s.repeat_pmkid_rejected, 0);
-        assert_eq!(s.garbage_essid_rejected, 0);
+        assert_eq!(s.essid_control_bytes_warned, 0);
         assert!(s.last_file.is_empty());
         assert_eq!(s.input_file_count, 0);
         assert!(s.file_formats_seen.is_empty());

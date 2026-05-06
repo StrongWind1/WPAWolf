@@ -246,7 +246,7 @@ pub fn process_assoc_or_reassoc_req(
         let source = if is_assoc { PmkidSource::AssocRequest } else { PmkidSource::ReassocRequest };
         for pmkid in pmkids {
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
+                logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
             pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,
@@ -279,7 +279,13 @@ pub fn process_assoc_or_reassoc_req(
             if ie.id == 221 {
                 for pmkid in extract_pmkids_from_osen(ie.value) {
                     if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                        logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
+                        logger.log_invalid_pmkid(
+                            timestamp_us,
+                            mac_hdr.ap.hex_lower(),
+                            mac_hdr.sta.hex_lower(),
+                            kind,
+                            &pmkid,
+                        );
                     }
                     pmkid_store.add(PmkidEntry {
                         timestamp: timestamp_us,

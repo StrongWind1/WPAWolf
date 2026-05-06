@@ -81,11 +81,11 @@ pub fn process_data(
     // non-final fragments and orphan final fragments. Hardware glitches
     // occasionally set MoreFrag=1 or FragNum>0 on what is actually a complete
     // single-MPDU EAPOL frame; the pre-fragmentation pipeline emitted hashes
-    // for those, and removing that fallback caused a -3 hash regression on
-    // the /root/ALL_CAPS corpus. True multi-fragment first or middle pieces
-    // fail EAPOL parse on length / LLC mismatch, so the fall-through is safe;
-    // the global SipHash dedup suppresses any double-emit when reassembly
-    // later succeeds and the reconstructed MSDU parses too.
+    // for those, and removing that fallback caused a measurable hash
+    // regression in corpus testing. True multi-fragment first or middle
+    // pieces fail EAPOL parse on length / LLC mismatch, so the fall-through
+    // is safe; the global SipHash dedup suppresses any double-emit when
+    // reassembly later succeeds and the reconstructed MSDU parses too.
     let reassembled: Option<Vec<u8>> = if mac_hdr.fragment_number == 0 && !mac_hdr.more_fragments {
         None // unfragmented frame: nothing to reassemble
     } else if mac_hdr.more_fragments {
@@ -173,9 +173,9 @@ pub fn process_data(
     // `eapol::parse` rejects it harmlessly. For frames with the A-MSDU bit
     // glitched on what is actually a complete single-MPDU EAPOL frame, this
     // single pass recovers the hash that subframe iteration would otherwise
-    // lose (-1 hash regression observed on the ALL_CAPS corpus before this
-    // dual path was added; same pattern as the fragmentation fallback in
-    // store::fragments).
+    // lose (single-frame hash regression observed in corpus testing before
+    // this dual path was added; same pattern as the fragmentation fallback
+    // in store::fragments).
     //
     // Then, when the A-MSDU bit is set, also iterate subframes. Each subframe
     // payload is its own LLC/SNAP+MSDU; EAPOL hidden in subframes 2..N would
@@ -251,13 +251,13 @@ fn process_msdu_payload(
         // (most frames trigger no sentinel) builds no `String` at all, and a
         // firing branch only allocates the single log-line `String` inside the
         // logger.
-        if let Some(kind) = t.nonce_garbage {
+        if let Some((kind, nonce)) = t.nonce_garbage {
             stats.record_invalid_nonce(kind);
-            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
+            logger.log_invalid_nonce(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &nonce);
         }
-        if let Some(kind) = t.mic_garbage {
+        if let Some((kind, mic)) = t.mic_garbage {
             stats.record_invalid_mic(kind);
-            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind);
+            logger.log_invalid_mic(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, mic.as_slice());
         }
     }
     // Surface the preauth EtherType (0x88C7) separately from regular EAPOL (0x888E)

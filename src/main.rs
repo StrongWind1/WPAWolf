@@ -179,13 +179,19 @@ struct Cli {
     /// trailing packet), `skipped_input` (input file whose magic bytes did not
     /// match any supported capture format -- typically a sub-4-byte stub left in a
     /// watch directory; counted but silenced on stderr), `invalid_nonce` /
-    /// `invalid_mic` / `invalid_pmkid` / `invalid_essid` (NULL, all-`0xFF`, or
-    /// short-period repeating-byte garbage rejected at extract time -- nonces and
-    /// MICs from the EAPOL Key parser, PMKIDs from every PMKID-bearing IE, SSIDs
-    /// from every SSID-extract site). Per-category field layout matches `src/log.rs`:
-    /// frame-bearing categories lead with `timestamp_us`, others (e.g.
-    /// `unknown_akm`, `essid_not_found_summary`) carry only the event-specific
-    /// field(s).
+    /// `invalid_mic` / `invalid_pmkid` (NULL, all-`0xFF`, or short-period
+    /// repeating-byte garbage rejected at extract time -- nonces and MICs from
+    /// the EAPOL Key parser, PMKIDs from every PMKID-bearing IE; each line
+    /// ends with `nonce_hex=` / `mic_hex=` / `pmkid_hex=` carrying the
+    /// rejected bytes in lowercase hex so an operator can grep the source
+    /// capture for the exact sequence), `essid_control_bytes` (warning, not
+    /// a discard: SSID body contained at least one byte in the ASCII C0
+    /// control range `0x00..=0x1F` -- the SSID is still stored and emitted,
+    /// the line carries `essid_hex=` in lowercase hex so an operator can
+    /// audit the source frame). Per-category field layout matches
+    /// `src/log.rs`: frame-bearing categories lead with `timestamp_us`,
+    /// others (e.g. `unknown_akm`, `essid_not_found_summary`) carry only the
+    /// event-specific field(s).
     #[arg(long)]
     log: Option<std::path::PathBuf>,
 

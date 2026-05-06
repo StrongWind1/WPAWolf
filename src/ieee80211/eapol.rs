@@ -12,6 +12,9 @@
 use crate::ieee80211::frame::FrameDirection;
 use crate::types::{MicBytes, MsgType, garbage_pattern_kind};
 
+/// Width in bytes of the Key Nonce field. [IEEE 802.11-2024] §12.7.2
+const NONCE_LEN: usize = 32;
+
 // --- LLC/SNAP constants [IEEE 802.11-2012 Annex P, Table P-2] ---
 
 /// DSAP byte in the LLC header: value `0xAA` (SNAP extension).
@@ -100,21 +103,26 @@ const LLC_SNAP_LEN: usize = 8;
 ///
 /// Each field carries the kind of garbage pattern detected (`"null"`, `"ff"`,
 /// `"repeat_1"`, `"repeat_2"`, `"repeat_4"` -- see [`garbage_pattern_kind`])
-/// or `None` when the field is structurally clean. Callers route the kind
-/// string into stats counters and the `[invalid_*]` log categories.
+/// paired with the raw bytes that triggered the rejection, or `None` when
+/// the field is structurally clean. Callers route the kind string into stats
+/// counters and pass the bytes into the `[invalid_*]` log categories so the
+/// rejected value is preserved as `nonce_hex=` / `mic_hex=` for forensic
+/// traceability.
 ///
 /// M4 NULL nonce and M1 NULL MIC are spec-valid and are **never** flagged
 /// here -- see field docs for the governing spec citation.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InvalidCheck {
-    /// Garbage-pattern kind detected in the Key Nonce, or `None` when clean.
-    /// M4 frames are exempted from the NULL check per [IEEE 802.11-2024] §12.7.6.5
-    /// (spec mandates an all-zero M4 nonce); every other pattern still flags.
-    pub nonce_garbage: Option<&'static str>,
-    /// Garbage-pattern kind detected in the Key MIC when the Key MIC flag (bit B8)
-    /// is set, or `None` when clean. M1 frames have no MIC by spec and are never
-    /// flagged here -- the gate is `key_mic_flag`, not `msg_type`.
-    pub mic_garbage: Option<&'static str>,
+    /// Garbage-pattern kind detected in the Key Nonce paired with the 32-byte
+    /// nonce that triggered the rejection, or `None` when clean. M4 frames are
+    /// exempted from the NULL check per [IEEE 802.11-2024] §12.7.6.5 (spec
+    /// mandates an all-zero M4 nonce); every other pattern still flags.
+    pub nonce_garbage: Option<(&'static str, [u8; NONCE_LEN])>,
+    /// Garbage-pattern kind detected in the Key MIC paired with the MIC bytes
+    /// (16 or 24 wide per AKM) when the Key MIC flag (bit B8) is set, or
+    /// `None` when clean. M1 frames have no MIC by spec and are never flagged
+    /// here -- the gate is `key_mic_flag`, not `msg_type`.
+    pub mic_garbage: Option<(&'static str, MicBytes)>,
 }
 
 /// Checks for invalid field values (NULL, `0xFF`, repeating patterns) in a raw frame body.
@@ -164,16 +172,25 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
     let is_likely_m4 = !key_ack && key_mic_flag && kd_len == 0;
 
     // Nonce at eapol offset 17. [IEEE 802.11-2024] §12.7.2
-    let nonce = data.get(LLC_SNAP_LEN + OFF_NONCE..LLC_SNAP_LEN + OFF_NONCE + 32);
+    let nonce_slice = data.get(LLC_SNAP_LEN + OFF_NONCE..LLC_SNAP_LEN + OFF_NONCE + NONCE_LEN);
     // For M4, NULL nonce is spec-compliant -- map "null" to None there. Every other
     // garbage pattern (ff, repeat_1, repeat_2, repeat_4) still flags on M4.
-    let nonce_garbage = nonce.and_then(garbage_pattern_kind).filter(|&kind| !(is_likely_m4 && kind == "null"));
+    let nonce_garbage = nonce_slice
+        .and_then(|s| {
+            let arr: [u8; NONCE_LEN] = s.try_into().ok()?;
+            garbage_pattern_kind(&arr).map(|kind| (kind, arr))
+        })
+        .filter(|(kind, _)| !(is_likely_m4 && *kind == "null"));
 
     // MIC at eapol offset 81 with width 16 or 24. Only relevant when Key MIC flag
     // is set (M2/M3/M4). M1 MIC is legitimately NULL per spec and is never flagged.
     // [IEEE 802.11-2024] §12.7.2 Table 12-11
-    let mic = data.get(LLC_SNAP_LEN + OFF_MIC..LLC_SNAP_LEN + OFF_MIC + mic_width);
-    let mic_garbage = if key_mic_flag { mic.and_then(garbage_pattern_kind) } else { None };
+    let mic_slice = data.get(LLC_SNAP_LEN + OFF_MIC..LLC_SNAP_LEN + OFF_MIC + mic_width);
+    let mic_garbage = if key_mic_flag {
+        mic_slice.and_then(MicBytes::from_slice).and_then(|mb| mb.garbage_pattern_kind().map(|kind| (kind, mb)))
+    } else {
+        None
+    };
 
     InvalidCheck { nonce_garbage, mic_garbage }
 }

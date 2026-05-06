@@ -16,18 +16,30 @@ use crate::store::{
 };
 use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
 
-// --- ESSID admission with structured rejection reporting ---
+// --- ESSID admission with control-byte warning ---
 
-/// Inserts `essid` into `essid_map` for `ap`, routing garbage-pattern rejections
-/// through the stats counters and the `[invalid_essid]` log category.
+/// Inserts `essid` into `essid_map` for `ap`, warning the operator when the
+/// SSID contains any ASCII C0 control byte (`0x00..=0x1F`, NUL through US).
+///
+/// Two stages:
+///   1. **Spec-driven discard.** [IEEE 802.11-2024] §9.4.2.2 caps SSID length at
+///      32 octets; longer bodies are bit-flipped IE Length parses with no
+///      salt value. Length-zero is the spec wildcard and first-byte-zero is the
+///      hcx-mirrored hidden-network sentinel. All three are filtered silently
+///      inside `EssidMap::insert` -- they have dedicated upstream counters
+///      (`beacon_ssid_wildcard`, `beacon_ssid_oversized`, `beacon_ssid_zeroed`)
+///      and surface there.
+///   2. **Control-byte warning.** SSIDs that pass the spec gate but contain any
+///      byte in the ASCII C0 control range `0x00..=0x1F` (NUL through US --
+///      every control character) are stored and emitted as-is -- the cracker
+///      may still recover the right PMK -- but a `[essid_control_bytes]` log
+///      line is emitted with the SSID rendered in lowercase hex so the
+///      operator can audit the source frame. The `essid_control_bytes_warned`
+///      stats counter ticks on each warning; output behaviour is unchanged.
 ///
 /// Wraps `EssidMap::insert` so every SSID-extract site (Beacon, Probe Request /
 /// Response, Association / Reassociation Request, Action Measurement,
-/// OWE Transition Mode) reports rejections uniformly. Length-zero / first-byte-
-/// zero SSIDs are filtered silently by the legacy hcx admission gate inside
-/// `EssidMap::insert` and do **not** route through this reporter -- they have
-/// dedicated upstream counters (`beacon_ssid_wildcard`, `beacon_ssid_zeroed`)
-/// for diagnostic visibility.
+/// OWE Transition Mode) raises the warning uniformly.
 pub fn insert_essid(
     essid_map: &mut EssidMap,
     ap: MacAddr,
@@ -36,10 +48,17 @@ pub fn insert_essid(
     stats: &mut Stats,
     logger: &mut Logger,
 ) {
-    if let Some(kind) = essid_map.insert(ap, essid, timestamp_us) {
-        stats.record_invalid_essid(kind);
-        logger.log_invalid_essid(timestamp_us, ap.hex_lower(), kind);
+    // Warn before insert so the warning fires whether or not the SSID gates
+    // through (the gate at length 0 / >32 / first byte 0 is already covered
+    // by upstream counters; we only warn for SSIDs that survive the gate).
+    // To stay aligned with what actually lands in the map, reproduce the
+    // gate here -- a one-line check, cheap enough to repeat.
+    let passes_gate = !essid.is_empty() && essid.len() <= 32 && essid.first() != Some(&0);
+    if passes_gate && essid.iter().any(|&b| b <= 0x1F) {
+        stats.essid_control_bytes_warned = stats.essid_control_bytes_warned.saturating_add(1);
+        logger.log_essid_control_bytes(timestamp_us, ap.hex_lower(), &essid);
     }
+    essid_map.insert(ap, essid, timestamp_us);
 }
 
 // --- Management frame subtype constants ---
@@ -294,7 +313,7 @@ pub fn store_eapol_key(
     // M1 PMKID from Key Data KDE. [IEEE 802.11-2024] §12.7.2
     if let Some(pmkid) = key.pmkid {
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
+            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         pmkid_store.add(PmkidEntry {
             timestamp: timestamp_us,
@@ -321,7 +340,7 @@ pub fn store_eapol_key(
                 if let Some(rsn) = parse_rsn_ie(ie.value) {
                     for pmkid in rsn.pmkids {
                         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind);
+                            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                         }
                         pmkid_store.add(PmkidEntry {
                             timestamp: timestamp_us,
@@ -548,6 +567,83 @@ mod tests {
         frame.extend_from_slice(&kd_len.to_be_bytes());
         frame.extend_from_slice(key_data_extra);
         eapol::parse(&frame, None).expect("test EAPOL frame must parse")
+    }
+
+    // --- insert_essid: control-byte warning ---
+
+    #[test]
+    fn insert_essid_clean_ssid_no_warning() {
+        // A printable SSID must store and emit no warning.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        insert_essid(&mut essid_map, mac(0x11), b"WolfNet".to_vec(), 1000, &mut stats, &mut logger);
+        assert_eq!(essid_map.resolve(&mac(0x11), 1000), Some(b"WolfNet".as_slice()));
+        assert_eq!(stats.essid_control_bytes_warned, 0);
+    }
+
+    #[test]
+    fn insert_essid_control_byte_in_body_warns_but_stores() {
+        // SSID with an embedded control byte (any byte 0x00..=0x1F) must:
+        //   1. still be stored (the cracker may recover the right PMK),
+        //   2. bump `essid_control_bytes_warned`.
+        // First-byte 0 is a separate hidden-network discard and never reaches
+        // the warning path; we exercise an embedded control byte.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        let essid = vec![b'W', b'o', b'l', 0x07, b'f', b'N', b'e', b't']; // BEL byte at index 3
+        insert_essid(&mut essid_map, mac(0x12), essid.clone(), 2000, &mut stats, &mut logger);
+        assert_eq!(essid_map.resolve(&mac(0x12), 2000), Some(essid.as_slice()), "SSID must still be stored");
+        assert_eq!(stats.essid_control_bytes_warned, 1, "warning counter must tick once");
+    }
+
+    #[test]
+    fn insert_essid_us_byte_is_top_of_control_range_warns() {
+        // 0x1F (US, Unit Separator) is the highest byte in the C0 control
+        // range; pin the upper bound of the warning gate.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        let essid = vec![b'A', 0x1F, b'B'];
+        insert_essid(&mut essid_map, mac(0x15), essid, 5000, &mut stats, &mut logger);
+        assert_eq!(stats.essid_control_bytes_warned, 1, "0x1F must trip the warning");
+    }
+
+    #[test]
+    fn insert_essid_space_byte_just_above_control_range_no_warning() {
+        // 0x20 (space) is the first printable byte and must NOT trigger.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        let essid = vec![b'M', b'y', 0x20, b'A', b'P'];
+        insert_essid(&mut essid_map, mac(0x16), essid, 6000, &mut stats, &mut logger);
+        assert_eq!(stats.essid_control_bytes_warned, 0, "0x20 (space) is printable; no warning");
+    }
+
+    #[test]
+    fn insert_essid_short_uniform_no_warning() {
+        // A 4-byte all-`0x55` SSID has no control bytes and must NOT warn --
+        // the previous garbage-pattern rejection has been retired.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        insert_essid(&mut essid_map, mac(0x13), vec![0x55u8; 4], 3000, &mut stats, &mut logger);
+        assert_eq!(essid_map.resolve(&mac(0x13), 3000), Some([0x55u8; 4].as_slice()));
+        assert_eq!(stats.essid_control_bytes_warned, 0);
+    }
+
+    #[test]
+    fn insert_essid_oversized_discarded_no_warning() {
+        // 33-byte SSID is > spec max -- discarded by the legacy gate. The
+        // control-byte warning path must NOT fire for SSIDs the gate drops.
+        let mut essid_map = EssidMap::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        let oversized: Vec<u8> = (0..33u8).map(|i| b'A' + (i % 26)).collect();
+        insert_essid(&mut essid_map, mac(0x14), oversized, 4000, &mut stats, &mut logger);
+        assert_eq!(essid_map.resolve(&mac(0x14), 4000), None, "oversized SSID must be discarded");
+        assert_eq!(stats.essid_control_bytes_warned, 0);
     }
 
     #[test]

@@ -21,21 +21,31 @@
 //!   triage detail goes here.
 //! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3),
 //!   all-`0xFF`, or a short-period repeating pattern (`repeat_1` / `repeat_2`
-//!   / `repeat_4`). M4 NULL nonce is spec-valid and is NOT discarded.
+//!   / `repeat_4`). M4 NULL nonce is spec-valid and is NOT discarded. The
+//!   line carries `nonce_hex=` (32 bytes lowercase hex) so the rejected
+//!   bytes are preserved for forensic triage.
 //! - `invalid_mic`        -- EAPOL frame discarded: MIC was NULL, all-`0xFF`, or
 //!   a short-period repeating pattern when the Key MIC flag was set (M2/M3/M4).
+//!   The line carries `mic_hex=` (16 or 24 bytes lowercase hex per AKM).
 //! - `invalid_pmkid`      -- PMKID discarded: NULL, all-`0xFF`, or short-period
-//!   repeating pattern.
-//! - `invalid_essid`      -- SSID discarded: byte run was all-`0xFF`, all-same-byte,
-//!   or a short-period repeating pattern. Length-0 and first-byte-zero SSIDs
-//!   are filtered silently by the legacy hcx admission gate and are NOT logged.
+//!   repeating pattern. The line carries `pmkid_hex=` (16 bytes lowercase hex).
+//! - `essid_control_bytes` -- SSID warning, **not** a discard: the SSID byte run
+//!   contained at least one byte in `0x00..=0x1F` (the full ASCII C0 control
+//!   range, NUL through US -- every control character). The SSID is still
+//!   stored and emitted; the line is for operator audit, with `essid_hex=`
+//!   carrying the raw bytes in lowercase hex. SSIDs that fail the spec-driven
+//!   length / first-byte-zero gate are discarded silently by upstream
+//!   counters and are NOT logged here.
 //!
 //! Line format: `[category] <category-specific fields...>`. Each `Logger::log_*`
 //! method defines its own field layout -- frame-bearing categories
 //! (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`,
-//! `invalid_pmkid`, `invalid_essid`) lead with `timestamp_us`; the rest carry
-//! only the field(s) relevant to the event (e.g. `unknown_akm` carries just
-//! the AKM byte).
+//! `invalid_pmkid`, `essid_control_bytes`) lead with `timestamp_us`; the rest
+//! carry only the field(s) relevant to the event (e.g. `unknown_akm` carries
+//! just the AKM byte). Discard categories (`invalid_nonce`, `invalid_mic`,
+//! `invalid_pmkid`, `essid_control_bytes`) end with a `*_hex=` field carrying
+//! the rejected bytes in lowercase hex so an operator can grep the source
+//! capture for the exact value.
 //! Only opened when `--log` is specified on the CLI; otherwise every method is
 //! a no-op.
 
@@ -114,60 +124,86 @@ impl Logger {
 
     /// Logs an EAPOL-Key frame whose Key Nonce was rejected as a sentinel value.
     ///
-    /// `kind` is `"null"` (all-`0x00` nonce in M1/M2/M3 -- spec violation) or
-    /// `"ff"` (all-`0xFF` nonce in any message -- firmware flash-erase pattern).
-    /// M4 NULL nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5 and is NOT logged.
+    /// `kind` is one of `"null"` (all-`0x00` nonce in M1/M2/M3 -- spec violation),
+    /// `"ff"` (all-`0xFF` nonce in any message -- firmware flash-erase pattern),
+    /// or `"repeat_1"` / `"repeat_2"` / `"repeat_4"` (short-period repeating
+    /// patterns indicative of firmware stub or test-fixture data). M4 NULL
+    /// nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5 and is NOT logged.
+    /// `nonce` is the rejected 32-byte Key Nonce; the line carries it as
+    /// `nonce_hex=` in lowercase hex so the operator can grep the source
+    /// capture for the exact bytes.
     pub fn log_invalid_nonce(
         &mut self,
         timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         kind: &str,
+        nonce: &[u8],
     ) {
-        self.write_line(&format!("[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
+        let nonce_hex = render_lower_hex(nonce);
+        self.write_line(&format!(
+            "[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} nonce_hex={nonce_hex}"
+        ));
     }
 
     /// Logs an EAPOL-Key frame whose Key MIC was rejected as a sentinel value.
     ///
-    /// `kind` is `"null"` (all-`0x00`) or `"ff"` (all-`0xFF`). Only fires when the Key
-    /// MIC flag (Key Information bit B8) is set, i.e. M2 / M3 / M4. M1 has no MIC by
-    /// spec and is never logged here.
+    /// `kind` is one of `"null"` / `"ff"` / `"repeat_1"` / `"repeat_2"` /
+    /// `"repeat_4"` (see [`Self::log_invalid_nonce`]). Only fires when the Key
+    /// MIC flag (Key Information bit B8) is set, i.e. M2 / M3 / M4. M1 has no
+    /// MIC by spec and is never logged here. `mic` is the rejected MIC bytes
+    /// (16 or 24 wide per AKM); rendered as `mic_hex=` in lowercase hex.
     pub fn log_invalid_mic(
         &mut self,
         timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         kind: &str,
+        mic: &[u8],
     ) {
-        self.write_line(&format!("[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
+        let mic_hex = render_lower_hex(mic);
+        self.write_line(&format!(
+            "[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} mic_hex={mic_hex}"
+        ));
     }
 
-    /// Logs a PMKID rejected as a sentinel value (all-NULL or all-`0xFF`).
+    /// Logs a PMKID rejected as a sentinel or repeating-pattern value.
     ///
-    /// `kind` is `"null"` (AP placeholder meaning "no cached PMK") or `"ff"` (firmware
-    /// flash-erase sentinel). Both have no cracking value. Fires from every PMKID
-    /// extraction site (M1 KDE, M2 RSN IE, `AssocReq`, `ReassocReq`, FT/FILS/PASN Auth,
-    /// FT Action frames, Probe Request, Beacon, `ProbeResp`, Mesh Peering, OSEN IE).
+    /// `kind` is one of `"null"` (AP placeholder meaning "no cached PMK"),
+    /// `"ff"` (firmware flash-erase sentinel), or `"repeat_1"` / `"repeat_2"`
+    /// / `"repeat_4"` (short-period repeating patterns). Fires from every
+    /// PMKID extraction site (M1 KDE, M2 RSN IE, `AssocReq`, `ReassocReq`,
+    /// FT/FILS/PASN Auth, FT Action frames, Probe Request, Beacon,
+    /// `ProbeResp`, Mesh Peering, OSEN IE). `pmkid` is the rejected 16-byte
+    /// PMKID; rendered as `pmkid_hex=` in lowercase hex.
     pub fn log_invalid_pmkid(
         &mut self,
         timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         kind: &str,
+        pmkid: &[u8],
     ) {
-        self.write_line(&format!("[invalid_pmkid] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind}"));
+        let pmkid_hex = render_lower_hex(pmkid);
+        self.write_line(&format!(
+            "[invalid_pmkid] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
+        ));
     }
 
-    /// Logs an SSID dropped because its byte run matched a garbage shape that
-    /// would emit an uncrackable hash line (all-`0xFF`, all-same-byte, 2-byte
-    /// period, 4-byte period). Length-zero / first-byte-zero SSIDs are filtered
-    /// silently by the legacy hcx admission gate and are NOT logged here.
-    /// `kind` is the pattern identifier returned by
-    /// [`garbage_pattern_kind`](crate::types::garbage_pattern_kind). Fires from
-    /// every SSID-extract site (Beacon, Probe Request / Response, Association /
+    /// Logs an SSID warning when the byte run contains at least one byte in
+    /// the `0x00..=0x1F` ASCII C0 control range (NUL through US -- every
+    /// control character). The SSID itself is stored and emitted -- the
+    /// cracker may still recover the right PMK -- but the operator may want
+    /// to audit the source frame because such bytes are rare in production
+    /// network names and often indicate a bit-flipped or test-injected SSID.
+    /// The line carries the SSID rendered in lowercase hex (`essid_hex=...`)
+    /// so an operator can search the source capture by raw byte sequence
+    /// rather than by potentially-unprintable rendering. Fires from every
+    /// SSID-extract site (Beacon, Probe Request / Response, Association /
     /// Reassociation Request, Action Measurement IE, OWE Transition Mode).
-    pub fn log_invalid_essid(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, kind: &str) {
-        self.write_line(&format!("[invalid_essid] {timestamp_us} ap={ap_hex} kind={kind}"));
+    pub fn log_essid_control_bytes(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, essid: &[u8]) {
+        let essid_hex = render_lower_hex(essid);
+        self.write_line(&format!("[essid_control_bytes] {timestamp_us} ap={ap_hex} essid_hex={essid_hex}"));
     }
 
     /// Logs a per-file capture read error.
@@ -215,6 +251,22 @@ impl Logger {
             let _ = writeln!(w, "{line}");
         }
     }
+}
+
+/// Renders `bytes` as a lowercase-hex `String` (two chars per byte, no
+/// separators). Used by every discard-category logger so an operator can grep
+/// the source capture for the exact byte sequence that triggered the drop.
+fn render_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        #[allow(clippy::indexing_slicing, reason = "HEX is a fixed 16-byte array; nibble indices are always 0..16")]
+        {
+            hex.push(HEX[(b >> 4) as usize] as char);
+            hex.push(HEX[(b & 0x0F) as usize] as char);
+        }
+    }
+    hex
 }
 
 // --- Unit tests ---
@@ -299,6 +351,87 @@ mod tests {
             contents
                 .contains("[capture_read_error] path=/captures/304.pcap reason=pcap packet data: need 30 bytes, got 0"),
             "missing capture_read_error line; got: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_lower_hex_empty_returns_empty() {
+        assert_eq!(render_lower_hex(&[]), "");
+    }
+
+    #[test]
+    fn render_lower_hex_known_bytes() {
+        // Round-trips every nibble pair through the lookup table; locks the
+        // exact byte ordering callers grep for.
+        assert_eq!(render_lower_hex(&[0x00, 0x0F, 0xF0, 0xFF]), "000ff0ff");
+        assert_eq!(render_lower_hex(b"AB"), "4142");
+    }
+
+    #[test]
+    fn writes_invalid_nonce_with_hex() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_invalid_nonce.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            // Sample garbage nonce: alternating 0x12 / 0x34 -- the test covers
+            // the line layout, not the rejection logic (which is tested in
+            // ieee80211::eapol).
+            let nonce = [0x12u8, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34];
+            logger.log_invalid_nonce(7_000, "aabbccddeeff", "112233445566", "repeat_2", &nonce);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(
+            contents.contains(
+                "[invalid_nonce] 7000 ap=aabbccddeeff sta=112233445566 kind=repeat_2 nonce_hex=1234123412341234"
+            ),
+            "missing invalid_nonce line with nonce_hex; got: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn writes_invalid_mic_with_hex() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_invalid_mic.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            let mic = [0xFFu8; 16];
+            logger.log_invalid_mic(8_000, "aabbccddeeff", "112233445566", "ff", &mic);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(
+            contents.contains(
+                "[invalid_mic] 8000 ap=aabbccddeeff sta=112233445566 kind=ff \
+                 mic_hex=ffffffffffffffffffffffffffffffff"
+            ),
+            "missing invalid_mic line with mic_hex; got: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn writes_invalid_pmkid_with_hex() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_invalid_pmkid.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            let pmkid = [0u8; 16];
+            logger.log_invalid_pmkid(9_000, "aabbccddeeff", "112233445566", "null", &pmkid);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(
+            contents.contains(
+                "[invalid_pmkid] 9000 ap=aabbccddeeff sta=112233445566 kind=null \
+                 pmkid_hex=00000000000000000000000000000000"
+            ),
+            "missing invalid_pmkid line with pmkid_hex; got: {contents}"
         );
         let _ = std::fs::remove_file(&tmp);
     }
