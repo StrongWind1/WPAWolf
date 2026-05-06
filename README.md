@@ -67,7 +67,7 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 
 Each row above is a documented `hcxpcapngtool` default, not a bug. The C tool's policy is appropriate for a feed into a shared cracking pool; `wpawolf`'s policy is appropriate for one-off analysis where the operator is closer to the capture and wants to choose the filters.
 
-**Highlights.** `wpawolf` is pure-Rust (`#![forbid(unsafe_code)]`, two runtime crates: `flate2` and `clap`), parallelises pairing across CPU cores via `std::thread::scope` with LPT round-robin, parses A-MSDU subframes and reassembles MSDU fragments, strips radiotap FCS tails, extracts PMKIDs from all 20 spec-defined locations, rejects every garbage-pattern shape (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) on nonces / MICs / PMKIDs / ESSIDs, and reconciles vendor AKM quirks against the wire-level Key Descriptor Version. 786 tests guard the behaviour; `make check-all` runs zero-warning under strict clippy.
+**Highlights.** `wpawolf` is pure-Rust (`#![forbid(unsafe_code)]`, two runtime crates: `flate2` and `clap`), parallelises pairing across CPU cores via `std::thread::scope` with LPT round-robin, parses A-MSDU subframes and reassembles MSDU fragments, strips radiotap FCS tails, extracts PMKIDs from all 20 spec-defined locations, rejects every garbage-pattern shape (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) on nonces / MICs / PMKIDs (ESSIDs are not garbage-filtered; bytes in the ASCII C0 control range surface as a non-fatal `[essid_control_bytes]` warning instead), and reconciles vendor AKM quirks against the wire-level Key Descriptor Version. 796 tests guard the behaviour; `make check-all` runs zero-warning under strict clippy.
 
 ---
 
