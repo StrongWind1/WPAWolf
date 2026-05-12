@@ -38,12 +38,25 @@ pub struct PairConfig {
     pub time_check_enabled: bool,
     /// Whether to apply the replay-counter (RC drift) constraint. Default: false (unfiltered).
     pub rc_drift_enabled: bool,
+    /// Whether to run the post-collapse NC-dedup pass.
+    ///
+    /// When `true`, pairs sharing `(ap, sta, eapol_frame, mic, combo_type)` and whose
+    /// trailing nonce bytes fit within `nc_tolerance` are collapsed to a single
+    /// survivor with `FLAG_NC` set, so hashcat's `--nonce-error-corrections` (default
+    /// 8) recovers the remaining variants at MIC-verify time. Default: `false`.
+    pub nc_dedup_enabled: bool,
+    /// Maximum span (`max - min`) on the trailing nonce bytes within which two pairs
+    /// are treated as the same logical nonce by NC-dedup. Default: 8, matching
+    /// hashcat's `NONCE_ERROR_CORRECTIONS=8` so the symmetric `survivor +/- 4`
+    /// iteration on the cracker side covers the full cluster span when the survivor
+    /// sits at the sorted-median index.
+    pub nc_tolerance: u8,
 }
 
 impl Default for PairConfig {
     /// Returns the default unfiltered pairing config.
     ///
-    /// Unfiltered: no time check, no RC constraint, all 6 combos emitted.
+    /// Unfiltered: no time check, no RC constraint, no NC-dedup, all 6 combos emitted.
     /// Invalid nonce/MIC values are always rejected at parse time (not controlled here).
     fn default() -> Self {
         Self {
@@ -52,6 +65,8 @@ impl Default for PairConfig {
             all_combos: true,          // unfiltered: all 6 combos emitted
             time_check_enabled: false, // unfiltered: no time filter
             rc_drift_enabled: false,   // unfiltered: no RC drift filter
+            nc_dedup_enabled: false,   // unfiltered: NC clustering off
+            nc_tolerance: 8,           // matches hashcat NONCE_ERROR_CORRECTIONS default
         }
     }
 }
@@ -600,6 +615,8 @@ mod tests {
             all_combos: true,
             time_check_enabled: true,
             eapol_timeout_us: 5_000_000,
+            nc_dedup_enabled: false,
+            nc_tolerance: 8,
         };
         let pairs = generate(ap(), sta(), &msgs, &tight);
         // With rc_drift active and tolerance=8, the pair should be found with NC set.

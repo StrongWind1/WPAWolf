@@ -302,6 +302,45 @@ struct Cli {
     #[arg(long)]
     dedup_hash_combos: bool,
 
+    /// [output filter] collapse near-identical-nonce siblings to one survivor
+    ///
+    /// Two states (boolean flag, no argument):
+    ///   * flag absent   -> off (every observed nonce ships as its own line, the wpawolf default)
+    ///   * `--nc-dedup`  -> on (collapse per (AP, STA, EAPOL frame, MIC, combo) cluster
+    ///     to a single survivor with `FLAG_NC` set in the `message_pair` byte)
+    ///
+    /// Some firmware emits dozens of WPA*02* lines for one (AP, STA) that share the
+    /// same MIC and EAPOL frame and differ only in the trailing bytes of the
+    /// `ANonce`. Hashcat with the default `--nonce-error-corrections=8` recovers all
+    /// of them from one representative line by iterating `+/- 4` on the trailing
+    /// byte at MIC-verify time, but only if wpawolf emits the representative tagged
+    /// with `FLAG_NC` (`0x80`). This flag enables that clustering pass.
+    ///
+    /// Cluster scope: pairs share `(AP, STA, EAPOL frame, MIC, combo_type)` and the
+    /// first 28 bytes of the nonce; the trailing 4 bytes must fit within
+    /// `--nc-tolerance` (default 8). Survivor is the sorted-median observed nonce so
+    /// hashcat's symmetric iteration covers the full cluster span. LE / BE
+    /// orientation is auto-detected per cluster and reflected in `FLAG_LE` / `FLAG_BE`.
+    ///
+    /// See `ARCHITECTURE.md §5.8.1` for the algorithm and IEEE 802.11-2024 §12.7.2
+    /// NOTE 9 for the protocol-level justification (RC is a performance optimization,
+    /// not a security primitive).
+    #[arg(long)]
+    nc_dedup: bool,
+
+    /// [output filter] cluster span tolerance for `--nc-dedup` (default: 8)
+    ///
+    /// Maximum `max - min` on the trailing 4 bytes of the nonce within one cluster.
+    /// Default 8 matches hashcat's `NONCE_ERROR_CORRECTIONS=8`, so the symmetric
+    /// `survivor +/- 4` iteration on the cracker side covers the full cluster span
+    /// when the survivor sits at the sorted-median index. Higher values collapse
+    /// more aggressively but require a matching `--nonce-error-corrections=N` on the
+    /// hashcat side; lower values are safe with smaller hashcat NC budgets at the
+    /// cost of more representative lines per cluster. Ignored unless `--nc-dedup`
+    /// is also set.
+    #[arg(long, value_name = "N")]
+    nc_tolerance: Option<u8>,
+
     // --- Misc ---
     /// number of pairing threads [default: available CPU count]
     ///
@@ -500,6 +539,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
         time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
         rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
+        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
+        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
     };
 
     let paths = OutputPaths {
@@ -1049,5 +1090,38 @@ mod tests {
         assert_eq!(cli.rc_drift, Some(8));
         assert!(cli.dedup_hash_combos);
         assert!(cli.per_file);
+    }
+
+    #[test]
+    fn nc_dedup_off_by_default() {
+        // Bare wpawolf: --nc-dedup absent -> cli.nc_dedup == false; --nc-tolerance absent
+        // -> cli.nc_tolerance == None (Default::default() on the resulting PairConfig
+        // substitutes 8 when the flag is later resolved).
+        let cli = parse_with_strict(&[]);
+        assert!(!cli.nc_dedup, "--nc-dedup absent -> field stays false");
+        assert_eq!(cli.nc_tolerance, None, "--nc-tolerance absent -> field stays None");
+    }
+
+    #[test]
+    fn nc_dedup_flag_sets_field() {
+        let cli = parse_with_strict(&["--nc-dedup"]);
+        assert!(cli.nc_dedup, "--nc-dedup -> field flips on");
+        assert_eq!(cli.nc_tolerance, None, "tolerance still None when only --nc-dedup is given");
+    }
+
+    #[test]
+    fn nc_tolerance_takes_explicit_value() {
+        let cli = parse_with_strict(&["--nc-dedup", "--nc-tolerance=12"]);
+        assert!(cli.nc_dedup);
+        assert_eq!(cli.nc_tolerance, Some(12));
+    }
+
+    #[test]
+    fn nc_tolerance_alone_parses_even_without_nc_dedup() {
+        // --nc-tolerance is harmless when --nc-dedup is off: PairConfig construction
+        // ignores the tolerance when nc_dedup_enabled=false. Parsing must still succeed.
+        let cli = parse_with_strict(&["--nc-tolerance=4"]);
+        assert!(!cli.nc_dedup);
+        assert_eq!(cli.nc_tolerance, Some(4));
     }
 }
