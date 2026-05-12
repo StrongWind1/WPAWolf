@@ -1,12 +1,16 @@
 //! Phase 4 -- Emit: pairing constraints (replay-counter drift, eapoltimeout, nonce endianness). See ARCHITECTURE.md §5 + §8.6.
 //!
-//! Validates candidate `(nonce_message, eapol_message)` pairs by checking three criteria:
-//! (1) timestamp gap within the configured EAPOL timeout (`within_time`), (2) replay
+//! Validates candidate `(nonce_message, eapol_message)` pairs by checking two criteria:
+//! (1) timestamp gap within the configured EAPOL timeout (`within_time`), and (2) replay
 //! counter relationship within nonce-error-correction tolerance or byte-swapped endianness
-//! (`within_rc` / `within_rc_for_combo`), and (3) nonce validity for combos where a
-//! non-zero nonce is required (`nonce_is_valid`). Endianness ambiguity is resolved by
-//! comparing the RC bytes under both native and swapped interpretation to set LE/BE flags
-//! in `message_pair`. See `ARCHITECTURE.md §8` FR-PAIR-3 through FR-PAIR-5.
+//! (`within_rc` / `within_rc_for_combo`). Endianness ambiguity is resolved by comparing
+//! the RC bytes under both native and swapped interpretation to set LE/BE flags in
+//! `message_pair`. See `ARCHITECTURE.md §8` FR-PAIR-3 and FR-PAIR-4. Nonce-validity
+//! enforcement (FR-PAIR-7) lives upstream in `src/ieee80211/eapol.rs` via
+//! `garbage_pattern_kind`, which rejects `null` / `ff` / `repeat_1` / `repeat_2` /
+//! `repeat_4` patterns at parse time on every message type, including the spec-valid
+//! M4 NULL nonce per [IEEE 802.11-2024] §12.7.6.5 NOTE 9. Zero nonces never reach this
+//! module.
 
 use crate::pair::ComboType;
 use crate::store::messages::EapolMessage;
@@ -166,18 +170,6 @@ pub fn within_rc_for_combo(
     None
 }
 
-// --- Nonce validity ---
-
-/// Returns `true` if the nonce contains at least one non-zero byte.
-///
-/// Zero nonces are invalid for all combo types -- hcxpcapngtool rejects them
-/// regardless of the message type or combo. Per [IEEE 802.11-2024] §12.7.2.
-/// (FR-PAIR-5)
-#[must_use]
-pub fn nonce_is_valid(nonce: &[u8; 32]) -> bool {
-    nonce.iter().any(|&b| b != 0)
-}
-
 // --- Unit tests ---
 
 #[cfg(test)]
@@ -285,26 +277,6 @@ mod tests {
         let a = make_msg(1);
         let b = make_msg(2);
         assert_eq!(within_rc(&a, &b, 0), None);
-    }
-
-    // --- nonce_is_valid ---
-
-    #[test]
-    fn nonce_is_valid_nonzero() {
-        let mut nonce = [0u8; 32];
-        nonce[15] = 0x01;
-        assert!(nonce_is_valid(&nonce));
-    }
-
-    #[test]
-    fn nonce_is_valid_all_zeros() {
-        // All-zero nonces are always rejected -- hcxpcapngtool rejects them for every combo.
-        assert!(!nonce_is_valid(&[0u8; 32]));
-    }
-
-    #[test]
-    fn nonce_is_valid_all_ones() {
-        assert!(nonce_is_valid(&[0xFFu8; 32]));
     }
 
     // --- within_rc_for_combo ---
