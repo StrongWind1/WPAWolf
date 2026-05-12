@@ -422,12 +422,16 @@ pub struct Stats {
     /// SSIDs that passed the spec-driven admission gate (length 1-32, first byte
     /// non-zero) but contained at least one byte in `0x00..=0x1F` (the full
     /// ASCII C0 control range, NUL through US -- every control character).
-    /// The SSID is stored and emitted unchanged -- a cracker may still
-    /// recover the right PMK -- but the operator gets a `[essid_control_bytes]`
-    /// log line with the SSID rendered in lowercase hex so they can audit
-    /// the source frame. SSIDs are NOT garbage-filtered the way nonces /
-    /// MICs / PMKIDs are; this counter is the warning surface, not a
-    /// rejection counter.
+    /// **This is an informational counter, not a rejection.** Per
+    /// [IEEE 802.11-2024] §9.4.2.2 the SSID element is "an arbitrary sequence
+    /// of 0-32 octets" with no printable-character requirement, so a
+    /// control-byte SSID is valid on the wire and wpawolf is required to
+    /// handle it. The SSID is shipped to hashcat byte-for-byte unchanged; the
+    /// counter and the matching `[essid_control_bytes]` log line exist only
+    /// so an operator triaging a capture can locate the source frame (such
+    /// bytes are rare in production network names and may correlate with
+    /// bit-flipped or test-injected SSIDs worth a closer look). SSIDs are
+    /// NOT garbage-filtered the way nonces / MICs / PMKIDs are.
     pub essid_control_bytes_warned: u64,
     /// Maximum time gap between any two EAPOL messages in the same (AP, STA) session (microseconds).
     /// Displayed in milliseconds. [hcxpcapngtool EAPOLTIME gap]
@@ -1116,7 +1120,7 @@ impl Stats {
         nz!("  0xFF PMKID rejected (PMKID dropped)", self.ff_pmkid_rejected);
         nz!("  garbage-pattern PMKID rejected (repeating period; PMKID dropped)", self.repeat_pmkid_rejected);
         nz!(
-            "  ESSID control-byte warnings (0x00-0x1F in body; SSID retained, [essid_control_bytes] log line emitted)",
+            "  ESSID control bytes seen (0x00-0x1F in body; informational, SSID shipped unchanged)",
             self.essid_control_bytes_warned
         );
         if self.eapol_time_gap_max_us > 0 {

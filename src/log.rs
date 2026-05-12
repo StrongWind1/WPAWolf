@@ -32,13 +32,18 @@
 //!   The line carries `mic_hex=` (16 or 24 bytes lowercase hex per AKM).
 //! - `invalid_pmkid`      -- PMKID discarded: NULL, all-`0xFF`, or short-period
 //!   repeating pattern. The line carries `pmkid_hex=` (16 bytes lowercase hex).
-//! - `essid_control_bytes` -- SSID warning, **not** a discard: the SSID byte run
-//!   contained at least one byte in `0x00..=0x1F` (the full ASCII C0 control
-//!   range, NUL through US -- every control character). The SSID is still
-//!   stored and emitted; the line is for operator audit, with `essid_hex=`
-//!   carrying the raw bytes in lowercase hex. SSIDs that fail the spec-driven
-//!   length / first-byte-zero gate are discarded silently by upstream
-//!   counters and are NOT logged here.
+//! - `essid_control_bytes` -- SSID informational notice, **not a discard and
+//!   not a warning about wpawolf's behaviour**: the SSID byte run contained at
+//!   least one byte in `0x00..=0x1F` (the full ASCII C0 control range, NUL
+//!   through US -- every control character). Per [IEEE 802.11-2024] §9.4.2.2
+//!   the SSID element is "an arbitrary sequence of 0-32 octets" with no
+//!   encoding restriction, so a control-byte SSID is valid on the wire and
+//!   wpawolf is required to handle it. The SSID is shipped to hashcat
+//!   byte-for-byte unchanged (`extract::common::insert_essid`); the line is
+//!   emitted only so an operator triaging a capture can locate the source
+//!   frame, with `essid_hex=` carrying the raw bytes in lowercase hex. SSIDs
+//!   that fail the spec-driven length / first-byte-zero gate are discarded
+//!   silently by upstream counters and are NOT logged here.
 //!
 //! Line format: `[category] <category-specific fields...>`. Each `Logger::log_*`
 //! method defines its own field layout -- frame-bearing categories
@@ -46,9 +51,10 @@
 //! `invalid_pmkid`, `essid_control_bytes`) lead with `timestamp_us`; the rest
 //! carry only the field(s) relevant to the event (e.g. `unknown_akm` carries
 //! just the AKM byte). Discard categories (`invalid_nonce`, `invalid_mic`,
-//! `invalid_pmkid`, `essid_control_bytes`) end with a `*_hex=` field carrying
-//! the rejected bytes in lowercase hex so an operator can grep the source
-//! capture for the exact value.
+//! `invalid_pmkid`) end with a `*_hex=` field carrying the rejected bytes in
+//! lowercase hex so an operator can grep the source capture for the exact
+//! value; `essid_control_bytes` carries `essid_hex=` for the same triage
+//! reason despite not being a discard category.
 //! Only opened when `--log` is specified on the CLI; otherwise every method is
 //! a no-op.
 
@@ -196,17 +202,23 @@ impl Logger {
         ));
     }
 
-    /// Logs an SSID warning when the byte run contains at least one byte in
-    /// the `0x00..=0x1F` ASCII C0 control range (NUL through US -- every
-    /// control character). The SSID itself is stored and emitted -- the
-    /// cracker may still recover the right PMK -- but the operator may want
-    /// to audit the source frame because such bytes are rare in production
-    /// network names and often indicate a bit-flipped or test-injected SSID.
-    /// The line carries the SSID rendered in lowercase hex (`essid_hex=...`)
-    /// so an operator can search the source capture by raw byte sequence
-    /// rather than by potentially-unprintable rendering. Fires from every
-    /// SSID-extract site (Beacon, Probe Request / Response, Association /
-    /// Reassociation Request, Action Measurement IE, OWE Transition Mode).
+    /// Logs an SSID informational notice when the byte run contains at least
+    /// one byte in the `0x00..=0x1F` ASCII C0 control range (NUL through US --
+    /// every control character). **This is not a discard and not a warning
+    /// that wpawolf altered the SSID.** Per [IEEE 802.11-2024] §9.4.2.2 the
+    /// SSID element is "an arbitrary sequence of 0-32 octets" with no
+    /// printable-character requirement, so a control-byte SSID is valid on
+    /// the wire and wpawolf is required to handle it; the cracker may still
+    /// recover the right PMK from such an SSID. The SSID is shipped to
+    /// hashcat byte-for-byte unchanged. The line is emitted only so an
+    /// operator triaging a capture can locate the source frame (such bytes
+    /// are rare in production network names and may correlate with a
+    /// bit-flipped or test-injected SSID worth a closer look). It carries
+    /// `essid_hex=...` in lowercase hex so the source frame can be located
+    /// by raw byte sequence rather than by potentially-unprintable
+    /// rendering. Fires from every SSID-extract site (Beacon, Probe Request
+    /// / Response, Association / Reassociation Request, Action Measurement
+    /// IE, OWE Transition Mode).
     pub fn log_essid_control_bytes(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, essid: &[u8]) {
         let essid_hex = render_lower_hex(essid);
         self.write_line(&format!("[essid_control_bytes] {timestamp_us} ap={ap_hex} essid_hex={essid_hex}"));

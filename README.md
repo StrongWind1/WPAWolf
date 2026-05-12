@@ -66,7 +66,7 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 
 Each row above is a documented `hcxpcapngtool` default, not a bug. The C tool's policy is appropriate for a feed into a shared cracking pool; `wpawolf`'s policy is appropriate for one-off analysis where the operator is closer to the capture and wants to choose the filters.
 
-**Highlights.** `wpawolf` is pure-Rust (`#![forbid(unsafe_code)]`, two runtime crates: `flate2` and `clap`), parallelises pairing across CPU cores via `std::thread::scope` with LPT round-robin, parses A-MSDU subframes and reassembles MSDU fragments, strips radiotap FCS tails, extracts PMKIDs from all 20 spec-defined locations, rejects every garbage-pattern shape (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) on nonces / MICs / PMKIDs (ESSIDs are not garbage-filtered; bytes in the ASCII C0 control range surface as a non-fatal `[essid_control_bytes]` warning instead), and reconciles vendor AKM quirks against the wire-level Key Descriptor Version. 796 tests guard the behaviour; `make check-all` runs zero-warning under strict clippy.
+**Highlights.** `wpawolf` is pure-Rust (`#![forbid(unsafe_code)]`, two runtime crates: `flate2` and `clap`), parallelises pairing across CPU cores via `std::thread::scope` with LPT round-robin, parses A-MSDU subframes and reassembles MSDU fragments, strips radiotap FCS tails, extracts PMKIDs from all 20 spec-defined locations, rejects every garbage-pattern shape (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) on nonces / MICs / PMKIDs (ESSIDs are not garbage-filtered and not transformed -- the byte run goes to hashcat verbatim; an informational `[essid_control_bytes]` log line surfaces when an SSID contains ASCII C0 control bytes, but the line is for operator triage only, never a discard), and reconciles vendor AKM quirks against the wire-level Key Descriptor Version. 801 tests guard the behaviour; `make check-all` runs zero-warning under strict clippy.
 
 ---
 
@@ -269,7 +269,7 @@ Things that are **not** rejected (despite some of them being unusual):
 - **EAPOL frames over 255 bytes** -- always emitted; upstream drops them via `EAPOL_AUTHLEN_OLD_MAX`.
 - **Cross-file pairing** -- M1 in file A pairs with M2 in file B.
 - **Legacy WPA1 vendor IE handshakes** -- emitted as Type 1.
-- **SSIDs with bytes in the ASCII C0 control range (`0x00..=0x1F`)** -- the SSID is still stored and emitted, but a non-fatal `[essid_control_bytes]` log line is written so the operator can audit the source frame. SSIDs that fail the spec-driven length / first-byte-zero gate (length 0, length > 32, or first byte = 0) are silently dropped as wildcard / hidden / spec-invalid; that drop has no `--log` line by design (the volume on noisy captures would be untriageable).
+- **SSIDs with bytes in the ASCII C0 control range (`0x00..=0x1F`)** -- shipped to hashcat byte-for-byte unchanged. Per [IEEE 802.11-2024] §9.4.2.2 the SSID element is "an arbitrary sequence of 0-32 octets" with no printable-character restriction, so a control-byte SSID is valid on the wire and the cracker may still recover the right PMK. An `[essid_control_bytes]` log line is emitted as an **informational** notice -- not a warning that wpawolf altered the SSID -- so an operator can audit the source frame; the line is never a discard. SSIDs that fail the spec-driven length / first-byte-zero gate (length 0, length > 32, or first byte = 0) are silently dropped as wildcard / hidden / spec-invalid; that drop has no `--log` line by design (the volume on noisy captures would be untriageable).
 
 For deeper detail on per-AKM hash routing, dedup behaviour, and the full Phase-1-through-Phase-5 stats catalogue, see [`ARCHITECTURE.md`](ARCHITECTURE.md) §4-§9.
 
@@ -300,7 +300,7 @@ distinct hash types observed........................: 2
 - Output files are created lazily — configuring `--psk-sha384-out` on a capture with no SHA-384 sessions leaves no zero-byte artefact on disk.
 - Each "issue" stat is suffixed with **dropped**, **recovered**, or **diagnostic** so a real loss is distinguishable from a capture-quality note.
 
-Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs, ESSID control-byte warnings, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source. A translation table is in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6. For a category-by-category list of every reason a hash gets discarded, see "Why a hash gets discarded" above.
+Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs, the informational ESSID control-byte counter, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source. A translation table is in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6. For a category-by-category list of every reason a hash gets discarded, see "Why a hash gets discarded" above.
 
 ---
 
