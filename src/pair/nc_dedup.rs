@@ -15,16 +15,19 @@
 //! each bucket the trailing 4 bytes of the nonce are interpreted as a `u32`
 //! (both endiannesses tried), sorted, and split into contiguous runs whose
 //! `max - min` span fits within `PairConfig::nc_tolerance` (default 8 -- matches
-//! hashcat's `NONCE_ERROR_CORRECTIONS=8`). The sorted-median observed nonce in
-//! each cluster becomes the survivor; its `message_pair` byte gains `FLAG_NC`
-//! plus `FLAG_LE` or `FLAG_BE` depending on which interpretation produced the
-//! tighter clustering. The remaining cluster members are dropped.
+//! hashcat's `NONCE_ERROR_CORRECTIONS=8`). The hashcat-safest observed nonce in
+//! each cluster -- the one minimising `max(tail - min, max - tail)` -- becomes
+//! the survivor; its `message_pair` byte gains `FLAG_NC` plus `FLAG_LE` or
+//! `FLAG_BE` depending on which interpretation produced the tighter
+//! clustering. The remaining cluster members are dropped.
 //!
-//! Why sorted-median: hashcat with `NC=N` iterates `[survivor - N/2,
-//! survivor + N/2]` symmetrically. Placing the survivor at the cluster's
-//! sorted-median index covers the full span when the cluster fits in `[0, N]`,
-//! so the cracker recovers every observed nonce from the one line wpawolf
-//! emits.
+//! Why hashcat-safest: hashcat with `NC=N` iterates
+//! `[survivor - N/2, survivor + N/2]` symmetrically. For dense clusters the
+//! sorted-median is the safest observation, but for sparse-edge clusters
+//! (e.g. just `[0, N]`) the median sits at an edge and hashcat's `+/- N/2`
+//! window cannot reach the opposite edge. The safety check skips collapse in
+//! that case: better to emit both observations as singletons than to silently
+//! drop a sibling hashcat cannot recover.
 //!
 //! Why this is safe by spec: IEEE 802.11-2024 §12.7.2 NOTE 9 -- "the key replay
 //! counter does not play any role beyond a performance optimization; replay
@@ -109,18 +112,34 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
         let (le_clusters, le_collapsed) = cluster_indices(&indices, &pairs, tolerance, Endianness::Le);
         let (be_clusters, be_collapsed) = cluster_indices(&indices, &pairs, tolerance, Endianness::Be);
 
-        let (clusters, flag) =
-            if le_collapsed >= be_collapsed { (le_clusters, FLAG_LE) } else { (be_clusters, FLAG_BE) };
+        let (clusters, flag, endian) = if le_collapsed >= be_collapsed {
+            (le_clusters, FLAG_LE, Endianness::Le)
+        } else {
+            (be_clusters, FLAG_BE, Endianness::Be)
+        };
+
+        // Hashcat's `--nonce-error-corrections=tolerance` iterates `[survivor -
+        // tolerance/2, survivor + tolerance/2]` around the emitted nonce. To
+        // ensure every cluster member can be recovered, `max(survivor - min,
+        // max - survivor)` must fit inside `tolerance / 2`. For densely-packed
+        // clusters the median observation satisfies this; for sparse clusters
+        // (e.g. just `[0, tolerance]`) no observation does, so we skip the
+        // collapse entirely rather than emit a survivor that hashcat would
+        // fail to recover the dropped siblings for.
+        let half_tol = tolerance / 2;
 
         for cluster in clusters {
             if cluster.len() < 2 {
                 continue; // singleton cluster -- not a collapse candidate.
             }
-            // Survivor: sorted-median observed nonce. `cluster` is already
-            // sorted by tail value (Endianness::* enforces this in cluster_indices),
-            // so `cluster.len() / 2` is the median index.
-            let Some(&survivor) = cluster.get(cluster.len() / 2) else {
-                continue; // unreachable: len >= 2
+            // Pick the observed nonce whose iteration window best covers the
+            // cluster: minimize `max(value - min, max - value)`. Falls back to
+            // the smaller value on ties (deterministic across runs).
+            let Some(survivor) = pick_safe_survivor(&cluster, &pairs, endian, half_tol) else {
+                // No observation in the cluster can serve as a hashcat-safe
+                // survivor for this `tolerance`. Leave the members as
+                // singletons -- correctness over collapse.
+                continue;
             };
 
             let size_u64 = u64::try_from(cluster.len()).unwrap_or(0);
@@ -210,6 +229,45 @@ const fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
         Endianness::Le => u32::from_le_bytes(bytes),
         Endianness::Be => u32::from_be_bytes(bytes),
     }
+}
+
+/// Returns the cluster member whose tail value minimises
+/// `max(tail - min, max - tail)`, provided that minimum fits inside
+/// `half_tol` (= `tolerance / 2`).
+///
+/// Hashcat's `--nonce-error-corrections=tolerance` recovers a survivor's
+/// dropped siblings only when every sibling's tail value lies within
+/// `[survivor - half_tol, survivor + half_tol]`. For densely-packed clusters
+/// the sorted-median observation satisfies this; for sparse-edge clusters
+/// (e.g. just `[0, tolerance]`) no observation does, in which case we return
+/// `None` so the caller leaves the members as singletons.
+///
+/// `cluster` is the index list returned by `cluster_indices`; the indices are
+/// sorted ascending by tail value under the same `endian`.
+fn pick_safe_survivor(cluster: &[usize], pairs: &[PairedHash], endian: Endianness, half_tol: u32) -> Option<usize> {
+    // Compute tail values once. Cluster is already sorted ascending under
+    // `endian`, so the first and last entries give min and max.
+    let tails: Vec<u32> = cluster.iter().filter_map(|&i| pairs.get(i).map(|p| tail_u32(&p.nonce, endian))).collect();
+    let &min_tail = tails.first()?;
+    let &max_tail = tails.last()?;
+
+    // Walk every member, track the one that minimises `max(t - min, max - t)`.
+    // Ties resolve to the smaller cluster index for deterministic survivor
+    // selection across runs.
+    let mut best_idx: Option<usize> = None;
+    let mut best_dist: u32 = u32::MAX;
+    for (pos, &cluster_idx) in cluster.iter().enumerate() {
+        let Some(&tail) = tails.get(pos) else { continue };
+        let dist = std::cmp::max(tail.saturating_sub(min_tail), max_tail.saturating_sub(tail));
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = Some(cluster_idx);
+        }
+    }
+
+    // Hashcat-safety guard: every cluster member must be within +/-half_tol of
+    // the survivor. If the best survivor cannot meet that, skip the collapse.
+    if best_dist <= half_tol { best_idx } else { None }
 }
 
 /// Clusters `indices` (input positions into `pairs`) by `tail_u32` value under
@@ -436,6 +494,43 @@ mod tests {
         let (out, _) = nc_dedup(pairs, &config_with_nc(8));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].nonce[28], 0x14, "sorted-median of 0x10..=0x18 is 0x14");
+    }
+
+    #[test]
+    fn nc_dedup_sparse_two_member_cluster_at_tolerance_edges_does_not_collapse() {
+        // Two pairs with LE tails 0 and 8 (span equals tolerance=8). Hashcat
+        // NC=8 iterates `[survivor - 4, survivor + 4]`; neither tail can
+        // reach the other from any survivor. NC-dedup must skip the
+        // collapse so the dropped sibling is not silently uncrackable.
+        let pairs = vec![
+            make_pair(ComboType::N1E2, nonce_with_le_tail(0x00), 0xCC, 0xDD),
+            make_pair(ComboType::N1E2, nonce_with_le_tail(0x08), 0xCC, 0xDD),
+        ];
+        let (out, stats) = nc_dedup(pairs, &config_with_nc(8));
+        assert_eq!(out.len(), 2, "sparse 2-member cluster at edges must stay as two singletons");
+        assert_eq!(stats.collapsed_lines, 0);
+        assert_eq!(stats.cluster_count, 0);
+        // Neither survivor must carry FLAG_NC.
+        assert!(out.iter().all(|p| p.message_pair & FLAG_NC == 0));
+    }
+
+    #[test]
+    fn nc_dedup_picks_non_median_survivor_when_it_is_hashcat_safer() {
+        // Cluster of 5 tails [0x00, 0x04, 0x05, 0x06, 0x08]. Sorted-median
+        // (index 2) is 0x05 -- distance to min is 5, to max is 3, max is 5 > 4
+        // so a median survivor cannot recover all members under hashcat NC=8.
+        // The non-median observation at 0x04 minimises max-distance to 4
+        // (=half-tolerance) and is the only safe survivor.
+        let tails: [u8; 5] = [0x00, 0x04, 0x05, 0x06, 0x08];
+        let pairs: Vec<PairedHash> =
+            tails.iter().map(|&t| make_pair(ComboType::N1E2, nonce_with_le_tail(t), 0xCC, 0xDD)).collect();
+        let (out, stats) = nc_dedup(pairs, &config_with_nc(8));
+        assert_eq!(out.len(), 1, "5-member cluster collapses to one safe survivor");
+        assert_eq!(stats.collapsed_lines, 4);
+        assert_eq!(
+            out[0].nonce[28], 0x04,
+            "survivor must be the hashcat-safest observation (0x04), not the sorted-median (0x05)"
+        );
     }
 
     #[test]
