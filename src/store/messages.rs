@@ -101,8 +101,33 @@ impl MessageStore {
     ///
     /// Creates the group if it does not yet exist. Messages are appended in
     /// arrival order; the pairing engine sorts by timestamp before pairing.
+    ///
+    /// **Dedup-on-insert.** A new message whose `(msg_type, akm, eapol_frame)`
+    /// tuple already appears in the group is dropped silently. Two byte-
+    /// identical EAPOL frames for the same `(AP, STA)` and the same logical
+    /// role are the same message observed twice on the air -- they would
+    /// pair into identical combos and the global `SipHash` fingerprint at emit
+    /// time (`output::dedup`) would have collapsed the resulting hashcat
+    /// lines to one anyway. Dropping at insert time bounds `MessageStore`
+    /// memory on captures full of retransmissions without changing the
+    /// output sorted-content sha256.
+    ///
+    /// `msg_type` is part of the key because Tier 1 direction-based and
+    /// Tier 3 flag-based classification can assign different `MsgType`
+    /// labels to byte-identical EAPOL frames (a `FromSta` data frame whose
+    /// EAPOL body has `Install=1` lands as M2 under Tier 1 but M3 under
+    /// the WDS Tier 3 fallback). Both labels are kept so pair generation
+    /// can still produce the M3-nonce-with-M2-eapol combo where applicable.
+    ///
+    /// `akm` is part of the key because the same frame bytes could in
+    /// principle be tagged with a different `AkmType` if the surrounding
+    /// RSN-IE context advanced between two observations.
     pub fn add(&mut self, ap: MacAddr, sta: MacAddr, msg: EapolMessage) {
-        self.groups.entry(MacPair::new(ap, sta)).or_default().push(msg);
+        let entries = self.groups.entry(MacPair::new(ap, sta)).or_default();
+        if entries.iter().any(|m| m.msg_type == msg.msg_type && m.akm == msg.akm && m.eapol_frame == msg.eapol_frame) {
+            return;
+        }
+        entries.push(msg);
         self.total_count += 1;
     }
 
@@ -316,11 +341,18 @@ mod tests {
     // Builds a minimal valid M1 EapolKey by parsing a crafted frame.
     // Returns None if the internal parse fails (test will panic via unwrap at call site).
     fn minimal_eapol_key() -> EapolKey {
+        minimal_eapol_key_with_discriminator(0xA5)
+    }
+
+    // Same as `minimal_eapol_key` but lets the caller inject a byte into the nonce so
+    // two `add()` calls produce non-byte-identical EAPOL frames. Without this, the
+    // dedup-on-insert path in `MessageStore::add` collapses identical messages.
+    fn minimal_eapol_key_with_discriminator(disc: u8) -> EapolKey {
         // Construct the same way eapol::tests::make_eapol does:
         // LLC/SNAP + EAPOL-Key header + body.
         let nonce: [u8; 32] = {
             let mut n = [0u8; 32];
-            n[0] = 0xA5;
+            n[0] = disc;
             n
         };
         let mut ki: u16 = 2; // KDV=2
@@ -361,12 +393,37 @@ mod tests {
 
     #[test]
     fn add_two_messages_same_pair() {
+        // Distinct discriminators -> two non-byte-identical EAPOL frames, both stored
+        // by the dedup-on-insert path. Byte-identical retransmissions are exercised
+        // by `add_byte_identical_message_deduped`.
+        let mut store = MessageStore::new();
+        let ap = mac(0x11);
+        let sta = mac(0x22);
+        store.add(
+            ap,
+            sta,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x11), 1_000, AkmType::Wpa2Psk, None),
+        );
+        store.add(
+            ap,
+            sta,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x22), 2_000, AkmType::Wpa2Psk, None),
+        );
+        assert_eq!(store.total_count(), 2);
+        assert_eq!(store.group_count(), 1);
+    }
+
+    #[test]
+    fn add_byte_identical_message_deduped() {
+        // Two `add()` calls with identical (msg_type, akm, eapol_frame) tuples must
+        // collapse to one stored message -- this is the dedup-on-insert invariant
+        // that bounds `MessageStore` memory on retransmission-heavy captures.
         let mut store = MessageStore::new();
         let ap = mac(0x11);
         let sta = mac(0x22);
         store.add(ap, sta, EapolMessage::from_eapol_key(minimal_eapol_key(), 1_000, AkmType::Wpa2Psk, None));
         store.add(ap, sta, EapolMessage::from_eapol_key(minimal_eapol_key(), 2_000, AkmType::Wpa2Psk, None));
-        assert_eq!(store.total_count(), 2);
+        assert_eq!(store.total_count(), 1, "retransmission collapsed by dedup-on-insert");
         assert_eq!(store.group_count(), 1);
     }
 
@@ -390,9 +447,18 @@ mod tests {
         let sta1 = mac(0xBB);
         let ap2 = mac(0xCC);
         let sta2 = mac(0xDD);
-        // Two messages for pair 1, one for pair 2.
-        store.add(ap1, sta1, EapolMessage::from_eapol_key(minimal_eapol_key(), 1_000, AkmType::Wpa2Psk, None));
-        store.add(ap1, sta1, EapolMessage::from_eapol_key(minimal_eapol_key(), 2_000, AkmType::Wpa2Psk, None));
+        // Two distinct messages for pair 1 (different discriminators dodge the
+        // dedup-on-insert path), one for pair 2.
+        store.add(
+            ap1,
+            sta1,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x11), 1_000, AkmType::Wpa2Psk, None),
+        );
+        store.add(
+            ap1,
+            sta1,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x22), 2_000, AkmType::Wpa2Psk, None),
+        );
         store.add(ap2, sta2, EapolMessage::from_eapol_key(minimal_eapol_key(), 3_000, AkmType::Wpa2Psk, None));
 
         let mut pair_counts: Vec<usize> = store.groups().map(|(_, msgs)| msgs.len()).collect();
@@ -404,7 +470,10 @@ mod tests {
     // --- count_anonce_m1_m3_mismatches tests ---
 
     // Build a test EapolMessage with the given type and nonce. Fields not exercised
-    // by the mismatch counter (RC, EAPOL frame, MIC, etc.) are stock values.
+    // by the mismatch counter (RC, EAPOL frame, MIC, etc.) are stock values. The
+    // `eapol_frame` body embeds `nonce[0]` so two calls with distinct nonces produce
+    // distinct frame bodies -- otherwise `MessageStore::add`'s dedup-on-insert path
+    // would collapse messages that this helper deliberately keeps distinct.
     fn msg_with_nonce(msg_type: MsgType, nonce: [u8; 32]) -> EapolMessage {
         EapolMessage {
             timestamp: 0,
@@ -414,7 +483,7 @@ mod tests {
             nonce,
             mic: MicBytes::ZERO_16,
             pmkid: None,
-            eapol_frame: Arc::from(vec![0u8; 4]),
+            eapol_frame: Arc::from(vec![nonce[0], 0u8, 0u8, 0u8]),
             ft: None,
             akm: AkmType::Wpa2Psk,
             is_rsn: true,
