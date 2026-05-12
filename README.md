@@ -144,6 +144,8 @@ These narrow what gets written to the hash output files; they have no effect on 
 | `--eapoltimeout [N]`       | unlimited | Maximum EAPOL session window in seconds. Bare flag uses 600 s. |
 | `--rc-drift [N]`           | off       | Discard pairs whose replay-counter delta deviates by more than `N` from the expected sequence. Bare flag uses tolerance 8. Not the same as hashcat's `--nonce-error-corrections`. |
 | `--dedup-hash-combos`      | off       | Collapse the six N#E# combos per session to the three cryptographically unique ones. |
+| `--nc-dedup`               | off       | Cluster pairs that share `(AP, STA, EAPOL frame, MIC, combo)` and differ only in the trailing bytes of the nonce; keep one survivor per cluster with `FLAG_NC` set so hashcat's default `--nonce-error-corrections=8` recovers the dropped variants. See [ARCHITECTURE.md §5.8.1](ARCHITECTURE.md#581-nc-dedup-near-identical-nonce-clustering). |
+| `--nc-tolerance N`         | `8`       | Cluster span tolerance for `--nc-dedup`. `8` matches hashcat's `NONCE_ERROR_CORRECTIONS=8`. Ignored unless `--nc-dedup` is also set. |
 | `--essid-collapse-min N`   | `3`     | Only collapse SSID variants when an AP has more than `N` recorded SSIDs. See worked example below. |
 | `--essid-collapse-ratio N` | `10`    | When the guard fires, write only the top SSID iff `top_count >= N * second_count`. `< 2` disables. |
 | `--strict`                 | off       | Shortcut for a hcxpcapngtool-shape narrow profile. Enables `--eapoltimeout=5`, `--rc-drift=8`, `--dedup-hash-combos`, and `--per-file` together. Later-flag-wins: an explicit `--eapoltimeout=30` or `--rc-drift=4` after `--strict` overrides the strict default. The two boolean flags can only be turned on. |

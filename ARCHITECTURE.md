@@ -557,6 +557,16 @@ By default (unfiltered) all 6 combos are emitted. With `--dedup-hash-combos`, on
 1. Smallest RC gap magnitude (exact RC match preferred).
 2. Authorized combo type as tiebreaker (N3E2 over N1E2, N2E3 over N4E3, N3E4 over N1E4 - M3-sourced nonces are canonical).
 
+### §5.8.1  NC-dedup near-identical-nonce clustering
+
+Some firmware emits many EAPOL-Key messages for one (AP, STA) that share the same EAPOL body and MIC but differ only in the trailing bytes of the nonce. A real-world report on the hcxtools list showed 2041 WPA*02* lines for one (AP, STA) sharing a 28-byte nonce prefix and differing only on byte 31. Hashcat with `--nonce-error-corrections=N` (default 8) iterates `+/- N/2` on the trailing byte during MIC verification and can therefore recover the entire family from one representative line - but only if wpawolf emits the representative tagged with `FLAG_NC` (`0x80`). Without that tag hashcat treats each variant as a distinct hash and re-derives the PTK across the whole wordlist for every line.
+
+`--nc-dedup` enables a post-collapse clustering pass that runs once per (AP, STA) group. Pairs are bucketed by `(eapol_frame, mic, combo_type, nonce[..28])`; within each bucket the trailing 4 bytes of the nonce are interpreted as a `u32` in both endiannesses, sorted, and split into contiguous runs whose `max - min` span fits within `--nc-tolerance` (default 8, matching hashcat's `NONCE_ERROR_CORRECTIONS=8`). The endianness producing the larger collapse wins; ties go to LE. The survivor of each cluster is the sorted-median observed nonce - placing it at the cluster center means hashcat's symmetric `[survivor - N/2, survivor + N/2]` iteration covers the entire `[min, max]` span when the cluster fits in `[0, N]`. The survivor's `message_pair` byte gains `FLAG_NC | FLAG_LE` or `FLAG_NC | FLAG_BE`; the remaining cluster members are dropped. Singleton buckets pass through untouched - hashcat NC iteration is wasted CPU when no other observed nonce sits within tolerance.
+
+Why this is safe by spec: `[IEEE 802.11-2024]` §12.7.2 NOTE 9 - "the key replay counter does not play any role beyond a performance optimization; replay protection is provided by selecting a never-before-used nonce." Merging near-identical nonces does not violate the protocol; it acknowledges firmware that re-uses a nearly-identical nonce across consecutive handshake attempts and lets the cracker recover the exact value within tolerance.
+
+Three counters appear in the closing stats banner whenever the pass dropped at least one line: `NC-dedup near-identical-nonce lines collapsed (--nc-dedup)`, `NC-dedup cluster count (--nc-dedup)`, and `NC-dedup max cluster size (--nc-dedup)`. Default-mode banners are unchanged because the `nz!` macro suppresses zero rows.
+
 ### §5.9  Pairing constraints (output filters)
 
 Three optional output filters narrow which combos make it to disk. All three are off by default; turning any of them on can discard pairs that would otherwise be emitted.
