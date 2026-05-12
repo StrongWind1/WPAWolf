@@ -227,7 +227,7 @@ pub fn process_assoc_or_reassoc_req(
     // Extract SSID from IE id=0. [IEEE 802.11-2024] §9.4.2.3
     for ie in iter_ies(ies) {
         if ie.id == 0 && !ie.value.is_empty() {
-            insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
+            insert_essid(essid_map, mac_hdr.ap, ie.value, timestamp_us, stats, logger);
             essid_set.insert(ie.value);
             if populate_wordlist {
                 wordlist_store.insert(ie.value.to_vec());

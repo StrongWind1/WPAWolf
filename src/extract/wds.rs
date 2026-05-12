@@ -212,7 +212,7 @@ mod tests {
         let ap = mac(0xAA);
         let sta = mac(0xBB);
         let mut essid_map = EssidMap::new();
-        essid_map.insert(ap, b"TestNet".to_vec(), 1000);
+        essid_map.insert(ap, b"TestNet", 1000);
         let mut akm_map = AkmMap::new();
         let mut msg_store = MessageStore::new();
         let mut pmkid_store = PmkidStore::new();
@@ -244,7 +244,7 @@ mod tests {
         let ap = mac(0xAA);
         let sta = mac(0xBB);
         let mut essid_map = EssidMap::new();
-        essid_map.insert(ap, b"TestNet".to_vec(), 1000);
+        essid_map.insert(ap, b"TestNet", 1000);
         let mut akm_map = AkmMap::new();
         let mut msg_store = MessageStore::new();
         let mut pmkid_store = PmkidStore::new();

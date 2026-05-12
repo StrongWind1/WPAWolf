@@ -43,7 +43,7 @@ use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
 pub fn insert_essid(
     essid_map: &mut EssidMap,
     ap: MacAddr,
-    essid: Vec<u8>,
+    essid: &[u8],
     timestamp_us: u64,
     stats: &mut Stats,
     logger: &mut Logger,
@@ -56,7 +56,7 @@ pub fn insert_essid(
     let passes_gate = !essid.is_empty() && essid.len() <= 32 && essid.first() != Some(&0);
     if passes_gate && essid.iter().any(|&b| b <= 0x1F) {
         stats.essid_control_bytes_warned = stats.essid_control_bytes_warned.saturating_add(1);
-        logger.log_essid_control_bytes(timestamp_us, ap.hex_lower(), &essid);
+        logger.log_essid_control_bytes(timestamp_us, ap.hex_lower(), essid);
     }
     essid_map.insert(ap, essid, timestamp_us);
 }
@@ -577,7 +577,7 @@ mod tests {
         let mut essid_map = EssidMap::new();
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
-        insert_essid(&mut essid_map, mac(0x11), b"WolfNet".to_vec(), 1000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x11), b"WolfNet", 1000, &mut stats, &mut logger);
         assert_eq!(essid_map.resolve(&mac(0x11), 1000), Some(b"WolfNet".as_slice()));
         assert_eq!(stats.essid_control_bytes_warned, 0);
     }
@@ -593,7 +593,7 @@ mod tests {
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
         let essid = vec![b'W', b'o', b'l', 0x07, b'f', b'N', b'e', b't']; // BEL byte at index 3
-        insert_essid(&mut essid_map, mac(0x12), essid.clone(), 2000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x12), &essid, 2000, &mut stats, &mut logger);
         assert_eq!(essid_map.resolve(&mac(0x12), 2000), Some(essid.as_slice()), "SSID must still be stored");
         assert_eq!(stats.essid_control_bytes_warned, 1, "warning counter must tick once");
     }
@@ -606,7 +606,7 @@ mod tests {
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
         let essid = vec![b'A', 0x1F, b'B'];
-        insert_essid(&mut essid_map, mac(0x15), essid, 5000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x15), &essid, 5000, &mut stats, &mut logger);
         assert_eq!(stats.essid_control_bytes_warned, 1, "0x1F must trip the warning");
     }
 
@@ -617,7 +617,7 @@ mod tests {
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
         let essid = vec![b'M', b'y', 0x20, b'A', b'P'];
-        insert_essid(&mut essid_map, mac(0x16), essid, 6000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x16), &essid, 6000, &mut stats, &mut logger);
         assert_eq!(stats.essid_control_bytes_warned, 0, "0x20 (space) is printable; no warning");
     }
 
@@ -628,7 +628,7 @@ mod tests {
         let mut essid_map = EssidMap::new();
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
-        insert_essid(&mut essid_map, mac(0x13), vec![0x55u8; 4], 3000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x13), &[0x55u8; 4], 3000, &mut stats, &mut logger);
         assert_eq!(essid_map.resolve(&mac(0x13), 3000), Some([0x55u8; 4].as_slice()));
         assert_eq!(stats.essid_control_bytes_warned, 0);
     }
@@ -641,7 +641,7 @@ mod tests {
         let mut stats = Stats::default();
         let mut logger = Logger::new(None).expect("null logger");
         let oversized: Vec<u8> = (0..33u8).map(|i| b'A' + (i % 26)).collect();
-        insert_essid(&mut essid_map, mac(0x14), oversized, 4000, &mut stats, &mut logger);
+        insert_essid(&mut essid_map, mac(0x14), &oversized, 4000, &mut stats, &mut logger);
         assert_eq!(essid_map.resolve(&mac(0x14), 4000), None, "oversized SSID must be discarded");
         assert_eq!(stats.essid_control_bytes_warned, 0);
     }

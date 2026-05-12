@@ -7,7 +7,8 @@
 //! raw `Vec<u8>` because 802.11 SSIDs are arbitrary byte strings and are not required to
 //! be valid UTF-8. See `ARCHITECTURE.md §3.3`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::store::auxiliary::passes_hcx_essid_filter;
 use crate::types::MacAddr;
@@ -19,7 +20,12 @@ pub struct EssidEntry {
     ///
     /// Per IEEE 802.11-2024 §9.4.2.3, the SSID element body is an arbitrary octet string
     /// of 0-32 bytes. The zero-length form is used by APs broadcasting a "hidden" network.
-    pub essid: Vec<u8>,
+    ///
+    /// Stored as `Arc<[u8]>` so that the same SSID bytes broadcast by multiple APs share
+    /// a single heap allocation -- corpus runs over thousands of APs typically resolve to
+    /// far fewer unique SSID strings (chain hotels, default vendor names, common ISP
+    /// defaults), so interning the bytes pays for the `Arc` overhead many times over.
+    pub essid: Arc<[u8]>,
     /// Capture timestamp (microseconds) when this SSID was first observed for this AP.
     pub timestamp: u64,
     /// Number of frames in which this (AP, SSID) pair was observed.
@@ -34,10 +40,16 @@ pub struct EssidEntry {
 /// Maps AP MAC addresses to their SSID history with timestamp-nearest resolution.
 ///
 /// Most APs have exactly one SSID over a capture lifetime; `Vec<EssidEntry>` handles
-/// the rare SSID-change case without allocating per-entry. See `ARCHITECTURE.md §3.3`.
+/// the rare SSID-change case without allocating per-entry. SSID byte payloads are
+/// interned through `interner` so identical SSIDs across APs share one allocation.
+/// See `ARCHITECTURE.md §3.3`.
 #[derive(Debug, Default)]
 pub struct EssidMap {
     map: HashMap<MacAddr, Vec<EssidEntry>>,
+    /// SSID-bytes interner. Looking up via `&[u8]` works because `Arc<[u8]>` implements
+    /// `Borrow<[u8]>` (stdlib). One `Arc<[u8]>` per distinct SSID body lives here for the
+    /// lifetime of the map; `EssidEntry::essid` carries a cheap clone of the same `Arc`.
+    interner: HashSet<Arc<[u8]>>,
 }
 
 impl EssidMap {
@@ -82,12 +94,14 @@ impl EssidMap {
     /// that participates in hash emission. `WordlistStore` (`-W`) keeps a broader
     /// rule (control-byte splitting, sub-`min_len` runs) because its purpose is
     /// leaked-text salvage, not hash-salt material.
-    pub fn insert(&mut self, ap: MacAddr, essid: Vec<u8>, timestamp: u64) {
-        if !passes_hcx_essid_filter(&essid) {
+    pub fn insert(&mut self, ap: MacAddr, essid: &[u8], timestamp: u64) {
+        if !passes_hcx_essid_filter(essid) {
             return;
         }
-        let entries = self.map.entry(ap).or_default();
-        if let Some(existing) = entries.iter_mut().find(|e| e.essid == essid) {
+        // Fast path: SSID already recorded for this AP -- bump the count and stop.
+        if let Some(entries) = self.map.get_mut(&ap)
+            && let Some(existing) = entries.iter_mut().find(|e| &e.essid[..] == essid)
+        {
             // Preserve the earliest observation for this SSID; bump the count
             // so frequency-weighted filters in `ssids_for_emit` can distinguish
             // bit-flip noise (count == 1) from genuine broadcasts (count >> 1).
@@ -95,9 +109,26 @@ impl EssidMap {
                 existing.timestamp = timestamp;
             }
             existing.count = existing.count.saturating_add(1);
-        } else {
-            entries.push(EssidEntry { essid, timestamp, count: 1 });
+            return;
         }
+        // New (AP, SSID) pair: intern the bytes (one allocation per unique SSID body
+        // across the whole map) and push.
+        let interned = self.intern_bytes(essid);
+        self.map.entry(ap).or_default().push(EssidEntry { essid: interned, timestamp, count: 1 });
+    }
+
+    /// Returns an `Arc<[u8]>` covering `bytes`, allocating only the first time.
+    ///
+    /// Subsequent calls with identical bytes return a clone of the same `Arc`, so the
+    /// total heap footprint for SSIDs scales with the number of distinct SSID values
+    /// observed across the corpus rather than the number of (AP, SSID) entries stored.
+    fn intern_bytes(&mut self, bytes: &[u8]) -> Arc<[u8]> {
+        if let Some(existing) = self.interner.get(bytes) {
+            return Arc::clone(existing);
+        }
+        let arc: Arc<[u8]> = Arc::from(bytes);
+        self.interner.insert(Arc::clone(&arc));
+        arc
     }
 
     /// Returns the SSID for `ap` whose timestamp is closest to `target_timestamp`.
@@ -110,7 +141,7 @@ impl EssidMap {
     #[must_use]
     pub fn resolve(&self, ap: &MacAddr, target_timestamp: u64) -> Option<&[u8]> {
         let entries = self.map.get(ap)?;
-        entries.iter().min_by_key(|e| e.timestamp.abs_diff(target_timestamp)).map(|e| e.essid.as_slice())
+        entries.iter().min_by_key(|e| e.timestamp.abs_diff(target_timestamp)).map(|e| &e.essid[..])
     }
 
     /// Returns all ESSID entries recorded for `ap`, or an empty slice if none.
@@ -168,7 +199,7 @@ impl EssidMap {
     pub fn ssids_for_emit(&self, ap: &MacAddr, collapse_min: usize, collapse_ratio: u64) -> Vec<&[u8]> {
         let Some(entries) = self.map.get(ap) else { return Vec::new() };
         if entries.len() <= collapse_min || collapse_ratio < 2 {
-            return entries.iter().map(|e| e.essid.as_slice()).collect();
+            return entries.iter().map(|e| &e.essid[..]).collect();
         }
         let mut sorted: Vec<&EssidEntry> = entries.iter().collect();
         sorted.sort_by_key(|e| std::cmp::Reverse(e.count));
@@ -178,12 +209,12 @@ impl EssidMap {
         // 1-entry vec returns at the .get(1) None branch and falls through
         // to "keep all").
         let (Some(primary), Some(second)) = (sorted.first().copied(), sorted.get(1).copied()) else {
-            return sorted.iter().map(|e| e.essid.as_slice()).collect();
+            return sorted.iter().map(|e| &e.essid[..]).collect();
         };
         if primary.count >= collapse_ratio.saturating_mul(second.count) {
-            vec![primary.essid.as_slice()]
+            vec![&primary.essid[..]]
         } else {
-            sorted.iter().map(|e| e.essid.as_slice()).collect()
+            sorted.iter().map(|e| &e.essid[..]).collect()
         }
     }
 
@@ -202,18 +233,24 @@ impl EssidMap {
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
     ///
     /// Sums `HashMap` bucket overhead, every `Vec<EssidEntry>` allocation,
-    /// every `EssidEntry` struct, and the heap bytes of every SSID `Vec<u8>`.
+    /// every `EssidEntry` struct, the interner's `HashSet` bucket overhead, and
+    /// the heap bytes of every unique interned SSID `Arc<[u8]>` (counted once,
+    /// not per `EssidEntry` clone -- the whole point of interning).
     #[must_use]
     pub fn approx_bytes(&self) -> usize {
         let map_cap_bytes = self.map.capacity() * (size_of::<MacAddr>() + size_of::<Vec<EssidEntry>>() + 8);
         let mut entries_bytes = 0usize;
         for v in self.map.values() {
             entries_bytes += v.capacity() * size_of::<EssidEntry>();
-            for e in v {
-                entries_bytes = entries_bytes.saturating_add(e.essid.capacity());
-            }
         }
-        size_of::<Self>() + map_cap_bytes + entries_bytes
+        // Interner heap: HashSet bucket overhead + one Arc<[u8]> allocation per unique
+        // SSID body. Arc<[u8]> heap layout: 16-byte ArcInner header + N body bytes.
+        let interner_cap_bytes = self.interner.capacity() * (size_of::<Arc<[u8]>>() + 8);
+        let mut interner_payload_bytes = 0usize;
+        for arc in &self.interner {
+            interner_payload_bytes = interner_payload_bytes.saturating_add(arc.len() + 16);
+        }
+        size_of::<Self>() + map_cap_bytes + entries_bytes + interner_cap_bytes + interner_payload_bytes
     }
 
     /// Returns all unique ESSID byte strings seen across all APs.
@@ -223,13 +260,12 @@ impl EssidMap {
     /// output must sort the result.
     #[must_use]
     pub fn unique_essids(&self) -> Vec<&[u8]> {
-        use std::collections::HashSet;
         let mut seen: HashSet<&[u8]> = HashSet::new();
         let mut result = Vec::new();
         for entries in self.map.values() {
             for entry in entries {
-                if seen.insert(entry.essid.as_slice()) {
-                    result.push(entry.essid.as_slice());
+                if seen.insert(&entry.essid[..]) {
+                    result.push(&entry.essid[..]);
                 }
             }
         }
@@ -262,7 +298,9 @@ impl EssidMap {
                 // Reuse the same dedup-by-bytes / earliest-timestamp semantics as
                 // `insert`. The hcx-essid filter was already applied at original
                 // insert time, so re-checking here is a no-op for accepted entries.
-                self.insert(canon, entry.essid, entry.timestamp);
+                // The Arc<[u8]> already lives in the interner; `insert` will find
+                // it on the dedup path and reuse the existing entry.
+                self.insert(canon, &entry.essid, entry.timestamp);
             }
         }
         merged_link_macs
@@ -292,7 +330,7 @@ mod tests {
     fn insert_and_resolve_single() {
         let mut m = EssidMap::new();
         let ap = mac(0x11);
-        m.insert(ap, b"HomeNet".to_vec(), 1000);
+        m.insert(ap, b"HomeNet", 1000);
         assert_eq!(m.resolve(&ap, 1000), Some(b"HomeNet".as_slice()));
     }
 
@@ -300,7 +338,7 @@ mod tests {
     fn insert_empty_essid_ignored() {
         let mut m = EssidMap::new();
         let ap = mac(0x22);
-        m.insert(ap, vec![], 500);
+        m.insert(ap, &[], 500);
         assert_eq!(m.resolve(&ap, 500), None);
     }
 
@@ -316,11 +354,11 @@ mod tests {
         // the new `repeat_1` garbage check and short-circuit before the
         // length gate, masking what this test is actually meant to assert.
         let oversized: Vec<u8> = (0..33u8).map(|i| b'A' + (i % 26)).collect();
-        m.insert(ap, oversized, 100);
+        m.insert(ap, &oversized, 100);
         assert_eq!(m.resolve(&ap, 100), None, "33-byte SSID must be rejected");
         // Boundary: exactly 32 bytes is spec-valid and must be accepted.
         let at_limit: Vec<u8> = (0..32u8).map(|i| b'A' + (i % 26)).collect();
-        m.insert(ap, at_limit, 200);
+        m.insert(ap, &at_limit, 200);
         assert!(m.resolve(&ap, 200).is_some(), "32-byte SSID is at the spec limit");
     }
 
@@ -331,7 +369,7 @@ mod tests {
         // Mirrors the gate already applied to `EssidSet` / `ProbeEssidSet`.
         let mut m = EssidMap::new();
         let ap = mac(0x88);
-        m.insert(ap, vec![0x00, b'a', b'b', b'c'], 100);
+        m.insert(ap, &[0x00, b'a', b'b', b'c'], 100);
         assert_eq!(m.resolve(&ap, 100), None, "leading-NUL SSID must be rejected");
     }
 
@@ -341,7 +379,7 @@ mod tests {
         // hit the leading-NUL branch under the broader filter.
         let mut m = EssidMap::new();
         let ap = mac(0x99);
-        m.insert(ap, vec![0u8; 8], 100);
+        m.insert(ap, &[0u8; 8], 100);
         assert_eq!(m.resolve(&ap, 100), None);
     }
 
@@ -350,7 +388,7 @@ mod tests {
         // 1-byte SSIDs are spec-valid and occasionally seen on guest networks.
         let mut m = EssidMap::new();
         let ap = mac(0xAB);
-        m.insert(ap, vec![b'X'], 100);
+        m.insert(ap, b"X", 100);
         assert_eq!(m.resolve(&ap, 100), Some(b"X".as_slice()));
     }
 
@@ -360,9 +398,9 @@ mod tests {
         // count is the discriminator the multi-ESSID inflation filter relies on.
         let mut m = EssidMap::new();
         let ap = mac(0x12);
-        m.insert(ap, b"Home".to_vec(), 1000);
-        m.insert(ap, b"Home".to_vec(), 1100);
-        m.insert(ap, b"Home".to_vec(), 1200);
+        m.insert(ap, b"Home", 1000);
+        m.insert(ap, b"Home", 1100);
+        m.insert(ap, b"Home", 1200);
         let entries = m.all_for_ap(&ap);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].count, 3);
@@ -382,12 +420,12 @@ mod tests {
         let ap = mac(0x21);
         // primary 1000-fold dominance over secondary, which would collapse if
         // the fanout gate were not active.
-        m.insert(ap, b"primary".to_vec(), 1);
+        m.insert(ap, b"primary", 1);
         for _ in 0..1000 {
-            m.insert(ap, b"primary".to_vec(), 1);
+            m.insert(ap, b"primary", 1);
         }
-        m.insert(ap, b"second".to_vec(), 1);
-        m.insert(ap, b"third".to_vec(), 1);
+        m.insert(ap, b"second", 1);
+        m.insert(ap, b"third", 1);
         let kept = m.ssids_for_emit(&ap, 3, 10);
         assert_eq!(kept.len(), 3, "fanout 3 == threshold 3, must pass through");
     }
@@ -399,11 +437,11 @@ mod tests {
         let mut m = EssidMap::new();
         let ap = mac(0x22);
         for _ in 0..100 {
-            m.insert(ap, b"real".to_vec(), 1);
+            m.insert(ap, b"real", 1);
         }
-        m.insert(ap, b"rot1".to_vec(), 1);
-        m.insert(ap, b"rot2".to_vec(), 1);
-        m.insert(ap, b"rot3".to_vec(), 1);
+        m.insert(ap, b"rot1", 1);
+        m.insert(ap, b"rot2", 1);
+        m.insert(ap, b"rot3", 1);
         let kept = m.ssids_for_emit(&ap, 3, 10);
         assert_eq!(kept, vec![b"real".as_slice()], "primary alone must survive");
     }
@@ -416,16 +454,16 @@ mod tests {
         let mut m = EssidMap::new();
         let ap = mac(0x23);
         for _ in 0..5 {
-            m.insert(ap, b"a".to_vec(), 1);
+            m.insert(ap, b"a", 1);
         }
         for _ in 0..5 {
-            m.insert(ap, b"b".to_vec(), 1);
+            m.insert(ap, b"b", 1);
         }
         for _ in 0..4 {
-            m.insert(ap, b"c".to_vec(), 1);
+            m.insert(ap, b"c", 1);
         }
         for _ in 0..4 {
-            m.insert(ap, b"d".to_vec(), 1);
+            m.insert(ap, b"d", 1);
         }
         let kept = m.ssids_for_emit(&ap, 3, 10);
         assert_eq!(kept.len(), 4);
@@ -438,11 +476,11 @@ mod tests {
         let mut m = EssidMap::new();
         let ap = mac(0x24);
         for _ in 0..100 {
-            m.insert(ap, b"primary".to_vec(), 1);
+            m.insert(ap, b"primary", 1);
         }
-        m.insert(ap, b"a".to_vec(), 1);
-        m.insert(ap, b"b".to_vec(), 1);
-        m.insert(ap, b"c".to_vec(), 1);
+        m.insert(ap, b"a", 1);
+        m.insert(ap, b"b", 1);
+        m.insert(ap, b"c", 1);
         let kept = m.ssids_for_emit(&ap, 3, 0);
         assert_eq!(kept.len(), 4, "ratio < 2 disables the collapse");
         let kept = m.ssids_for_emit(&ap, 3, 1);
@@ -455,7 +493,7 @@ mod tests {
         // small-capture safety case (1 beacon + handshake).
         let mut m = EssidMap::new();
         let ap = mac(0x25);
-        m.insert(ap, b"only".to_vec(), 1);
+        m.insert(ap, b"only", 1);
         assert_eq!(m.ssids_for_emit(&ap, 3, 10), vec![b"only".as_slice()]);
     }
 
@@ -466,11 +504,11 @@ mod tests {
         let mut m = EssidMap::new();
         let ap = mac(0x26);
         for _ in 0..10 {
-            m.insert(ap, b"p".to_vec(), 1);
+            m.insert(ap, b"p", 1);
         }
-        m.insert(ap, b"s1".to_vec(), 1);
-        m.insert(ap, b"s2".to_vec(), 1);
-        m.insert(ap, b"s3".to_vec(), 1);
+        m.insert(ap, b"s1", 1);
+        m.insert(ap, b"s2", 1);
+        m.insert(ap, b"s3", 1);
         let kept = m.ssids_for_emit(&ap, 3, 10);
         assert_eq!(kept, vec![b"p".as_slice()]);
 
@@ -478,11 +516,11 @@ mod tests {
         let mut m2 = EssidMap::new();
         let ap = mac(0x27);
         for _ in 0..10 {
-            m2.insert(ap, b"p".to_vec(), 1);
+            m2.insert(ap, b"p", 1);
         }
-        m2.insert(ap, b"s1".to_vec(), 1);
-        m2.insert(ap, b"s2".to_vec(), 1);
-        m2.insert(ap, b"s3".to_vec(), 1);
+        m2.insert(ap, b"s1", 1);
+        m2.insert(ap, b"s2", 1);
+        m2.insert(ap, b"s3", 1);
         let kept = m2.ssids_for_emit(&ap, 3, 11);
         assert_eq!(kept.len(), 4, "ratio 11x not met by 10x dominance");
     }
@@ -496,7 +534,7 @@ mod tests {
         // bytes 0x00-0x1F, which all-`0xFF` does not satisfy.
         let mut m = EssidMap::new();
         let ap = mac(0xF0);
-        m.insert(ap, vec![0xFFu8; 16], 100);
+        m.insert(ap, &[0xFFu8; 16], 100);
         assert_eq!(m.resolve(&ap, 100), Some([0xFFu8; 16].as_slice()));
     }
 
@@ -506,9 +544,9 @@ mod tests {
         // network names -- the store stores them unchanged, no rejection.
         let mut m = EssidMap::new();
         let ap = mac(0xF2);
-        m.insert(ap, b"X".to_vec(), 100);
-        m.insert(ap, b"AA".to_vec(), 200);
-        m.insert(ap, b"XXX".to_vec(), 300);
+        m.insert(ap, b"X", 100);
+        m.insert(ap, b"AA", 200);
+        m.insert(ap, b"XXX", 300);
         assert_eq!(m.all_for_ap(&ap).len(), 3, "all three SSIDs must be retained");
     }
 
@@ -521,7 +559,7 @@ mod tests {
         // present (`0x55` is printable, so no warning fires here).
         let mut m = EssidMap::new();
         let ap = mac(0xF1);
-        m.insert(ap, vec![0x55u8; 8], 100);
+        m.insert(ap, &[0x55u8; 8], 100);
         assert_eq!(m.resolve(&ap, 100), Some([0x55u8; 8].as_slice()));
     }
 
@@ -529,11 +567,11 @@ mod tests {
     fn insert_same_ssid_updates_timestamp() {
         let mut m = EssidMap::new();
         let ap = mac(0x33);
-        m.insert(ap, b"ssid".to_vec(), 2000);
+        m.insert(ap, b"ssid", 2000);
         // Earlier observation -- should update to 800.
-        m.insert(ap, b"ssid".to_vec(), 800);
+        m.insert(ap, b"ssid", 800);
         // Later observation -- should NOT update (2000 already replaced by 800).
-        m.insert(ap, b"ssid".to_vec(), 5000);
+        m.insert(ap, b"ssid", 5000);
         let entries = &m.map[&ap];
         assert_eq!(entries.len(), 1, "same SSID must not create duplicate entries");
         assert_eq!(entries[0].timestamp, 800, "timestamp must be the earliest seen");
@@ -543,8 +581,8 @@ mod tests {
     fn insert_different_ssid_appended() {
         let mut m = EssidMap::new();
         let ap = mac(0x44);
-        m.insert(ap, b"first".to_vec(), 100);
-        m.insert(ap, b"second".to_vec(), 200);
+        m.insert(ap, b"first", 100);
+        m.insert(ap, b"second", 200);
         assert_eq!(m.map[&ap].len(), 2);
     }
 
@@ -553,8 +591,8 @@ mod tests {
         let mut m = EssidMap::new();
         let ap = mac(0x55);
         // timestamp=100 -> ssid_a; timestamp=900 -> ssid_b; target=800 -> ssid_b is closer
-        m.insert(ap, b"ssid_a".to_vec(), 100);
-        m.insert(ap, b"ssid_b".to_vec(), 900);
+        m.insert(ap, b"ssid_a", 100);
+        m.insert(ap, b"ssid_b", 900);
         assert_eq!(m.resolve(&ap, 800), Some(b"ssid_b".as_slice()));
     }
 
@@ -568,7 +606,7 @@ mod tests {
     fn resolve_exact_match() {
         let mut m = EssidMap::new();
         let ap = mac(0x66);
-        m.insert(ap, b"exact".to_vec(), 42);
+        m.insert(ap, b"exact", 42);
         assert_eq!(m.resolve(&ap, 42), Some(b"exact".as_slice()));
     }
 
@@ -582,11 +620,11 @@ mod tests {
     fn all_for_ap_returns_all_entries() {
         let mut m = EssidMap::new();
         let ap = mac(0x77);
-        m.insert(ap, b"ssid1".to_vec(), 100);
-        m.insert(ap, b"ssid2".to_vec(), 200);
+        m.insert(ap, b"ssid1", 100);
+        m.insert(ap, b"ssid2", 200);
         let entries = m.all_for_ap(&ap);
         assert_eq!(entries.len(), 2);
-        let ssids: Vec<&[u8]> = entries.iter().map(|e| e.essid.as_slice()).collect();
+        let ssids: Vec<&[u8]> = entries.iter().map(|e| &e.essid[..]).collect();
         assert!(ssids.contains(&b"ssid1".as_slice()));
         assert!(ssids.contains(&b"ssid2".as_slice()));
     }
@@ -596,9 +634,9 @@ mod tests {
         let mut m = EssidMap::new();
         let ap1 = mac(0x11);
         let ap2 = mac(0x22);
-        m.insert(ap1, b"net1".to_vec(), 1);
-        m.insert(ap1, b"net2".to_vec(), 2); // same AP, different SSID
-        m.insert(ap2, b"net3".to_vec(), 3);
+        m.insert(ap1, b"net1", 1);
+        m.insert(ap1, b"net2", 2); // same AP, different SSID
+        m.insert(ap2, b"net3", 3);
         assert_eq!(m.ap_count(), 2);
     }
 
@@ -612,8 +650,8 @@ mod tests {
         let link_a = mac(0x11);
         let link_b = mac(0x22);
         let mld = mac(0xAA);
-        m.insert(link_a, b"HomeNet".to_vec(), 100);
-        m.insert(link_b, b"HomeNet".to_vec(), 200); // 6 GHz link MAC, same SSID
+        m.insert(link_a, b"HomeNet", 100);
+        m.insert(link_b, b"HomeNet", 200); // 6 GHz link MAC, same SSID
         assert_eq!(m.ap_count(), 2);
 
         let merged = m.canonicalize_pairs(|x| if x == link_a || x == link_b { mld } else { x });
@@ -622,7 +660,7 @@ mod tests {
         assert_eq!(m.ap_count(), 1, "single MLD key remains");
         let entries = m.all_for_ap(&mld);
         assert_eq!(entries.len(), 1, "duplicate SSID merged into one entry");
-        assert_eq!(entries[0].essid, b"HomeNet");
+        assert_eq!(&entries[0].essid[..], b"HomeNet");
         assert_eq!(entries[0].timestamp, 100, "earliest timestamp preserved");
         assert!(m.all_for_ap(&link_a).is_empty(), "link MAC entry gone after fold");
         assert!(m.all_for_ap(&link_b).is_empty(), "link MAC entry gone after fold");
@@ -632,12 +670,12 @@ mod tests {
     fn canonicalize_pairs_no_op_when_identity() {
         // No MLE seen -> identity canonicalize -> no merges, map unchanged.
         let mut m = EssidMap::new();
-        m.insert(mac(0x11), b"a".to_vec(), 1);
-        m.insert(mac(0x22), b"b".to_vec(), 2);
+        m.insert(mac(0x11), b"a", 1);
+        m.insert(mac(0x22), b"b", 2);
         let merged = m.canonicalize_pairs(|x| x);
         assert_eq!(merged, 0);
         assert_eq!(m.ap_count(), 2);
-        assert_eq!(m.all_for_ap(&mac(0x11))[0].essid, b"a");
+        assert_eq!(&m.all_for_ap(&mac(0x11))[0].essid[..], b"a");
     }
 
     #[test]
@@ -648,8 +686,8 @@ mod tests {
         let link_a = mac(0x11);
         let link_b = mac(0x22);
         let mld = mac(0xAA);
-        m.insert(link_a, b"HomeNet".to_vec(), 100);
-        m.insert(link_b, b"HomeNet-6E".to_vec(), 200);
+        m.insert(link_a, b"HomeNet", 100);
+        m.insert(link_b, b"HomeNet-6E", 200);
 
         m.canonicalize_pairs(|x| if x == link_a || x == link_b { mld } else { x });
 

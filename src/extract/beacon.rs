@@ -81,7 +81,7 @@ pub fn process_beacon_or_probe_resp(
                 }
             }
             if !ie.value.is_empty() {
-                insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
+                insert_essid(essid_map, mac_hdr.ap, ie.value, timestamp_us, stats, logger);
                 essid_set.insert(ie.value);
                 if populate_wordlist {
                     wordlist_store.insert(ie.value.to_vec());
@@ -154,7 +154,7 @@ pub fn process_beacon_or_probe_resp(
     for ie in iter_ies(ies) {
         if ie.id == IE_SSID_LIST {
             for ssid in extract_ssid_list(ie.value) {
-                insert_essid(essid_map, mac_hdr.ap, ssid.clone(), timestamp_us, stats, logger);
+                insert_essid(essid_map, mac_hdr.ap, &ssid, timestamp_us, stats, logger);
                 essid_set.insert(&ssid);
                 if populate_wordlist {
                     wordlist_store.insert(ssid);
@@ -232,7 +232,7 @@ pub fn process_beacon_or_probe_resp(
     // Goes to essid_map + essid_set + wordlist_store. [IEEE 802.11-2024] §9.4.2.97
     for ie in iter_ies(ies) {
         if ie.id == IE_MESH_ID && !ie.value.is_empty() {
-            insert_essid(essid_map, mac_hdr.ap, ie.value.to_vec(), timestamp_us, stats, logger);
+            insert_essid(essid_map, mac_hdr.ap, ie.value, timestamp_us, stats, logger);
             essid_set.insert(ie.value);
             if populate_wordlist {
                 wordlist_store.insert(ie.value.to_vec());
@@ -260,7 +260,7 @@ pub fn process_beacon_or_probe_resp(
     for ie in iter_ies(ies) {
         if let Some(body) = vendor_ie_body(&ie, OUI_WFA_NEW, WFA_OWE_TRANSITION_TYPE) {
             if let Some(ssid) = extract_owe_transition_ssid(body) {
-                insert_essid(essid_map, mac_hdr.ap, ssid.clone(), timestamp_us, stats, logger);
+                insert_essid(essid_map, mac_hdr.ap, &ssid, timestamp_us, stats, logger);
                 essid_set.insert(&ssid);
                 if populate_wordlist {
                     wordlist_store.insert(ssid);
@@ -309,7 +309,7 @@ pub fn process_beacon_or_probe_resp(
             for profile in profiles {
                 let sub_mac = MacAddr::from_bytes(profile.bssid);
                 if !profile.ssid.is_empty() {
-                    insert_essid(essid_map, sub_mac, profile.ssid.clone(), timestamp_us, stats, logger);
+                    insert_essid(essid_map, sub_mac, &profile.ssid, timestamp_us, stats, logger);
                     essid_set.insert(&profile.ssid);
                     if populate_wordlist {
                         wordlist_store.insert(profile.ssid.clone());
