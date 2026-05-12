@@ -207,9 +207,123 @@ fn run_and_count(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> usi
     fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count()
 }
 
+/// Runs wpawolf on `input_path` and returns `(output_line_count, stderr_text)`.
+/// The stderr text is needed by callers that assert against closing-banner
+/// counters (e.g. NC-dedup stats under `--per-file`).
+fn run_capture(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> (usize, String) {
+    let _ = fs::remove_file(out_path);
+    let mut args: Vec<&str> = vec!["--22000-out", out_path.to_str().unwrap()];
+    args.extend_from_slice(extra_args);
+    let input_str = input_path.to_str().unwrap();
+    args.push(input_str);
+    let output = Command::new(common::binary_path()).args(&args).output().expect("spawn wpawolf");
+    assert!(output.status.success(), "wpawolf exited non-zero with args {extra_args:?}");
+    let lines = fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count();
+    let stderr = String::from_utf8(output.stderr).expect("wpawolf stderr is UTF-8");
+    (lines, stderr)
+}
+
+/// Extracts the integer printed after a banner-row label like
+/// `"NC-dedup near-identical-nonce lines collapsed (--nc-dedup)"`. Returns 0
+/// when the row is absent (`nz!` suppresses zero values). Banner rows are
+/// indented with leading whitespace; `contains` + `split_once(':')` handles
+/// that without a prefix dance.
+fn banner_counter(stderr: &str, label: &str) -> u64 {
+    for line in stderr.lines() {
+        if line.contains(label)
+            && let Some((_, after_colon)) = line.split_once(':')
+        {
+            let digits: String = after_colon.chars().filter(char::is_ascii_digit).collect();
+            if !digits.is_empty() {
+                return digits.parse().expect("counter value parses");
+            }
+        }
+    }
+    0
+}
+
 fn fixture_paths(name: &str) -> (PathBuf, PathBuf) {
     let dir = common::temp_dir("wpawolf_nc_dedup_collapse");
     (dir.join(format!("{name}.pcap")), dir.join(format!("{name}.22000")))
+}
+
+/// Builds a small "single dense cluster" pcap fixture parameterised on the
+/// AP/STA MACs, SSID, and trailing-nonce starting byte. Each fixture is one
+/// Beacon + 9 M1 frames whose `ANonce` tails cycle through nine consecutive
+/// values starting at `tail_start` + a single M2 to pair against.
+///
+/// At `--nc-tolerance=8` the 9-element span-8 cluster always collapses to
+/// exactly one survivor under the safest-survivor rule (median is the
+/// hashcat-safest observation for a dense cluster).
+fn build_single_cluster_pcap(ap: [u8; 6], sta: [u8; 6], ssid: &[u8], tail_start: u8) -> Vec<u8> {
+    let anonce_prefix: [u8; 28] = [
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1,
+        0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB,
+    ];
+    let snonce: [u8; 32] = [
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1,
+        0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+    ];
+    let mic = [0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F];
+
+    let mut buf = common::pcap_global_header().to_vec();
+    let mut ts: u32 = 1_000_000;
+    buf.extend_from_slice(&common::pcap_packet(ts, &beacon_wpa2_psk(ssid, ap)));
+    ts += 1;
+    for offset in 0u8..9 {
+        let mut nonce = [0u8; 32];
+        nonce[..28].copy_from_slice(&anonce_prefix);
+        nonce[28] = 0x00;
+        nonce[29] = 0x00;
+        nonce[30] = 0x00;
+        nonce[31] = tail_start.wrapping_add(offset);
+        let m1_body = eapol_key_body(true, false, false, false, nonce, [0u8; 16]);
+        buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_dl(ap, sta, &m1_body)));
+        ts += 1;
+    }
+    let m2_body = eapol_key_body(false, false, true, false, snonce, mic);
+    buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_ul(ap, sta, &m2_body)));
+    buf
+}
+
+/// Builds a pcap with one Beacon + two M1 frames whose `ANonce` tails sit at
+/// the cluster span edges -- `tail=0x00` and `tail=tolerance` -- plus a
+/// single M2. With `--nc-tolerance=tolerance` no observed nonce can serve as
+/// a hashcat-safe survivor (the iteration window `survivor +/- tolerance/2`
+/// cannot reach the opposite edge), so NC-dedup must leave both members as
+/// singletons.
+fn build_sparse_edge_pcap(tolerance: u8) -> Vec<u8> {
+    let ap: [u8; 6] = [0x02, 0x77, 0x88, 0x99, 0xAA, 0xBB];
+    let sta: [u8; 6] = [0x02, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
+    let ssid = b"SparseEdgeNet";
+    let anonce_prefix: [u8; 28] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21,
+        0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B,
+    ];
+    let snonce: [u8; 32] = [
+        0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F, 0xA0, 0xA1,
+        0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+    ];
+    let mic = [0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0x0F, 0xED, 0xCB, 0xA9, 0x87, 0x65, 0x43, 0x21];
+
+    let mut buf = common::pcap_global_header().to_vec();
+    let mut ts: u32 = 2_000_000;
+    buf.extend_from_slice(&common::pcap_packet(ts, &beacon_wpa2_psk(ssid, ap)));
+    ts += 1;
+    for tail in [0x00u8, tolerance] {
+        let mut nonce = [0u8; 32];
+        nonce[..28].copy_from_slice(&anonce_prefix);
+        nonce[28] = 0x00;
+        nonce[29] = 0x00;
+        nonce[30] = 0x00;
+        nonce[31] = tail;
+        let m1_body = eapol_key_body(true, false, false, false, nonce, [0u8; 16]);
+        buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_dl(ap, sta, &m1_body)));
+        ts += 1;
+    }
+    let m2_body = eapol_key_body(false, false, true, false, snonce, mic);
+    buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_ul(ap, sta, &m2_body)));
+    buf
 }
 
 #[test]
@@ -252,4 +366,81 @@ fn nc_tolerance_tighter_value_splits_into_more_clusters() {
     fs::write(&pcap, build_nc_cluster_pcap()).unwrap();
     let lines = run_and_count(&pcap, &out, &["--nc-dedup", "--nc-tolerance=4"]);
     assert_eq!(lines, 6, "tolerance=4 produces 5 cluster survivors + 1 isolated singleton");
+}
+
+#[test]
+fn nc_dedup_per_file_counters_accumulate_across_files() {
+    // Regression-pin for the `OutputStats.nc_dedup_* =` bug: under `--per-file`
+    // each input file's `emit_inner` was overwriting the prior file's stats,
+    // so the closing banner only reflected the last file's NC-dedup activity.
+    //
+    // Build three pcaps, each with its own dense 9-element cluster (different
+    // AP MACs so the clusters do not bucket together). Run with
+    // `--per-file --nc-dedup` against the containing directory and assert the
+    // banner counters report the sum across all three files: 24 lines
+    // collapsed (3 * 8), 3 clusters total, max cluster size 9.
+    let dir = common::temp_dir("wpawolf_nc_dedup_perfile");
+    let out_path = dir.join("perfile.22000");
+    // Drop any pcaps left behind by a prior failing run -- directory input
+    // expansion would otherwise pick them up alongside the three new ones.
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    let files = [
+        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x01], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x01], b"WolfNetA", 0x40u8),
+        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x02], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x02], b"WolfNetB", 0x60u8),
+        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x03], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x03], b"WolfNetC", 0x80u8),
+    ];
+    for (i, (ap, sta, ssid, tail)) in files.iter().enumerate() {
+        let pcap_bytes = build_single_cluster_pcap(*ap, *sta, *ssid, *tail);
+        fs::write(dir.join(format!("file{i}.pcap")), pcap_bytes).unwrap();
+    }
+    let (lines, stderr) = run_capture(&dir, &out_path, &["--per-file", "--nc-dedup"]);
+    // One survivor per file -- three files -> three lines on disk.
+    assert_eq!(lines, 3, "each file's 9-element cluster collapses to one survivor");
+    // The fix in OutputContext::emit_inner accumulates these across emit
+    // calls; the pre-fix value would have been 8 / 1 / 9 (last file only).
+    assert_eq!(
+        banner_counter(&stderr, "NC-dedup near-identical-nonce lines collapsed"),
+        24,
+        "per-file mode must accumulate collapsed_lines across files (3 files * 8 collapsed each)"
+    );
+    assert_eq!(
+        banner_counter(&stderr, "NC-dedup cluster count"),
+        3,
+        "per-file mode must accumulate cluster_count across files (one cluster per file)"
+    );
+    assert_eq!(
+        banner_counter(&stderr, "NC-dedup max cluster size"),
+        9,
+        "per-file mode must take the global max across files (all three clusters are size 9)"
+    );
+}
+
+#[test]
+fn nc_dedup_sparse_edge_cluster_does_not_collapse_via_cli() {
+    // Regression-pin for the survivor-coverage bug: a cluster of exactly two
+    // pairs at the span edges `[tail=0, tail=tolerance]` has no observation
+    // hashcat NC iteration can recover both members from, so NC-dedup must
+    // skip the collapse and emit both as singletons. The pre-fix
+    // sorted-median rule would have dropped one member silently; the safety
+    // guard now keeps both. Verified via the banner counters (no collapse,
+    // no cluster). `FLAG_NC` is NOT a useful witness here -- combos.rs sets
+    // it unconditionally on every M1-sourced pair regardless of NC-dedup.
+    let (pcap, out) = fixture_paths("sparse_edge");
+    fs::write(&pcap, build_sparse_edge_pcap(8)).unwrap();
+    let (lines, stderr) = run_capture(&pcap, &out, &["--nc-dedup"]);
+    assert_eq!(lines, 2, "sparse-edge 2-member cluster must stay as two singletons");
+    assert_eq!(
+        banner_counter(&stderr, "NC-dedup near-identical-nonce lines collapsed"),
+        0,
+        "safety guard must skip the collapse entirely (zero drops)"
+    );
+    assert_eq!(
+        banner_counter(&stderr, "NC-dedup cluster count"),
+        0,
+        "safety guard must skip the collapse entirely (zero clusters formed)"
+    );
 }
