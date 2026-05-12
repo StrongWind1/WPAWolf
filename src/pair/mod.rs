@@ -10,6 +10,7 @@
 pub mod collapse;
 pub mod combos;
 pub mod constraints;
+pub mod nc_dedup;
 
 use std::sync::Arc;
 
