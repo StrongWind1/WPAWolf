@@ -63,6 +63,10 @@ name = "fragment_reassembly"
 path = "tests/integration/fragment_reassembly.rs"
 
 [[test]]
+name = "nc_dedup_collapse"
+path = "tests/integration/nc_dedup_collapse.rs"
+
+[[test]]
 name = "cross_file_pairing"
 path = "tests/integration/cross_file_pairing.rs"
 
