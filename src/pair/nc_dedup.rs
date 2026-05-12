@@ -486,14 +486,16 @@ mod tests {
     }
 
     #[test]
-    fn nc_dedup_sorted_median_survivor_is_at_index_n_over_two() {
-        // 9 pairs with LE tails 0x10..=0x18, tolerance 8. Sorted median index
-        // = 9/2 = 4 -> survivor's nonce[28] = 0x14.
+    fn nc_dedup_dense_cluster_survivor_is_center_observation() {
+        // 9 pairs with LE tails 0x10..=0x18, tolerance 8. For a densely-packed
+        // cluster the safest-survivor rule picks the same observation as the
+        // sorted-median (0x14, distance 4 to both edges -- the only observation
+        // hashcat NC=8 can recover every dropped sibling from).
         let pairs: Vec<PairedHash> =
             (0x10u8..=0x18).map(|t| make_pair(ComboType::N1E2, nonce_with_le_tail(t), 0xCC, 0xDD)).collect();
         let (out, _) = nc_dedup(pairs, &config_with_nc(8));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].nonce[28], 0x14, "sorted-median of 0x10..=0x18 is 0x14");
+        assert_eq!(out[0].nonce[28], 0x14, "dense-cluster safest survivor of 0x10..=0x18 is 0x14");
     }
 
     #[test]
