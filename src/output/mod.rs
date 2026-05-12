@@ -641,9 +641,15 @@ impl OutputContext {
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
         let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count);
-        stats.nc_dedup_collapsed_lines = nc_stats.collapsed_lines;
-        stats.nc_dedup_cluster_count = nc_stats.cluster_count;
-        stats.nc_dedup_max_cluster_size = nc_stats.max_cluster_size;
+        // Accumulate across `emit` calls so `--per-file` runs report the
+        // total NC-dedup yield across every file's pair_all_groups pass
+        // rather than just the last file's. `collapsed_lines` and
+        // `cluster_count` are component-wise sums; `max_cluster_size`
+        // tracks the global maximum -- same merge rule as `merge_nc_stats`
+        // in `pair/mod.rs`.
+        stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
+        stats.nc_dedup_cluster_count += nc_stats.cluster_count;
+        stats.nc_dedup_max_cluster_size = stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
         if any_sink {
             for pair in &all_pairs {
                 let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
