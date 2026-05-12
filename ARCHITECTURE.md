@@ -390,7 +390,7 @@ Direct runtime dependencies: 2 crates - `flate2` (gzip, `rust_backend`-only feat
 
 ### Memory budget (informational)
 
-No artificial ceiling. Typical 100 GB capture: ~332 MiB total (MessageStore ~258 MiB at 1M messages, PmkidStore ~10 MiB at 100K, EssidMap ~3 MiB at 50K APs, DedupSet ~56 MiB at 1M, auxiliary ~2.5 MiB, I/O buffers and pair-gen temporaries negligible). 10M messages: ~2.5 GiB. 100M (theoretical max): ~25 GiB. wpawolf does not introspect its own memory footprint; operators run `/usr/bin/time -v` or `perf stat` for an authoritative number from the kernel.
+No artificial ceiling. Two compaction passes shape the runtime footprint: `EssidMap` SSID bodies are interned through an `Arc<[u8]>` set so identical SSID broadcasts across APs share one heap allocation, and `MessageStore::add` dedups byte-identical EAPOL frames at insert by `(msg_type, akm, eapol_frame)` so retransmitted M2 / M4 frames collapse before pair generation runs. Empirical baseline on a 5.4 GB / 1788-cap multi-vendor corpus (single-threaded, no output filters): peak RSS ~1.65 GiB, dominated by `MessageStore` (~283 MiB / 282 K groups), then `EssidMap` (~57 MiB / 292 K entries), `AkmMap` (~16 MiB / 528 K entries), `PmkidStore` (~6 MiB / 14 K entries), `EssidSet` (~4 MiB / 85 K entries), and the global `DedupSet` (~one `u64` per emitted line). 10x corpus (~54 GB): roughly linear, ~16 GiB. wpawolf does not introspect its own memory footprint; operators run `/usr/bin/time -v` or `perf stat` for an authoritative number, or pass `--mem-stats` to print a per-store table at the end of the run.
 
 ---
 
