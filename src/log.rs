@@ -19,6 +19,13 @@
 //!   not match any supported capture format (typically a sub-4-byte stub or a
 //!   non-capture file slipped through). Counted in stats and silenced on stderr;
 //!   triage detail goes here.
+//! - `out_of_sequence_timestamp` -- informational: a packet's pcap timestamp went
+//!   backward relative to the previous packet in the same file. Capture-tool
+//!   artifact (typically aircrack-ng deadly-clean or mergecap with strict
+//!   time-stamps disabled); wpawolf processes the packet normally. Capped at the
+//!   first 10 inversions per file to keep tampered captures from flooding the
+//!   log; the `Stats::out_of_sequence_timestamps` counter still tallies every
+//!   inversion across the run.
 //! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL, all-`0xFF`,
 //!   or a short-period repeating pattern (`repeat_1` / `repeat_2` / `repeat_4`).
 //!   Applies to every message type including M4: M4 NULL nonce is spec-valid on
@@ -246,6 +253,27 @@ impl Logger {
     /// preserved for triage.
     pub fn log_skipped_input(&mut self, path: &std::path::Path, reason: &str) {
         self.write_line(&format!("[skipped_input] path={} reason={reason}", path.display()));
+    }
+
+    /// Logs a packet whose pcap timestamp went backward relative to the
+    /// previous packet in the same input file.
+    ///
+    /// Informational diagnostic, not a discard. A monotonic packet sequence is
+    /// what any well-behaved capture tool produces; inversions almost always
+    /// indicate the file has been post-processed (aircrack-ng deadly-clean,
+    /// mergecap with `--strict-time-stamps=false`, hand-edited). wpawolf
+    /// itself does not care -- the pairing engine works on `(AP, STA)`
+    /// groups, not on file order. Matches the
+    /// `Warning: out of sequence timestamps!` line that hcxpcapngtool 7.1.2
+    /// prints on the same input. Call sites cap the number of log lines per
+    /// file (default: first 10 inversions per file) so a deeply-shuffled
+    /// capture does not flood the log; the `Stats::out_of_sequence_timestamps`
+    /// counter still tallies every inversion across the whole run.
+    pub fn log_out_of_sequence_timestamp(&mut self, path: &std::path::Path, previous_ts_us: u64, current_ts_us: u64) {
+        self.write_line(&format!(
+            "[out_of_sequence_timestamp] path={} previous_ts_us={previous_ts_us} current_ts_us={current_ts_us}",
+            path.display()
+        ));
     }
 
     /// Flushes the log buffer to disk.

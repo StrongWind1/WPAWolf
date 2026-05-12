@@ -591,3 +591,80 @@ fn plcp_error_carries_underlying_error_text() {
         "expected error detail in [plcp_error] message; got {lines:?}"
     );
 }
+
+#[test]
+fn category_out_of_sequence_timestamp_fires_on_backward_packet() {
+    // Two packets where the second has an earlier timestamp than the first.
+    // Per FR-LOG the converter must accept the input (wpawolf does not gate on
+    // monotonic time), tally the inversion in stats, and emit a
+    // `[out_of_sequence_timestamp]` line so an operator triaging the corpus
+    // can identify which captures have been touched. DLT 105 (raw 802.11) lets
+    // wpawolf decode the body even though the body itself is irrelevant here.
+    let pcap = "/tmp/wpawolf_logcov_oos_ts.pcap";
+    let log = "/tmp/wpawolf_logcov_oos_ts.log";
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&pcap_global_header(105));
+    // First packet at epoch 2000; second at epoch 1000 -> strict backward step.
+    bytes.extend_from_slice(&pcap_packet_record(2000, &[0u8; 32]));
+    bytes.extend_from_slice(&pcap_packet_record(1000, &[0u8; 32]));
+    fs::write(pcap, &bytes).unwrap();
+
+    run_with_log(pcap, log, &[]);
+
+    let lines = log_lines_for(log, "[out_of_sequence_timestamp]");
+    assert!(!lines.is_empty(), "expected at least one [out_of_sequence_timestamp] line");
+    let line = &lines[0];
+    assert!(line.contains("previous_ts_us=2000000000"), "want previous_ts_us=2000000000 in line: {line}");
+    assert!(line.contains("current_ts_us=1000000000"), "want current_ts_us=1000000000 in line: {line}");
+    assert!(line.contains("path=/tmp/wpawolf_logcov_oos_ts.pcap"), "want path= in line: {line}");
+}
+
+#[test]
+fn out_of_sequence_timestamp_capped_at_first_ten_per_file() {
+    // A capture with many backward steps should still bump the run-wide counter
+    // for each one, but the log file should carry at most 10 lines per source
+    // file so a deeply-tampered capture cannot flood the operator's log.
+    let pcap = "/tmp/wpawolf_logcov_oos_ts_cap.pcap";
+    let log = "/tmp/wpawolf_logcov_oos_ts_cap.log";
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&pcap_global_header(105));
+    // First "anchor" packet at a high timestamp so every subsequent packet is an
+    // inversion relative to its predecessor's high value, then a low timestamp,
+    // then high, then low ... -> 20 alternations -> 20 strict backward steps.
+    for i in 0..20 {
+        let ts = if i % 2 == 0 { 5_000 } else { 1_000 };
+        bytes.extend_from_slice(&pcap_packet_record(ts, &[0u8; 32]));
+    }
+    fs::write(pcap, &bytes).unwrap();
+
+    run_with_log(pcap, log, &[]);
+
+    let lines = log_lines_for(log, "[out_of_sequence_timestamp]");
+    assert!(!lines.is_empty(), "expected at least one [out_of_sequence_timestamp] line");
+    assert!(lines.len() <= 10, "per-file log cap is 10; got {} lines: {lines:?}", lines.len());
+}
+
+#[test]
+fn out_of_sequence_timestamp_skipped_on_monotonic_capture() {
+    // A monotonic capture must not produce any [out_of_sequence_timestamp]
+    // lines. Equal-timestamp bursts also do not trigger -- only a STRICT
+    // backward step counts as an inversion.
+    let pcap = "/tmp/wpawolf_logcov_oos_ts_mono.pcap";
+    let log = "/tmp/wpawolf_logcov_oos_ts_mono.log";
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&pcap_global_header(105));
+    bytes.extend_from_slice(&pcap_packet_record(1000, &[0u8; 32]));
+    bytes.extend_from_slice(&pcap_packet_record(1000, &[0u8; 32])); // equal -> no trigger
+    bytes.extend_from_slice(&pcap_packet_record(2000, &[0u8; 32])); // forward -> no trigger
+    fs::write(pcap, &bytes).unwrap();
+
+    run_with_log(pcap, log, &[]);
+
+    assert!(
+        !log_has_category(log, "[out_of_sequence_timestamp]"),
+        "monotonic / equal-timestamp capture must not log out-of-sequence"
+    );
+}

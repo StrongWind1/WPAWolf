@@ -374,6 +374,11 @@ struct Cli {
     strict: bool,
 }
 
+/// Maximum `[out_of_sequence_timestamp]` lines logged per input file. Beyond this
+/// the run-wide counter still ticks but the log file stays quiet to avoid
+/// flooding on tampered captures.
+const OOS_LOG_CAP_PER_FILE: u32 = 10;
+
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
@@ -561,6 +566,18 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         *stats.endians_seen.entry(meta.endian.to_owned()).or_insert(0) += 1;
         *stats.dlt_descs_seen.entry(meta.dlt_desc).or_insert(0) += 1;
 
+        // Per-file timestamp sequence tracker. A monotonic increase is what any
+        // well-behaved capture tool produces; inversions almost always indicate
+        // post-processed input (aircrack-ng deadly-clean, mergecap with
+        // --strict-time-stamps=false, hand edit). wpawolf processes the packet
+        // normally either way; the counter + log line exist only so an operator
+        // triaging a corpus can identify which captures have been touched.
+        // Matches hcxpcapngtool 7.1.2's "Warning: out of sequence timestamps!".
+        // `OOS_LOG_CAP_PER_FILE` is declared at module scope (see below) to
+        // satisfy `clippy::items_after_statements`.
+        let mut prev_ts_us: u64 = 0;
+        let mut oos_logged_this_file: u32 = 0;
+
         loop {
             match reader.next_packet() {
                 Ok(Some(packet)) => {
@@ -576,6 +593,19 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     if packet.timestamp_us > stats.timestamp_last_us {
                         stats.timestamp_last_us = packet.timestamp_us;
                     }
+                    // Per-file out-of-sequence detection. `prev_ts_us == 0` skips the
+                    // first packet (no previous to compare); subsequent packets compare
+                    // against the previous packet in this file. We accept equality (a
+                    // genuinely simultaneous burst is plausible), only strict decrease
+                    // triggers the counter.
+                    if prev_ts_us != 0 && packet.timestamp_us < prev_ts_us {
+                        stats.out_of_sequence_timestamps += 1;
+                        if oos_logged_this_file < OOS_LOG_CAP_PER_FILE {
+                            logger.log_out_of_sequence_timestamp(path, prev_ts_us, packet.timestamp_us);
+                            oos_logged_this_file += 1;
+                        }
+                    }
+                    prev_ts_us = packet.timestamp_us;
 
                     // Get the DLT for this interface.
                     let Some(dlt) = reader.link_type(packet.interface_id) else {

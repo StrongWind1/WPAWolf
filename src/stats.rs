@@ -118,6 +118,21 @@ pub struct Stats {
     /// race (file shrunk between the walk and the open). Per-file detail goes
     /// to the `--log` sink under the `[skipped_input]` category.
     pub files_skipped_unknown_format: u64,
+    /// Number of packets whose pcap timestamp went backward relative to the
+    /// previous packet in the same input file. A monotonic sequence is what
+    /// any well-behaved capture tool produces; inversions almost always
+    /// indicate the file has been post-processed (aircrack-ng deadly-clean,
+    /// mergecap with `--strict-time-stamps=false`, hand-edited). wpawolf
+    /// itself does not care -- the pairing engine works on `(AP, STA)`
+    /// groups, not on file order -- but an operator triaging a corpus may
+    /// want to identify which captures have been touched. Matches the
+    /// `Warning: out of sequence timestamps!` diagnostic that hcxpcapngtool
+    /// 7.1.2 prints on the same input. Counter is per-run (sum across all
+    /// input files); per-file detail goes to the `--log` sink under the
+    /// `[out_of_sequence_timestamp]` category, capped at the first 10
+    /// inversions per file so a deeply-shuffled capture does not flood the
+    /// log.
+    pub out_of_sequence_timestamps: u64,
     /// Hash lines written to output file(s).
     pub hashes_written: u64,
     /// Hash lines dropped by the dedup filter.
@@ -929,6 +944,7 @@ impl Stats {
         nz!("capture files with truncated trailing record (earlier records kept)", self.truncated_capture_files);
         nz!("  trailing packets unread (dropped; see --log)", self.unreadable_packets);
         nz!("input files skipped (magic unrecognised; see --log)", self.files_skipped_unknown_format);
+        nz!("pcap timestamps out of sequence (capture-tool artifact; informational)", self.out_of_sequence_timestamps);
 
         // ======================================================================
         // Phase 2 -- Decode: link/802.11 frame classification, per-band
@@ -1311,6 +1327,7 @@ mod tests {
         assert_eq!(s.truncated_capture_files, 0);
         assert_eq!(s.unreadable_packets, 0);
         assert_eq!(s.files_skipped_unknown_format, 0);
+        assert_eq!(s.out_of_sequence_timestamps, 0);
         assert_eq!(s.hashes_written, 0);
         assert_eq!(s.dedup_dropped, 0);
         assert_eq!(s.essid_count, 0);
