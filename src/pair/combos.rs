@@ -98,6 +98,41 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     let m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
     let m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
 
+    // NC flag for M3-anchored pairs (N3E2 / N3E4) -- three independent sources, all
+    // mirroring hcxpcapngtool exactly:
+    //
+    //   1. M1 presence. [hcxpcapngtool.c:4190] inits every stored M1 with
+    //      `status = ST_NC` (0x80). When addhandshake later builds an N3E2 /
+    //      N3E4 line, its inheritance loop [hcxpcapngtool.c:2758-2767] ORs
+    //      `zeiger->status & 0xe0` from every messagelist entry sharing the AP
+    //      MAC -- so any M1 for this AP propagates ST_NC into mpfield. The
+    //      loop runs only on non-APLESS combos, matching wpawolf's
+    //      N1E2 / N1E4 / N3E2 / N3E4 set.
+    //
+    //   2. Endianness detection. [hcxpcapngtool.c:3814-3826] (M3-path) and
+    //      [hcxpcapngtool.c:4242-4253] (M1-path) set `status = ST_LE + ST_NC`
+    //      or `ST_BE + ST_NC` on BOTH the stored message and the current scratch
+    //      slot whenever two M1/M3 nonces share their first 28 bytes but differ
+    //      in the trailing 4. Once set, the inheritance loop above pulls
+    //      ST_LE / ST_BE / ST_NC into every subsequent handshake for that AP.
+    //      wpawolf's `detect_nonce_endianness` mirrors the detection logic; if
+    //      either bit fires we must light FLAG_NC even when no M1 was captured.
+    //
+    //   3. Per-pair RC gap. [hcxpcapngtool.c:2787-2790] sets ST_NC at
+    //      addhandshake time when `rcgap > 0 && (status & ST_ENDIANESS) == 0`.
+    //      hcx defines rcgap relative to the expected handshake delta
+    //      (M3.rc = M2.rc + 1 for N3E2, M3.rc = M4.rc for N3E4), so the gap is
+    //      |actual_delta - expected_delta|. wpawolf's `rc_gap_magnitude` on
+    //      `PairedHash` uses the same definition.
+    //
+    // Validated against hashcat module_22000.c::module_hash_decode_postprocess
+    // (lines 1302-1326): FLAG_NC=1 enables NC iteration (default 8 corrections
+    // around the line's nonce); FLAG_NC=0 disables it entirely. For sessions
+    // where M3's ANonce differs from M1's ANonce (retransmits, PMK caching,
+    // mid-capture starts), the N3E2 / N3E4 anchor's MIC was computed against a
+    // different nonce than the one wpawolf wrote into the line -- only NC
+    // iteration recovers the crack. Without FLAG_NC the line is uncrackable.
+
     // Detect router endianness by pairwise-comparing ANonce variation across M1/M3 messages
     // for this (AP, STA) session. [hcxpcapngtool.c:3810-3822]
     //   * bytes 30-31 differ -> LE router (low-order bytes at the tail)
@@ -105,6 +140,11 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // Bits ORed onto `message_pair` whenever FLAG_NC would fire; hashcat uses them to
     // decide whether nonce-error-corrections must run.
     let router_endian = detect_nonce_endianness(&m1s, &m3s);
+
+    // M1 presence and endianness are session-level inputs to the FLAG_NC decision
+    // for M3-anchored pairs -- precompute once so the per-pair loops below stay
+    // tight. The rcgap deviation is per-pair (uses each pair's `rc_gap_magnitude`).
+    let session_carries_nc = !m1s.is_empty() || router_endian.0 || router_endian.1;
 
     let mut pairs: Vec<PairedHash> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
@@ -166,9 +206,18 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     }
 
     // N3E2: ANonce from M3, EAPOL frame from M2. [ARCHITECTURE.md §5]
+    //
+    // FLAG_NC fires from any of three independent sources (see the multi-line
+    // comment above): M1 captured for this session (inherits ST_NC via
+    // addhandshake's status loop), endianness drift detected on the M1/M3
+    // ANonces, or the per-pair RC deviation from expected delta > 0. See the
+    // unit tests below for one representative case per source.
     for nonce_msg in &m3s {
         for eapol_msg in &m2s {
-            if let Some(pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E2, config) {
+            if let Some(mut pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E2, config) {
+                if session_carries_nc || pair.rc_gap_magnitude > 0 {
+                    pair.message_pair |= FLAG_NC;
+                }
                 dedup_push!(pair);
             }
         }
@@ -194,19 +243,15 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
 
     // N3E4: ANonce from M3, EAPOL frame from M4. [ARCHITECTURE.md §5]
     //
-    // NC flag for N3E4: hcxpcapngtool propagates M1's ST_NC=0x80 status to N3E4 pairs
-    // via its 64-entry ring buffer whenever M1 is still present at pairing time. For
-    // small captures M1 is always in the buffer; for large captures it may be evicted.
-    // We approximate: set FLAG_NC whenever at least one M1 was seen in this session group.
-    // This matches hcxpcapngtool's typical behaviour and ensures correct NC encoding for
-    // hashcat. For cases where hcxpcapngtool would have evicted M1, this adds NC=1 where
-    // hcxpcapngtool would output NC=0 -- hashcat applies redundant corrections that are safe.
-    // [hcxpcapngtool include/hcxpcapngtool.h: ST_NC=0x80, addhandshake() status propagation]
-    let has_m1_for_session = !m1s.is_empty();
+    // Same three-source FLAG_NC rule as N3E2 above (M1 presence, endianness
+    // detected, or per-pair rcgap deviation > 0). For N3E4 the expected delta
+    // is 0 (M4.rc = M3.rc), so `rc_gap_magnitude > 0` fires only on RC
+    // retransmits / drift -- the M1-presence source typically does the lifting
+    // on standard handshakes where M3.rc = M4.rc exactly.
     for nonce_msg in &m3s {
         for eapol_msg in &m4s {
             if let Some(mut pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E4, config) {
-                if has_m1_for_session {
+                if session_carries_nc || pair.rc_gap_magnitude > 0 {
                     pair.message_pair |= FLAG_NC;
                 }
                 dedup_push!(pair);
@@ -261,24 +306,13 @@ fn try_pair(
     }
     match rc_rel {
         RcRelation::Exact | RcRelation::WithinTolerance => {
-            // NC flag (bit 7) rule -- derived from hcxpcapngtool source analysis:
-            //
-            // hcxpcapngtool initialises every M1 with status = ST_NC (0x80). When a pair
-            // is produced, addhandshake() propagates the AP's stored status bits (0xe0)
-            // to the mpfield. So N1E2/N1E4 pairs always inherit NC from M1.
-            //
-            // For M3-sourced pairs (N3E2, N3E4): hcxpcapngtool only propagates NC when M1
-            // is still in the 64-entry ring buffer at the time M3 is processed -- which is
-            // rare in large captures. Empirically, N3E2 pairs in hcxpcapngtool output are
-            // always 0x02 (NC=0) for ncvalue=0 (the default). N3E4 pairs may be 0x85 (NC=1)
-            // when M1 was recently seen, but the NC flag there is ring-buffer-timing-dependent.
-            //
-            // Unfiltered (rc_drift_enabled=false, ncvalue=0): ncvalue=0 means the
-            // `if(ncvalue > 0 && !(status & 0x10))` guard in hcxpcapngtool never fires.
-            // NC for N3E2/N3E4 is therefore 0 in standard operation.
-            //
-            // Rule: NC = (!apless) AND (nonce from M1)
-            // [hcxpcapngtool include/hcxpcapngtool.h: ST_NC=0x80, getkeyinfo() M1 path]
+            // NC flag (bit 7) for M1-anchored pairs (N1E2, N1E4): hcxpcapngtool
+            // initialises every M1 with status = ST_NC (0x80) at
+            // [hcxpcapngtool.c:4190] and addhandshake() propagates that status
+            // onto the mpfield, so N1E2 / N1E4 always inherit NC from the M1
+            // they originate from. M3-anchored pairs (N3E2 / N3E4) get
+            // FLAG_NC applied in `generate` using the three-source rule
+            // described above the partition block.
             let nonce_from_m1 = matches!(nonce_msg.msg_type, MsgType::M1);
             if !apless && nonce_from_m1 {
                 message_pair |= FLAG_NC;
@@ -319,9 +353,13 @@ fn try_pair(
 /// Inspects M1 and M3 `ANonce` bytes to decide whether the AP is storing the nonce's
 /// low-order counter bytes little-endian or big-endian.
 ///
-/// hcxpcapngtool does this by pairwise-comparing any two M1 (or M3) nonces from the
-/// same (AP, STA) session. When the first 28 bytes match but the last 4 differ, the
-/// differences reveal where the low-order bytes live:
+/// hcxpcapngtool does this by pairwise-comparing any two M1 OR M3 nonces from the
+/// same (AP, STA) session [hcxpcapngtool.c:3807-3829, 4235-4256] -- the loop guards
+/// both branches with `((zeiger->message & HS_M1) == HS_M1) || ((zeiger->message
+/// & HS_M3) == HS_M3)`, so cross-group comparisons (M1 vs M3) also trigger
+/// detection on AP-driven nonce-counter increments observed between an early M1
+/// and a later M3 retransmission. When the first 28 bytes match but the last 4
+/// differ, the differences reveal where the low-order bytes live:
 ///
 /// - bytes 30-31 differ  -> LE router (counter incremented at the tail, little-end)
 /// - bytes 28-29 differ but 30-31 match -> BE router (counter deeper in, big-end)
@@ -329,27 +367,30 @@ fn try_pair(
 /// \[`hcxpcapngtool.c`:3810-3822\]: `ST_LE = 0x20`, `ST_BE = 0x40`.
 ///
 /// Returns `(le, be)` where each bool is set on the first positive pairwise match.
-/// Both remaining `false` for sessions with only one M1/M3 (most short captures).
-/// Used by `generate()` to propagate the flag onto every paired hash with `FLAG_NC`,
-/// matching hcxpcapngtool's `status = ST_LE + ST_NC` / `ST_BE + ST_NC` encoding.
+/// Both remain `false` for sessions with fewer than two M1/M3 messages combined
+/// (most short captures). Used by `generate()` to propagate the flag onto every
+/// paired hash with `FLAG_NC`, matching hcxpcapngtool's `status = ST_LE + ST_NC`
+/// / `ST_BE + ST_NC` encoding.
 fn detect_nonce_endianness(m1s: &[&EapolMessage], m3s: &[&EapolMessage]) -> (bool, bool) {
     let mut le = false;
     let mut be = false;
-    for group in [m1s, m3s] {
-        for (i, a) in group.iter().enumerate() {
-            for b in group.iter().skip(i + 1) {
-                // First 28 bytes must match (the static portion of the AP's RNG seed),
-                // last 4 bytes must differ (the counter portion). [hcxpcapngtool.c:3810]
-                if a.nonce[..28] == b.nonce[..28] && a.nonce[28..32] != b.nonce[28..32] {
-                    if a.nonce[30..32] != b.nonce[30..32] {
-                        le = true;
-                    } else if a.nonce[28..30] != b.nonce[28..30] {
-                        be = true;
-                    }
+    // Combine M1s and M3s into a single anchor list so cross-group pairwise
+    // comparisons (M1 vs M3) fire too -- matching hcxpcapngtool's HS_M1 || HS_M3
+    // guard in both endianness-detection loops.
+    let anchors: Vec<&&EapolMessage> = m1s.iter().chain(m3s.iter()).collect();
+    for (i, a) in anchors.iter().enumerate() {
+        for b in anchors.iter().skip(i + 1) {
+            // First 28 bytes must match (the static portion of the AP's RNG seed),
+            // last 4 bytes must differ (the counter portion). [hcxpcapngtool.c:3814]
+            if a.nonce[..28] == b.nonce[..28] && a.nonce[28..32] != b.nonce[28..32] {
+                if a.nonce[30..32] != b.nonce[30..32] {
+                    le = true;
+                } else if a.nonce[28..30] != b.nonce[28..30] {
+                    be = true;
                 }
-                if le && be {
-                    return (le, be);
-                }
+            }
+            if le && be {
+                return (le, be);
             }
         }
     }
@@ -496,6 +537,27 @@ mod tests {
         assert!(le && !be);
     }
 
+    #[test]
+    fn endianness_detect_across_m1_and_m3_groups() {
+        // hcxpcapngtool's loop guard accepts HS_M1 || HS_M3, so an M1 and an M3
+        // with matching 28-byte prefix and different trailing 4 bytes trigger
+        // endianness detection too. wpawolf must mirror that or it silently
+        // misses ST_LE+ST_NC inheritance on AP-counter-incrementing sessions.
+        let mut n_m1 = [0u8; 32];
+        let mut n_m3 = [0u8; 32];
+        for (i, b) in n_m1.iter_mut().enumerate().take(28) {
+            *b = u8::try_from(i + 1).unwrap_or(0);
+        }
+        n_m3[..28].copy_from_slice(&n_m1[..28]);
+        n_m3[30] = 0x77;
+        n_m3[31] = 0x88;
+        let m1 = make_m1_nonce(n_m1);
+        let m3 = EapolMessage { msg_type: MsgType::M3, ..make_m1_nonce(n_m3) };
+        let (le, be) = detect_nonce_endianness(&[&m1], &[&m3]);
+        assert!(le, "expected LE detection when M1 and M3 share prefix but differ in tail");
+        assert!(!be);
+    }
+
     fn default_config() -> PairConfig {
         PairConfig::default()
     }
@@ -540,6 +602,99 @@ mod tests {
         let msgs = vec![make_msg(MsgType::M3, 2, 200, 0xAA), make_msg(MsgType::M2, 2, 100, 0xBB)];
         let pairs = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).count(), 1);
+    }
+
+    #[test]
+    fn generate_n3e2_carries_flag_nc_when_m1_present() {
+        // Standard handshake with M1 captured. M1 alone is enough to fire FLAG_NC
+        // on the N3E2 anchor: in hcx every M1 is stored with `status = ST_NC`
+        // [hcxpcapngtool.c:4190] and addhandshake's inheritance loop
+        // [hcxpcapngtool.c:2758-2767] pulls that ST_NC into every subsequent
+        // handshake for the same AP. Validated against hashcat module_22000.c
+        // (lines 1302-1326): FLAG_NC=1 enables NC iteration (default 8); FLAG_NC=0
+        // disables it. M1/M3 ANonce mismatch sessions are uncrackable without it.
+        let msgs = vec![
+            make_msg(MsgType::M1, 1, 0, 0xA1),
+            make_msg(MsgType::M2, 1, 100, 0xB1),
+            make_msg(MsgType::M3, 2, 200, 0xC1),
+        ];
+        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
+        assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
+        assert_ne!(
+            n3e2[0].message_pair & FLAG_NC,
+            0,
+            "N3E2 must carry FLAG_NC when M1 is present (status inheritance from M1's ST_NC init)"
+        );
+    }
+
+    #[test]
+    fn generate_n3e2_carries_flag_nc_on_rc_deviation_without_m1() {
+        // No M1 captured, and the actual M3/M2 RC delta deviates from the canonical
+        // M3.rc = M2.rc + 1 (here both RCs are equal, so deviation = -1). hcx's
+        // per-pair `rcgap > 0` rule [hcxpcapngtool.c:2787] fires, so FLAG_NC must
+        // be set even without M1 inheritance. Mirrors the mid-capture-start case
+        // where the AP retransmitted M3 against an earlier M2.
+        let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 1, 200, 0xC1)];
+        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
+        assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
+        assert_ne!(
+            n3e2[0].message_pair & FLAG_NC,
+            0,
+            "N3E2 must carry FLAG_NC when RC deviates from expected handshake delta"
+        );
+    }
+
+    #[test]
+    fn generate_n3e2_no_flag_nc_on_standard_handshake_without_m1() {
+        // Mid-capture session: only M2 (rc=1) and M3 (rc=2) captured, standard
+        // RC deviation = 0, no M1, no endianness drift. hcx-default emits *02
+        // (FLAG_NC=0) for these handshakes; wpawolf-WIDE must match to preserve
+        // the line-by-line superset invariant against hcx-default. The 2026-05-12
+        // corpus diff observed `*02` emissions on capture 04a8d21f -- this test
+        // pins the matching behaviour.
+        let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 2, 200, 0xC1)];
+        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
+        assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
+        assert_eq!(
+            n3e2[0].message_pair & FLAG_NC,
+            0,
+            "N3E2 must NOT carry FLAG_NC for a standard mid-capture handshake (no M1, no endianness, deviation=0)"
+        );
+    }
+
+    #[test]
+    fn generate_n3e2_carries_flag_nc_on_endianness_without_m1() {
+        // Two M3s sharing the first 28 nonce bytes but differing in the trailing
+        // 4 -> wpawolf's endianness detector flags LE drift; hcx mirrors this at
+        // [hcxpcapngtool.c:3814-3822] by setting `status = ST_LE + ST_NC` on the
+        // M3 entries, then propagating ST_NC via addhandshake's inheritance loop.
+        // Even without an M1 captured, the resulting N3E2 anchor must carry
+        // FLAG_NC (and FLAG_LE on top via the dedup_push! overlay).
+        let mut n_a = [0u8; 32];
+        let mut n_b = [0u8; 32];
+        for (i, b) in n_a.iter_mut().enumerate().take(28) {
+            *b = u8::try_from(i + 1).unwrap_or(0);
+        }
+        n_b[..28].copy_from_slice(&n_a[..28]);
+        n_b[30] = 0xCC;
+        n_b[31] = 0xDD;
+        let m3_a = EapolMessage { nonce: n_a, ..make_msg(MsgType::M3, 2, 200, 0xC1) };
+        let m3_b = EapolMessage { nonce: n_b, ..make_msg(MsgType::M3, 2, 220, 0xC2) };
+        let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), m3_a, m3_b];
+        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
+        assert!(!n3e2.is_empty(), "expected at least one N3E2 pair");
+        for p in &n3e2 {
+            assert_ne!(p.message_pair & FLAG_NC, 0, "endianness drift on M3 must set FLAG_NC on every N3E2 pair");
+            assert_ne!(
+                p.message_pair & FLAG_LE,
+                0,
+                "endianness drift on M3 must set FLAG_LE via the dedup_push! overlay"
+            );
+        }
     }
 
     #[test]
