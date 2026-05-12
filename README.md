@@ -146,6 +146,7 @@ These narrow what gets written to the hash output files; they have no effect on 
 | `--dedup-hash-combos`      | off       | Collapse the six N#E# combos per session to the three cryptographically unique ones. |
 | `--essid-collapse-min N`   | `3`     | Only collapse SSID variants when an AP has more than `N` recorded SSIDs. See worked example below. |
 | `--essid-collapse-ratio N` | `10`    | When the guard fires, write only the top SSID iff `top_count >= N * second_count`. `< 2` disables. |
+| `--strict`                 | off       | Shortcut for a hcxpcapngtool-shape narrow profile. Enables `--eapoltimeout=5`, `--rc-drift=8`, `--dedup-hash-combos`, and `--per-file` together. Later-flag-wins: an explicit `--eapoltimeout=30` or `--rc-drift=4` after `--strict` overrides the strict default. The two boolean flags can only be turned on. |
 
 ### Runtime options
 
@@ -196,6 +197,13 @@ wpawolf --22000-out hashes.22000 \
         --eapoltimeout 3 --rc-drift 4 --dedup-hash-combos \
         --threads 1 \
         capture.pcap
+
+# Same shape via the bundled shortcut. --strict is --eapoltimeout=5 +
+# --rc-drift=8 + --dedup-hash-combos + --per-file in one flag.
+wpawolf --22000-out hashes.22000 --strict captures/
+
+# Strict shape with a custom session window: --eapoltimeout=3 wins.
+wpawolf --22000-out hashes.22000 --strict --eapoltimeout=3 captures/
 ```
 
 ---
