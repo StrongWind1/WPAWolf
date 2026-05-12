@@ -301,7 +301,7 @@ pub fn store_eapol_key(
     stats.update_eapol_time_gap(ap, sta, timestamp_us);
 
     // PMKID classification is independent of the EAPOL MIC family. WPA1 has no PMKID
-    // in spec, but Inteno / D-Link / TP-Link / ASUS firmware regularly emits an M1
+    // in spec, but various consumer router firmware regularly emits an M1
     // with KDV=1 (HMAC-MD5 MIC) AND a PMKID KDE in Key Data: a vendor quirk where
     // the descriptor type is RSN (0x02) but the wire-level MIC algorithm is the
     // legacy WPA1 one. The PMKID itself is still computed with the AKM-defined PRF
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn store_eapol_key_kdv1_with_pmkid_kde_promotes_to_wpa2_for_pmkid_only() {
-        // Inteno/D-Link/TP-Link/ASUS quirk: M1 with KDV=1 (legacy WPA1 MIC) AND a PMKID KDE.
+        // Consumer-router firmware quirk: M1 with KDV=1 (legacy WPA1 MIC) AND a PMKID KDE.
         // The EAPOL must route as Wpa1 (HMAC-MD5 MIC) but the PMKID is computed with
         // HMAC-SHA1 (AKM 2), so the stored PMKID's akm field MUST be Wpa2Psk so it
         // emits as a Type 2 PMKID line. The promotion lives in `store_eapol_key`

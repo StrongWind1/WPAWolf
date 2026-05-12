@@ -1,7 +1,7 @@
 <h1 align="center">WPAWolf</h1>
 
 <p align="center">
-  <strong>Fast, no-drop WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat.</strong>
+  <strong>Pull every WPA / WPA2 / WPA3-FT-PSK handshake out of a pcap and hand it to hashcat.</strong>
 </p>
 
 <p align="center">
@@ -21,19 +21,19 @@
 
 ---
 
-`wpawolf` reads pcap, pcapng, and gzip-compressed capture files and writes hashcat-ready hash lines for WPA, WPA2, and WPA3 FT-PSK handshakes (mode 22000 and mode 37100), plus optional wordlists, EAP identity files, and WPS device-info dumps. It is a Rust rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool` with the opposite default policy: where `hcxpcapngtool` filters aggressively at extraction time so a downstream cracker sees only clean input, `wpawolf` writes everything it can recognise as a valid handshake and lets the operator narrow the output afterwards.
+`wpawolf` reads pcap, pcapng, and gzip captures and writes hashcat-ready hash lines for WPA, WPA2, and WPA3 FT-PSK handshakes (modes 22000 and 37100). It also writes wordlists, EAP identity files, and WPS device-info dumps when you ask for them. It's a Rust rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool` with the opposite default policy: `hcxpcapngtool` filters hard at extraction time so the cracker only sees clean input, while `wpawolf` emits everything it can recognise as a valid handshake and leaves the filtering decisions to you.
 
 ## Quick start
 
 ```sh
-# Same hash-line formats as hcxpcapngtool; different default filters
+# Same hash-line format as hcxpcapngtool; different defaults
 # (see "How wpawolf compares to hcxpcapngtool" below).
 wpawolf --22000-out hashes.22000 --37100-out hashes.37100 capture.pcap
 hashcat -m 22000 hashes.22000 wordlist.txt
 hashcat -m 37100 hashes.37100 wordlist.txt
 ```
 
-`wpawolf` always needs at least one output flag; with none configured it exits without doing any work. The two flags above cover everything hashcat can crack today. Seven more output flags split the result by hash family (per-AKM, with FT and SHA-384 kept separate); see the CLI reference below.
+You always need at least one output flag — `wpawolf` exits without doing any work if no output is configured. The two flags above cover everything hashcat can crack today. Seven more output flags split the result by hash family (per-AKM, with FT and SHA-384 kept separate); see the CLI reference below.
 
 ---
 
@@ -52,7 +52,7 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 
 ## How wpawolf compares to hcxpcapngtool
 
-`hcxpcapngtool` was tuned for high-volume crack-pool intake: narrow defaults, aggressive deduplication, and several silent gates that keep noise out of the output stream. `wpawolf` inverts that policy. The defaults are wide, no frame is silently dropped on size, and the operator filters at output time using the flags in the CLI reference. Both tools cover the same AKM scope (PSK and FT-PSK only — no SAE, OWE, or Enterprise); the difference is what each one does with the frames it sees.
+`hcxpcapngtool` is tuned for high-volume crack-pool intake: narrow defaults, aggressive deduplication, several silent gates that keep noise out. `wpawolf` flips that. The defaults are wide, nothing is silently dropped on size, and you do the filtering at the output stage using the flags in the CLI reference. Both tools cover the same AKM scope (PSK and FT-PSK — no SAE, OWE, or Enterprise); the difference is what each one does with the frames it sees.
 
 | Behaviour                              | `hcxpcapngtool` (default)                                      | `wpawolf` (default)                                |
 |----------------------------------------|----------------------------------------------------------------|----------------------------------------------------|
@@ -64,28 +64,28 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 | Pairing strategy                       | streams pairs as frames arrive                                 | reads everything, then pairs                       |
 | State across multiple input files      | reset between files                                            | carried across files; M1 in file A pairs with M2 in file B |
 
-Each row above is a documented `hcxpcapngtool` default, not a bug. The C tool's policy is appropriate for a feed into a shared cracking pool; `wpawolf`'s policy is appropriate for one-off analysis where the operator is closer to the capture and wants to choose the filters.
+Each row above is a documented `hcxpcapngtool` default, not a bug. `wpawolf` defaults are wider because picking the filters at the end of the run is easier than re-running with new flags to recover something the extractor already discarded.
 
-**Highlights.** `wpawolf` is pure-Rust (`#![forbid(unsafe_code)]`, two runtime crates: `flate2` and `clap`), parallelises pairing across CPU cores via `std::thread::scope` with LPT round-robin, parses A-MSDU subframes and reassembles MSDU fragments, strips radiotap FCS tails, extracts PMKIDs from all 20 spec-defined locations, rejects every garbage-pattern shape (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) on nonces / MICs / PMKIDs (ESSIDs are not garbage-filtered and not transformed -- the byte run goes to hashcat verbatim; an informational `[essid_control_bytes]` log line surfaces when an SSID contains ASCII C0 control bytes, but the line is for operator triage only, never a discard), and reconciles vendor AKM quirks against the wire-level Key Descriptor Version. 807 tests guard the behaviour; `make check-all` runs zero-warning under strict clippy.
+**Highlights.** Pure-Rust, `#![forbid(unsafe_code)]`, two runtime crates (`flate2` and `clap`). Pairing runs in parallel across CPU cores via `std::thread::scope` with LPT round-robin. A-MSDU subframes get walked, MSDU fragments get reassembled, radiotap FCS tails get stripped, and PMKIDs are pulled from all 20 spec-defined locations. Garbage-pattern nonces / MICs / PMKIDs (NULL, all-`0xFF`, all-same-byte, 2-byte / 4-byte repeating period) are rejected unconditionally — ESSIDs are not filtered and not transformed, so the SSID byte run reaches hashcat verbatim. AKM quirks (e.g. routers that advertise the wrong AKM but use the right MIC algorithm) get reconciled against the wire-level Key Descriptor Version. 833 tests; `make check-all` runs zero-warning under strict clippy.
 
 ---
 
 ## Reading captures
 
-`wpawolf` accepts pcap (all six libpcap magics, including the 24-byte Kuznetzov header and Wireshark's two IXIA `lcap` variants), pcapng (multi-SHB, multi-IDB, with `if_tsresol` and `if_tsoffset` honoured), and gzip-compressed versions of either. Link types DLT 105 (raw 802.11), DLT 127 (radiotap), DLT 192 (PPI), DLT 119 (Prism, with AVS-within-Prism detection), and DLT 163 (AVS) are all read. I/O errors abort the run; parse errors are logged and skipped.
+`wpawolf` accepts pcap (all six libpcap magics, including the 24-byte Kuznetzov header and Wireshark's two IXIA `lcap` variants), pcapng (multi-SHB, multi-IDB, with `if_tsresol` and `if_tsoffset` honoured), and gzip-compressed versions of either. Link types DLT 105 (raw 802.11), DLT 127 (radiotap), DLT 192 (PPI), DLT 119 (Prism, with AVS-within-Prism detection), and DLT 163 (AVS) all work. I/O errors abort the run; parse errors get logged and the run continues.
 
-Positional arguments can be capture files or directories. Directories are walked recursively; each regular file is opened and its first four bytes are checked against the supported capture magics. Files that pass are read; files that don't (a `.pcap` of JSON, a screenshot, a stray `.DS_Store`) are silently skipped. File extensions are never used to decide. Within a directory the order is lexicographic, files first then subdirectories, so runs are deterministic.
+Positional arguments can be capture files or directories. Directories are walked recursively; each regular file is opened and its first four bytes are checked against the supported magics. Files that pass are read; the rest (a `.pcap` of JSON, a screenshot, a stray `.DS_Store`) get silently skipped. File extensions never get consulted. Within a directory the order is lexicographic — files first, then subdirectories — so runs are deterministic.
 
-Cross-file behaviour is one of the bigger differences between the two tools:
+Cross-file handling is one of the bigger gaps between the two tools:
 
-- `wpawolf` keeps per-(AP, STA) state across files; `hcxpcapngtool` resets between files. A handshake whose M1 lands in one file and whose M2/M3/M4 lands in another pairs in `wpawolf`, drops in `hcxpcapngtool`.
-- Stats and metadata roll up across the run in `wpawolf` (one closing summary; multi-file inputs render a histogram of formats / endians / DLTs seen). `hcxpcapngtool` prints one summary per file.
-- For per-file isolation (no cross-pairing) use `--per-file` — `MessageStore` and `PmkidStore` are flushed after every input file. Auxiliary outputs (`-E` / `-W` / ...), the dedup set, and `EssidMap` still accumulate so SSIDs observed early still resolve handshakes seen late.
+- `wpawolf` keeps per-(AP, STA) state across files; `hcxpcapngtool` resets between them. A handshake whose M1 lands in one file and whose M2/M3/M4 lands in another pairs cleanly in `wpawolf`, drops in `hcxpcapngtool`.
+- Stats roll up across the whole run (one closing summary; multi-file input gets a per-format / per-endian / per-DLT histogram). `hcxpcapngtool` prints one summary per file.
+- If you want per-file isolation, pass `--per-file` — `MessageStore` and `PmkidStore` flush at every file boundary. Auxiliary outputs (`-E` / `-W` / ...), the dedup set, and `EssidMap` still accumulate, so SSIDs observed early still resolve handshakes seen late.
 
-Practical guidance:
+Practical notes:
 
-- Passing `wpawolf capture-part-1.pcap capture-part-2.pcap` recovers any handshake whose four messages are split across the two files. `hcxpcapngtool` on the same pair drops it.
-- File order matters for `--eapoltimeout`: the session-window check uses each message's pcap timestamp, not file boundaries, so out-of-order files (e.g. `wpawolf later.pcap earlier.pcap`) can still pair correctly as long as the timestamps fall inside the configured window.
+- `wpawolf capture-part-1.pcap capture-part-2.pcap` recovers handshakes whose four messages are split across the two files. `hcxpcapngtool` on the same pair drops it.
+- File order doesn't matter for `--eapoltimeout` — the session-window check uses each message's pcap timestamp, not its file position. `wpawolf later.pcap earlier.pcap` still pairs correctly as long as the timestamps fit the window.
 
 ---
 
@@ -95,16 +95,16 @@ Practical guidance:
 wpawolf [OPTIONS] <INPUT>...
 ```
 
-Each `<INPUT>` is a capture file or a directory; directories are walked recursively and every regular file whose first four bytes match a supported capture magic is included. File extensions are never consulted. At least one output flag is required; the binary refuses to run with no outputs configured.
+Each `<INPUT>` is a capture file or a directory; directories are walked recursively and every regular file whose first four bytes match a supported capture magic is included. File extensions never get consulted. At least one output flag is required; with none configured, the binary refuses to run.
 
 ### Hash output files
 
-Every output file is optional. The same handshake is written to every file you configure, using that file's prefix and its own dedup pass.
+Every output file is optional. The same handshake gets written to every file you configure, using that file's prefix and its own dedup pass.
 
 There are two distinct line formats. **Only the legacy format cracks in hashcat today.**
 
 - **Legacy format** (`--22000-out`, `--37100-out`) uses the four-prefix scheme `WPA*01*` -- `WPA*04*` that current hashcat modes 22000 and 37100 read directly.
-- **New eleven-category format** (`-o` plus the six per-family flags) uses prefixes `WPA*01*` -- `WPA*11*` where each prefix encodes its full AKM identity. This is the format described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). The prefix bytes overlap with the legacy scheme but the meaning differs (e.g. legacy `WPA*01*` = PMKID; new `WPA*01*` = WPA1-PSK-EAPOL), so feeding a new-format file straight into hashcat 22000 misparses or rejects every line. **No current hashcat mode reads the new format**; the proposed modes 22002 / 22003 in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) would.
+- **New eleven-category format** (`-o` plus the six per-family flags) uses prefixes `WPA*01*` -- `WPA*11*` where each prefix encodes its full AKM identity. Details in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). The prefix bytes overlap with the legacy scheme but the meaning differs (legacy `WPA*01*` = PMKID; new `WPA*01*` = WPA1-PSK-EAPOL), so a new-format file fed straight into hashcat 22000 misparses or rejects every line. **No current hashcat mode reads the new format** — the proposed modes 22002 / 22003 in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) would.
 
 | Flag                         | Categories written     | Line prefix(es)                  | Cracks in hashcat today? | FT extras |
 |------------------------------|------------------------|----------------------------------|--------------------------|-----------|
@@ -118,7 +118,7 @@ There are two distinct line formats. **Only the legacy format cracks in hashcat 
 | `--psk-sha384-out FILE`      | categories 8 + 9       | `WPA*08*` `WPA*09*` (new format) | **no** -- needs proposed mode 22002 / 22003 (also: 24 B MIC unsupported by mode 22000) | no |
 | `--ft-psk-sha384-out FILE`   | categories 10 + 11     | `WPA*10*` `WPA*11*` (new format) | **no** -- needs proposed mode 22002 / 22003 (also: 24 B MIC unsupported by mode 37100) | yes |
 
-To crack today, configure `--22000-out` and / or `--37100-out`. The per-category files are useful right now for triage (`-o`, the six per-family flags) — splitting hashes by AKM family for inventory / statistics — but they cannot be fed to hashcat until modes 22002 / 22003 land. Configuring both legacy and new-format outputs in the same run is fine; the same handshake gets written to each in its respective format.
+To actually crack today, use `--22000-out` and / or `--37100-out`. The per-category files (`-o` plus the six per-family flags) are useful for triage — split hashes by AKM family for inventory or stats — but they can't be fed to hashcat until modes 22002 / 22003 land. You can configure both legacy and new-format outputs in the same run; the same handshake gets written to each in its respective format.
 
 For the per-row mapping of the eleven categories onto the legacy four-prefix format (and the per-row support matrix on hashcat 7.1.2 — six categories crack cleanly via the legacy outputs, one misroutes silently, four have no legacy path), see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §7 and §8.
 
@@ -137,7 +137,7 @@ For the per-row mapping of the eleven categories onto the legacy four-prefix for
 
 ### Output filters
 
-These narrow what gets written to the hash output files; they have no effect on Phase 1 extraction. Defaults are deliberately wide (maximum hash yield); turn filters on when the capture is known clean.
+These narrow what ends up in the hash output files; they have no effect on Phase 1 extraction. The defaults are wide on purpose (maximum hash yield); turn the filters on when you know the capture is clean.
 
 | Flag                       | Default | Meaning |
 |----------------------------|---------|---------|
@@ -212,9 +212,9 @@ wpawolf --22000-out hashes.22000 --strict --eapoltimeout=3 captures/
 
 ## When one AP shows up under many SSIDs
 
-A single bit-flip in a beacon body decodes to a different SSID for the same physical AP. Most APs broadcast one to three stable SSIDs across an entire capture; an AP whose beacons arrived through a noisy channel can produce dozens of slightly-corrupted variants. `wpawolf` records every SSID it ever saw for an AP and writes one hash line per SSID. Without a guard, a single crackable handshake on a corrupted AP can spread into six or more lines, only one of which has the SSID that actually derives the correct PMK.
+A single bit-flip in a beacon body decodes to a different SSID for the same physical AP. Most APs broadcast one to three stable SSIDs across a capture; an AP whose beacons came through a noisy channel can throw off dozens of slightly-corrupted variants. `wpawolf` records every SSID it ever saw for an AP and writes one hash line per SSID. Without a guard, one crackable handshake on a corrupted AP can spread into six or more lines — only one of which carries the SSID that actually derives the right PMK.
 
-The `--essid-collapse-min` and `--essid-collapse-ratio` flags collapse that spread when the corruption pattern is unambiguous: if an AP has more than `N` recorded SSIDs and the most-frequent one outweighs the runner-up by a factor of at least `M`, `wpawolf` writes only that SSID's line. Defaults are `N=3` and `M=10`.
+The `--essid-collapse-min` and `--essid-collapse-ratio` flags fold that spread back together when the corruption pattern is unambiguous: if an AP has more than `N` recorded SSIDs and the most frequent one beats the runner-up by a factor of at least `M`, only that SSID's line ships. Defaults are `N=3` and `M=10`.
 
 | AP                  | Observed SSIDs                                                       | Top count | Second count | What wpawolf writes by default |
 |---------------------|----------------------------------------------------------------------|-----------|--------------|--------------------------------|
@@ -244,7 +244,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) §9 for the algorithm and the corpus co
 
 ## Why a hash gets discarded
 
-`wpawolf`'s defaults are deliberately wide -- the operator filters at output time, not at extract time. Even so, four rejection paths in the current code can drop a candidate PMKID or EAPOL hash before it ever reaches an output file. Every rejection bumps a stats counter (visible in the closing banner) and, when `--log FILE` is configured, emits a structured line carrying the rejected bytes in lowercase hex so the source capture can be grepped for the exact sequence.
+Defaults are wide on purpose — filtering happens at the output stage, not at extract. That said, four rejection paths in the current code can drop a candidate PMKID or EAPOL hash before it ever reaches an output file. Every rejection bumps a stats counter (you'll see it in the closing banner) and, if `--log FILE` is set, emits a structured line with the rejected bytes in lowercase hex so you can grep the source capture for the exact sequence.
 
 A hash is discarded when **any** of the following is true:
 
@@ -255,9 +255,9 @@ A hash is discarded when **any** of the following is true:
 | 3 | PMKID is structurally broken: same five patterns as above | 16-byte PMKID at any of the 20 spec-defined extraction sites (M1 KDE, M2 RSN IE, AssocReq / ReassocReq, FT / FILS / PASN Auth, FT Action, Probe Request, Beacon, ProbeResp, Mesh Peering, OSEN IE) | `null_pmkid_rejected`, `ff_pmkid_rejected`, `repeat_pmkid_rejected` | `[invalid_pmkid] ... kind=<k> pmkid_hex=<16 B hex>` | None |
 | 4 | No SSID was ever observed for this AP across the whole run, so the hash line cannot be written without inventing an ESSID | ESSID at hash-emit time | `essids_not_found` | `[essid_not_found_summary] ap=<mac> dropped=<n> first_seen_us=<t> last_seen_us=<t>` (one per affected AP at end of run) | None -- happens when the capture started mid-handshake or the Beacon channel was missed |
 
-Reasons 1-3 fire at **extract time** (Phase 3); reason 4 fires at **emit time** (Phase 4). Real wire bytes from a healthy stack are HMAC outputs (PMKID, MIC) or cryptographically-random nonces, so any of the structural patterns above is firmware stub data, test fixtures, or a mid-flight bit-corruption event -- not crackable material.
+Reasons 1-3 fire at **extract time** (Phase 3); reason 4 fires at **emit time** (Phase 4). Real wire bytes from a healthy stack are HMAC outputs (PMKID, MIC) or cryptographically-random nonces, so any of the structural patterns above is firmware stub data, test fixtures, or a mid-flight bit-corruption — not crackable material.
 
-The `[invalid_*]` log lines are intended for forensic triage: an operator who wants to see *which* AP / STA / capture-time emitted the bad bytes can grep the log file by any of `kind=`, `ap=`, `sta=`, or the literal hex string. Example:
+The `[invalid_*]` log lines are for forensic triage. To see which AP / STA / capture-time emitted the bad bytes, grep the log file by `kind=`, `ap=`, `sta=`, or the literal hex string:
 
 ```sh
 wpawolf --22000-out hashes.22000 --log run.log captures/
@@ -279,7 +279,7 @@ For deeper detail on per-AKM hash routing, dedup behaviour, and the full Phase-1
 
 ## Stats output
 
-Every run prints a closing summary to stderr. There is no toggle — `--quiet` only silences the per-frame progress lines. The Phase 4 and Phase 5 banners are the part most operators care about:
+Every run prints a closing summary to stderr. There's no toggle for it — `--quiet` only silences the per-frame progress lines. The Phase 4 and Phase 5 banners are the part most people read:
 
 ```
 === Phase 4 -- Emit ==========================================
@@ -298,23 +298,23 @@ hashes emitted (total)..............................: 154
 distinct hash types observed........................: 2
 ```
 
-- `hashes emitted (total)` counts each unique handshake once. Per-file `lines written` rows can sum higher because a handshake configured into two files is written to both.
-- Output files are created lazily — configuring `--psk-sha384-out` on a capture with no SHA-384 sessions leaves no zero-byte artefact on disk.
-- Each "issue" stat is suffixed with **dropped**, **recovered**, or **diagnostic** so a real loss is distinguishable from a capture-quality note.
+- `hashes emitted (total)` counts each unique handshake once. Per-file `lines written` rows can sum higher because a handshake configured into two files gets written to both.
+- Output files are created lazily — `--psk-sha384-out` on a capture with no SHA-384 sessions leaves no zero-byte file on disk.
+- Each "issue" stat is suffixed with **dropped**, **recovered**, or **diagnostic** so you can tell a real loss apart from a capture-quality note.
 
-Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs, the informational ESSID control-byte counter, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source. A translation table is in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6. For a category-by-category list of every reason a hash gets discarded, see "Why a hash gets discarded" above.
+Phases 1-3 (capture-format breakdown, per-band counts, per-AKM histograms, garbage-pattern rejection counters for nonces / MICs / PMKIDs, the informational ESSID control-byte counter, etc.) come before this; the full catalogue is in [`ARCHITECTURE.md`](ARCHITECTURE.md) §9. The N#E# combo names are the `wpawolf` convention; the same six combos appear as `M#E#` in `hcxpcapngtool` source — translation table in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6. For the full list of reasons a hash gets discarded, see "Why a hash gets discarded" above.
 
 ---
 
 ## Progress reporting
 
-During Phase 1 (ingest) `wpawolf` prints periodic progress lines to stderr so an operator can confirm the run is making forward progress without watching `top`. The lines are on by default; pass `--quiet` (see Runtime options) to suppress them when running under `tee`, in CI, or in a pipeline where stderr noise is unwanted. The closing Phase 1-5 stats banner is unaffected by `--quiet`.
+During Phase 1 (ingest), `wpawolf` prints periodic progress lines to stderr so you can confirm forward progress without watching `top`. They're on by default; pass `--quiet` (see Runtime options) to silence them when running under `tee`, in CI, or in any pipeline where stderr noise is unwanted. The closing Phase 1-5 stats banner is unaffected by `--quiet`.
 
 ```
 [progress] elapsed=15s files=312 packets=4823910 eapol=8412 pmkids=193 rss=287MiB
 ```
 
-Cadence is hybrid: a line prints whenever 5 seconds OR 2,000,000 packets have elapsed since the previous one, whichever fires first. Small captures (under a few seconds) print at most one line at the end of Phase 1; corpus-scale runs get steady throughput feedback. Fields:
+Cadence is hybrid: a line prints whenever 5 seconds OR 2,000,000 packets have elapsed since the previous one, whichever comes first. Small captures (under a few seconds) print at most one line at the end of Phase 1; corpus-scale runs get steady throughput feedback. Fields:
 
 - `elapsed=<s>` -- wall-clock seconds since the run started.
 - `files=<n>` -- input capture files opened so far.
@@ -329,7 +329,7 @@ Every line is prefixed `[progress]` so `grep -v '^\[progress\]' run.log` strips 
 
 ## Proposed hashcat format changes
 
-`wpawolf` writes nine output files. The two legacy ones (`--22000-out`, `--37100-out`) match what `hcxpcapngtool` writes today and feed straight into hashcat modes 22000 and 37100. The other seven (`-o` plus the six per-family flags) write a newer line format that splits every PSK-crackable hash the IEEE 802.11-2024 specification defines into eleven self-contained categories:
+`wpawolf` writes nine output files. The two legacy ones (`--22000-out`, `--37100-out`) match what `hcxpcapngtool` produces today and feed straight into hashcat modes 22000 and 37100. The other seven (`-o` plus the six per-family flags) write a newer line format that splits every PSK-crackable hash the IEEE 802.11-2024 specification defines into eleven self-contained categories:
 
 | Code | Category               | Code | Category                  |
 |------|------------------------|------|---------------------------|
@@ -340,11 +340,11 @@ Every line is prefixed `[progress]` so `grep -v '^\[progress\]' run.log` strips 
 | 5    | PSK SHA-256 EAPOL      | 11   | FT-PSK SHA-384 EAPOL      |
 | 6    | FT-PSK PMKID           |      |                           |
 
-Categories 8-11 (the SHA-384 families) have no working hashcat kernel today: hashcat's mode 22000 hardcodes a 16-byte MIC, and SHA-384 produces a 24-byte MIC. The lines `wpawolf` writes for those categories are correct and complete, but the cracker side does not yet know how to consume them.
+Categories 8-11 (the SHA-384 families) have no working hashcat kernel today: hashcat's mode 22000 hardcodes a 16-byte MIC, and SHA-384 produces a 24-byte one. The lines `wpawolf` writes for those categories are correct and complete; the cracker side just doesn't know how to consume them yet.
 
-[`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) sketches two new hashcat modes that close that gap: **mode 22002** (passphrase input, one PBKDF2 pass per ESSID, branches per category afterwards) and **mode 22003** (PMK-direct, skips PBKDF2). One `hashcat -m 22002 all-hashes wordlist.txt` would crack every PSK family the spec defines from a single mixed-format file. The legacy modes 22000, 22001, and 37100 stay in hashcat unchanged.
+[`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) sketches two new hashcat modes that close that gap: **mode 22002** (passphrase input, one PBKDF2 pass per ESSID, then branches per category) and **mode 22003** (PMK-direct, skips PBKDF2). One `hashcat -m 22002 all-hashes wordlist.txt` would crack every PSK family the spec defines from a single mixed-format file. The existing modes 22000, 22001, and 37100 stay in hashcat unchanged.
 
-For the per-category cracker math, the line layout, and the message-pair byte spec, see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). For the proposed hashcat-side implementation (loader dispatch, kernel layout, the two phases of the rollout), see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md). Both documents are design specifications; nothing in modes 22002 / 22003 ships in upstream hashcat today.
+For the per-category cracker math, the line layout, and the message-pair byte spec, see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). For the proposed hashcat-side implementation (loader dispatch, kernel layout, the two phases of the rollout), see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md). Both are design specifications; nothing in modes 22002 / 22003 ships in upstream hashcat today.
 
 ---
 
@@ -383,4 +383,4 @@ Apache 2.0. See [`LICENSE`](LICENSE).
 
 ## Authorized use only
 
-`wpawolf` operates on pcap files you already have on disk. It does not capture traffic, inject frames, or interact with a radio in any way. Running it on captures you do not own or do not have written authorization to analyse is illegal in most jurisdictions. Use `wpawolf` for your own networks, CTF challenges, lab research, and authorized engagements.
+`wpawolf` operates on pcap files you already have on disk. It does not capture traffic, inject frames, or touch a radio in any way. Running it on captures you don't own or don't have written authorization to analyse is illegal in most jurisdictions. Use it on your own networks, CTF challenges, lab research, and authorized engagements.

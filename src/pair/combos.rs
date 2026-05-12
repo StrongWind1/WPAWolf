@@ -678,8 +678,7 @@ mod tests {
         // Mid-capture session: only M2 (rc=1) and M3 (rc=2) captured, standard
         // RC deviation = 0, no M1, no endianness drift. hcx-default emits *02
         // (FLAG_NC=0) for these handshakes; wpawolf-WIDE must match to preserve
-        // the line-by-line superset invariant against hcx-default. The 2026-05-12
-        // corpus diff observed `*02` emissions on capture 04a8d21f -- this test
+        // the line-by-line superset invariant against hcx-default. This test
         // pins the matching behaviour.
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 2, 200, 0xC1)];
         let pairs = generate(ap(), sta(), &msgs, &default_config());

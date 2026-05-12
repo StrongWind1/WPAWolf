@@ -385,9 +385,9 @@ struct Cli {
     /// observed in earlier files still resolve later hashes), `AkmMap`, and
     /// `MldStore` accumulate across the run.
     ///
-    /// Useful for corpora where each capture is self-contained (wpa-sec uploads,
-    /// per-session captures). Expected hash-yield delta versus a full run is < 1%
-    /// on those workloads. See `ARCHITECTURE.md §3` for the cross-file tradeoff.
+    /// Useful for corpora where each capture is self-contained (submission-staging
+    /// uploads, per-session captures). Expected hash-yield delta versus a full run
+    /// is < 1% on those workloads. See `ARCHITECTURE.md §3` for the cross-file tradeoff.
     #[arg(long = "per-file")]
     per_file: bool,
 
@@ -409,9 +409,9 @@ struct Cli {
     /// `--nc-dedup`) can only be turned on, not off, so `--strict` always enables them.
     ///
     /// Use this when you want hashcat-friendly density and accept the small
-    /// hash-yield drop (~1% on wpa-sec-shape corpora). The bare wpawolf default
-    /// stays wide -- this flag is the discoverable opt-in for the narrow-output
-    /// behaviour that hcxpcapngtool ships by default.
+    /// hash-yield drop (~1% on self-contained-capture corpora). The bare wpawolf
+    /// default stays wide -- this flag is the discoverable opt-in for the
+    /// narrow-output behaviour that hcxpcapngtool ships by default.
     #[arg(long)]
     strict: bool,
 }
@@ -588,8 +588,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             Ok(r) => r,
             Err(e) => {
                 // Route unrecognised-magic files through the log sink instead of stderr:
-                // the corpus-scale failure mode (wpa-sec watch dir leaving sub-4-byte
-                // stubs behind) is "expected garbage", not "operator-affecting error".
+                // the corpus-scale failure mode (submission-staging watch directories
+                // leaving sub-4-byte stubs behind) is "expected garbage", not
+                // "operator-affecting error".
                 // Genuine I/O failures (permission denied, disk error) still surface on
                 // stderr so a runaway run doesn't silently misbehave.
                 if matches!(e, wpawolf::types::Error::UnknownFormat(_)) {

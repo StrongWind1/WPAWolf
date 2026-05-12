@@ -455,8 +455,8 @@ mod tests {
         // That is NOT Mesh Control Present -- mesh data frames are 4-address only.
         // Pre-fix: wpawolf stripped a phantom 6-byte mesh-control header from the
         // body, butchering the EAPOL inside and dropping the M2 / M4 of a real
-        // WPA2 handshake (regression captured from a Vladimir's-iPhone wpa-sec
-        // sample where 5x M2 + 5x M4 all had QoS Control = 0x0b10).
+        // WPA2 handshake (regression captured from a real-world sample where
+        // 5x M2 + 5x M4 all had QoS Control = 0x0b10).
         let mut frame = build(fc(TYPE_DATA, 8, true, false), mac(0x01), mac(0x02), mac(0x03));
         frame.push(0x10); // QoS Control LE-low: TID=0, B4=1 (Queue-Size mode)
         frame.push(0x0b); // QoS Control LE-high: Queue Size = 11; B8 = 1

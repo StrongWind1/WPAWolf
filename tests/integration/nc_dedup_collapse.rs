@@ -1,6 +1,6 @@
 //! Integration test: `--nc-dedup` collapses a 26-element near-identical-nonce cluster.
 //!
-//! Synthesises a WPA2-PSK fixture mimicking the shape Mike reported on the
+//! Synthesises a WPA2-PSK fixture mimicking the shape reported upstream on the
 //! hcxtools mailing list: many WPA*02* lines for one (AP, STA) that share the
 //! same EAPOL frame and MIC and differ only in the trailing byte of the
 //! `ANonce`. 26 M1 frames are emitted (each carrying a distinct trailing-byte
@@ -144,7 +144,7 @@ fn data_frame_ul(ap: [u8; 6], sta: [u8; 6], body: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// Per Mike's reported shape: 26 M1 frames where the `ANonce` trailing byte
+/// Per the upstream-reported shape: 26 M1 frames where the `ANonce` trailing byte
 /// cycles 0x4D..=0x66 (26 values, all sharing the first 28 bytes), followed
 /// by a single M2 with a fixed `SNonce`. Spans 26 -> three clusters of sizes
 /// 9, 9, 8 at default `--nc-tolerance=8`.

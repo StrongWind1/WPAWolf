@@ -22,8 +22,9 @@
 //! * `[essid_not_found_summary]`: handshake emitted for an AP whose SSID was
 //!   never observed on the wire.
 //! * `[skipped_input]`: explicit-file argument that does not start with a
-//!   recognised capture magic (typical wpa-sec stub-file noise) -- silenced
-//!   on stderr, surfaced in the log + Phase 1 counter.
+//!   recognised capture magic (typical stub-file noise from submission
+//!   staging directories) -- silenced on stderr, surfaced in the log + Phase 1
+//!   counter.
 
 #![allow(
     clippy::unwrap_used,
@@ -444,7 +445,7 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
 
 #[test]
 fn skipped_input_routes_unknown_format_files_through_log_not_stderr() {
-    // wpa-sec corpus pain point: micro-stub files (0/1/2/3 bytes) and non-capture
+    // Submission-staging pain point: micro-stub files (0/1/2/3 bytes) and non-capture
     // junk in a watch directory used to spam stderr with `warning: cannot open ...
     // unrecognised file format` lines. We now route every `Error::UnknownFormat`
     // result through the `[skipped_input]` log category and increment the

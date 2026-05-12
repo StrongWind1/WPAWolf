@@ -556,9 +556,9 @@ mod tests {
     fn format_pmkid_37100_message_pair_client_side_is_ftpsk_value() {
         // FT-PSK PMKID sourced from a client-side frame (M2 RSN IE) must emit
         // `PMKID_CLIENT_FTPSK = 0x20`, not the mode-22000 `PMKID_CLIENT = 0x04`.
-        // Worked example: capture 4b2a84b7 in the 2026-05-12 corpus run --
-        // hcx-default emitted *20 for a Hitron VastVortex FT-PSK session and
-        // wpawolf was emitting *04, causing per-capture superset violations.
+        // Regression captured from a real FT-PSK session where hcx-default
+        // emitted *20 and wpawolf was emitting *04, causing per-capture
+        // superset violations.
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::FtPsk;
         entry.source = PmkidSource::M2RsnIe;

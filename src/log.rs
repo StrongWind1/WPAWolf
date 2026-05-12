@@ -543,7 +543,7 @@ mod tests {
         {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
             logger.log_skipped_input(
-                std::path::Path::new("/var/www/wpa-sec/cap/wpakeysXY"),
+                std::path::Path::new("/srv/captures/staging/sample-stub"),
                 "unrecognised file format (magic bytes: file too short to detect format (< 4 bytes))",
             );
             logger.flush().unwrap();
@@ -552,7 +552,7 @@ mod tests {
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
             contents.contains(
-                "[skipped_input] path=/var/www/wpa-sec/cap/wpakeysXY reason=unrecognised file format \
+                "[skipped_input] path=/srv/captures/staging/sample-stub reason=unrecognised file format \
                  (magic bytes: file too short to detect format (< 4 bytes))"
             ),
             "missing skipped_input line; got: {contents}"

@@ -536,14 +536,14 @@ mod tests {
     }
 
     #[test]
-    fn nc_dedup_stats_for_mike_shape_26_nonce_cluster() {
-        // Mike's reported shape: 26 nonces sharing the 28-byte prefix and MIC,
+    fn nc_dedup_stats_for_parity_report_26_nonce_cluster() {
+        // Upstream parity-report shape: 26 nonces sharing the 28-byte prefix and MIC,
         // trailing byte cycling 0x4d..=0x66 (26 values). With tolerance=8, three
         // clusters of sizes 9, 9, 8 form; the maximum is 9 and 26 - 3 = 23 lines
         // collapse.
         let pairs: Vec<PairedHash> =
             (0x4du8..=0x66).map(|t| make_pair(ComboType::N1E2, nonce_with_le_tail(t), 0xCC, 0xDD)).collect();
-        assert_eq!(pairs.len(), 26, "fixture must reproduce Mike's count exactly");
+        assert_eq!(pairs.len(), 26, "fixture must reproduce the reported nonce count");
         let (out, stats) = nc_dedup(pairs, &config_with_nc(8));
         assert_eq!(stats.collapsed_lines, 23, "26 input - 3 survivors = 23 collapsed");
         assert_eq!(stats.cluster_count, 3);

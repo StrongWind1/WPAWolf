@@ -9,7 +9,7 @@ resolver = "3"
 
 [package]
 name = "wpawolf"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 rust-version = "1.85"
 description = "WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100)"

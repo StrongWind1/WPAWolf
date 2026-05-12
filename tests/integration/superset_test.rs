@@ -62,9 +62,10 @@ enum OracleProbe {
 
 /// `true` iff the harness is running under a CI pipeline. CI must never
 /// silently skip the parity test; without this flag a missing oracle would
-/// turn the gate into a no-op (the original failure mode that masked Alex's
-/// 6.2.7 breakage). Both `CI=true` and `CI=1` are recognised; that covers
-/// `GitHub` Actions, `GitLab`, `CircleCI`, and most other vendors.
+/// turn the gate into a no-op (the original failure mode in which a stale
+/// 6.2.x oracle silently produced false-pass results). Both `CI=true` and
+/// `CI=1` are recognised; that covers `GitHub` Actions, `GitLab`, `CircleCI`,
+/// and most other vendors.
 fn is_ci() -> bool {
     matches!(env::var("CI").as_deref(), Ok("true" | "1" | "TRUE"))
 }

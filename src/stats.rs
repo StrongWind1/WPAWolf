@@ -110,9 +110,10 @@ pub struct Stats {
     /// Input files the ingest loop opened but skipped because their magic bytes
     /// did not match any supported capture format.
     ///
-    /// Typical causes: sub-4-byte stub files in a watch directory (e.g.
-    /// `wpa-sec`'s submission staging area) and explicitly-named non-capture
-    /// files. The directory-walk filter (`is_capture_magic`) catches these
+    /// Typical causes: sub-4-byte stub files in a watch directory (typical
+    /// shape: submission-staging trees that leave zero-byte placeholders)
+    /// and explicitly-named non-capture files. The directory-walk filter
+    /// (`is_capture_magic`) catches these
     /// before they reach `open_reader`, so a non-zero count here usually means
     /// either an explicit-file argument with the wrong content or a TOCTOU
     /// race (file shrunk between the walk and the open). Per-file detail goes

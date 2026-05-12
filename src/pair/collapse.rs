@@ -68,8 +68,9 @@ pub fn collapse(pairs: Vec<PairedHash>, all_combos: bool) -> Vec<PairedHash> {
     // which would be a correctness regression. Byte-equality keying via Arc<[u8]>
     // costs one refcount bump per insert and one O(frame_size) hash per lookup
     // (~120 ns for typical 120-byte EAPOL bodies); negligible vs the O(n^2) scan
-    // it replaces, which observed 5x slowdown on a 390 MB subset and could not
-    // complete within the 5-min cap on a 5.4 GB corpus during the May 2026 sweep.
+    // it replaces, which observed a multiple-x slowdown on a several-hundred-MB
+    // subset and could not complete within typical sweep time budgets on a
+    // multi-GB capture set.
     //
     // Note: pair_one_group is called per (AP, STA), not per session, and group
     // sizes scale with corpus size, not 4-way handshake size. The "tiny <= 6"
