@@ -631,7 +631,9 @@ impl OutputContext {
         // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
-        let all_pairs = pair_all_groups(message_store, pair_config, thread_count);
+        // NC-dedup stats are produced here but consumed in a follow-up commit
+        // (NC-4 -- stats banner wiring). Discard for now to keep the build clean.
+        let (all_pairs, _nc_stats) = pair_all_groups(message_store, pair_config, thread_count);
         if any_sink {
             for pair in &all_pairs {
                 let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
