@@ -338,11 +338,12 @@ Per-field rejection matrix:
 
 | Field | Rejected kinds | Spec-valid exception |
 |-------|----------------|----------------------|
-| Nonce M1, M2, M3 | every kind | -- |
-| Nonce M4 | `ff`, `repeat_1`, `repeat_2`, `repeat_4` | `null` accepted per §12.7.6.5 NOTE 9 |
+| Nonce M1, M2, M3, M4 | every kind | -- |
 | MIC on frame with `Key MIC Present` set (M2/M3/M4) | every kind | -- |
 | MIC on M1 (`Key MIC Present` cleared) | not checked | M1 MIC is legitimately zero |
 | PMKID (any source) | every kind | -- |
+
+M4 NULL nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5 NOTE 9 ("M4 Key Nonce SHALL be zero") but is dropped at extract: an EAPOL hash line built from such an M4 is mathematically uncrackable because the live PTK depends on M2's `SNonce`, which the M4 frame does not carry. Combining the M4 NULL with M3's ANonce in an N3E4 line, or with M3's EAPOL body in an N4E3 line, yields the PTK input pair `(NULL, M3_ANonce)` which does not reproduce the live PTK. The drop matches hcxpcapngtool's `eapolm4zeroedcount++; return;` gate at `hcxpcapngtool.c:3636`. Non-conforming firmware that copies M2's `SNonce` into M4 (the other half of NOTE 9) still passes the gate -- those frames carry a non-NULL nonce and produce a crackable line.
 
 **ESSIDs are not garbage-filtered.** A repeating-byte or all-`0xFF` SSID is unusual but not an invariant of "garbage" the way it is for HMAC outputs -- the cracker may still recover the right PMK from such an SSID. The spec-driven discard rule stays unchanged (length 0 wildcard, length > 32 spec violation, first byte 0 hidden-network sentinel; mirrors hcxtools `fileops.c:72-86`). On top of that, SSIDs that survive the gate but contain at least one byte in `0x00..=0x1F` (the full ASCII C0 control range, NUL through US -- every control character) emit a non-fatal `[essid_control_bytes]` log line with the SSID rendered in lowercase hex, ticking the `essid_control_bytes_warned` counter. The SSID itself is stored and emitted unchanged.
 
@@ -601,11 +602,13 @@ If an operator wants only the verifiable subset for FT, the simplest mechanical 
 # may change as hashcat adds APless FT support.
 ```
 
-### §5.10  M4 zero-nonce acceptance
+### §5.10  M4 zero-nonce drop
 
-`[IEEE 802.11-2024]` §12.7.6.5 says M4's nonce field SHALL be zero, but NOTE 9 acknowledges that "some deployed Supplicant implementations set the Key Nonce field in message 4 to the same value as in message 2." wpawolf accepts both: M4 frames with all-zero nonces (using SNonce from M2 in the hash line) or with non-zero nonces (using the M4 nonce directly).
+`[IEEE 802.11-2024]` §12.7.6.5 says M4's nonce field SHALL be zero, but NOTE 9 acknowledges that "some deployed Supplicant implementations set the Key Nonce field in message 4 to the same value as in message 2." Spec-compliant M4 (NULL nonce) is dropped at extract; the non-conforming SNonce-copy form passes through and pairs normally.
 
-This is the only spec-vs-deployed deviation that wpawolf accepts in the EAPOL pipeline. M4 with a 0xFF nonce remains rejected per §4 invariant 7.
+The reason for dropping is cryptographic, not spec-driven. The live PTK is derived from M2's `SNonce` and M3's ANonce. An EAPOL hash line built from an M4 with a NULL Key Nonce supplies the cracker with the input pair `(NULL, M3_ANonce)`, which does not reproduce the live PTK -- the resulting MIC verification cannot succeed for any candidate password, so no value of N1E4 / N4E3 / N3E4 lines can crack a spec-compliant M4 handshake. This matches hcxpcapngtool's `eapolm4zeroedcount++; return;` drop at `hcxpcapngtool.c:3636`.
+
+Frames with non-zero M4 Key Nonce (the SNonce-copy form, also covered by NOTE 9) still pair: the nonce passes the garbage-pattern check, the M4 enters `MessageStore`, and the pairing engine emits N1E4 / N4E3 / N3E4 combos with that nonce in the cryptographic role. Those lines are crackable because the M4 carries the real `SNonce`. M4 with a 0xFF, all-same-byte, or short-period repeating nonce is rejected like any other garbage pattern per §4 invariant 7.
 
 ### §5.11  Stored EapolMessage
 
@@ -1136,7 +1139,7 @@ Detect nonce endianness. Compare replay counters across M1->M2 or M3->M4. If the
 #### FR-PAIR-7
 Invalid value rejection (unconditional, not a flag). Per §4 invariant 7:
 
-- Key Nonce matching any garbage-pattern kind (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`): M1/M2/M3 always rejected at parse time. M4 accepts `null` per §12.7.6.5 NOTE 9; every other kind still rejects on M4.
+- Key Nonce matching any garbage-pattern kind (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`): rejected at parse time on every message type including M4. M4 NULL nonce is spec-valid on the wire per §12.7.6.5 NOTE 9 but the hash line is mathematically uncrackable (the live PTK depends on M2's `SNonce`, which the M4 frame does not carry); see §5.10.
 - MIC matching any garbage-pattern kind when Key MIC Present (B8) is set: rejected. M1 MIC is legitimately zero and is not checked.
 - PMKIDs matching any garbage-pattern kind: rejected at store insertion.
 - ESSIDs are NOT garbage-filtered. The spec-driven discard rule (length 0, length > 32, first byte 0) stays the only path that drops an SSID; SSIDs that pass it but contain at least one byte in `0x00..=0x1F` (the full ASCII C0 control range) emit a non-fatal `[essid_control_bytes]` warning log line and bump `essid_control_bytes_warned`, but are still stored and emitted.
@@ -1277,7 +1280,7 @@ Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary 
 - `unknown_akm`         - AKM suite type outside [IEEE 802.11-2024] Table 9-190
 - `essid_not_found_summary` - per-AP summary: the AP's SSID was never observed, so every would-have-been-emitted hash line for it was dropped at output time as uncrackable. One line per affected AP at end of run; carries `ap=`, `dropped=N`, `first_seen_us=`, `last_seen_us=` so the operator can locate the source frames in the original capture
 - `capture_read_error`  - per-file ingest error (typically a truncated trailing packet record per FR-IN-10); the file is closed and the run continues
-- `invalid_nonce`       - EAPOL frame discarded: nonce matched a garbage pattern (`null` on M1/M2/M3, `ff` on any, `repeat_1` / `repeat_2` / `repeat_4` on any). M4 `null` nonce is spec-valid and is NOT logged. Line carries `kind=<k> nonce_hex=<32 B hex>` so downstream tooling can filter by pattern and an operator can grep the source capture for the rejected bytes
+- `invalid_nonce`       - EAPOL frame discarded: nonce matched a garbage pattern (`null` / `ff` / `repeat_1` / `repeat_2` / `repeat_4` on any message type, M4 included). M4 NULL nonce is spec-valid on the wire per §12.7.6.5 NOTE 9 but is dropped because the hash line is cryptographically dead; see §5.10. Line carries `kind=<k> nonce_hex=<32 B hex>` so downstream tooling can filter by pattern and an operator can grep the source capture for the rejected bytes
 - `invalid_mic`         - EAPOL frame discarded: MIC matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`) with the Key MIC flag set (M2/M3/M4). Line carries `kind=<k> mic_hex=<16/24 B hex>` (16 for AKMs 1-6, 8, 9, 11; 24 for the SHA-384 family)
 - `invalid_pmkid`       - PMKID discarded: matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`). Line carries `kind=<k> pmkid_hex=<16 B hex>`
 - `essid_control_bytes` - SSID warning, **not** a discard: the SSID byte run contained at least one byte in `0x00..=0x1F` (the full ASCII C0 control range, NUL through US -- every control character). The SSID is stored and emitted; the line carries `essid_hex=` rendered in lowercase hex so the operator can audit the source frame. SSIDs that fail the spec-driven length / first-byte-zero gate are discarded silently by upstream counters and are NOT logged

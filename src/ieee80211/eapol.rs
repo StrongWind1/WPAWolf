@@ -109,14 +109,19 @@ const LLC_SNAP_LEN: usize = 8;
 /// rejected value is preserved as `nonce_hex=` / `mic_hex=` for forensic
 /// traceability.
 ///
-/// M4 NULL nonce and M1 NULL MIC are spec-valid and are **never** flagged
-/// here -- see field docs for the governing spec citation.
+/// M1 NULL MIC is spec-valid and is **never** flagged here. M4 NULL nonce IS
+/// flagged: although [IEEE 802.11-2024] §12.7.6.5 mandates an all-zero M4 Key
+/// Nonce, an EAPOL hash line built from such an M4 carries no usable `SNonce`
+/// and is mathematically uncrackable -- the live PTK was derived from M2's
+/// `SNonce`, which the M4 frame does not carry. This matches hcxpcapngtool's
+/// `eapolm4zeroedcount++; return;` gate at hcxpcapngtool.c:3636.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InvalidCheck {
     /// Garbage-pattern kind detected in the Key Nonce paired with the 32-byte
-    /// nonce that triggered the rejection, or `None` when clean. M4 frames are
-    /// exempted from the NULL check per [IEEE 802.11-2024] §12.7.6.5 (spec
-    /// mandates an all-zero M4 nonce); every other pattern still flags.
+    /// nonce that triggered the rejection, or `None` when clean. NULL nonces
+    /// are flagged on every message type including M4: spec §12.7.6.5 allows
+    /// the wire bytes but the resulting EAPOL hash line cannot crack because
+    /// the live PTK depends on M2's `SNonce`, which is not present in M4.
     pub nonce_garbage: Option<(&'static str, [u8; NONCE_LEN])>,
     /// Garbage-pattern kind detected in the Key MIC paired with the MIC bytes
     /// (16 or 24 wide per AKM) when the Key MIC flag (bit B8) is set, or
@@ -143,12 +148,14 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
         return InvalidCheck::default();
     }
 
-    // Key Information (BE u16) at eapol offset 5. [IEEE 802.11-2024] §12.7.2, Figure 12-36
+    // Key Information (BE u16) at eapol offset 5. [IEEE 802.11-2024] §12.7.2, Figure 12-36.
+    // Only the Key MIC flag is needed here -- the MIC garbage check is gated on it because
+    // M1 carries no MIC and must not be flagged. The other Key Information bits and the
+    // Key Data Length are parsed by `parse()` proper for message-type classification.
     let ki = u16::from_be_bytes([
         *data.get(LLC_SNAP_LEN + OFF_KEY_INFO).unwrap_or(&0),
         *data.get(LLC_SNAP_LEN + OFF_KEY_INFO + 1).unwrap_or(&0),
     ]);
-    let key_ack = (ki >> 7) & 1 != 0;
     let key_mic_flag = (ki >> 8) & 1 != 0;
 
     // Body length (BE u16) at eapol offset 2-3. Used to disambiguate the MIC width:
@@ -158,29 +165,18 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
         u16::from_be_bytes([*data.get(LLC_SNAP_LEN + 2).unwrap_or(&0), *data.get(LLC_SNAP_LEN + 3).unwrap_or(&0)])
             as usize;
     let mic_width = detect_mic_width(data.get(LLC_SNAP_LEN..).unwrap_or(&[]), body_len);
-    let off_kd_len = if mic_width == 24 { OFF_KEY_DATA_LEN_24 } else { OFF_KEY_DATA_LEN_16 };
-
-    // Key Data Length (BE u16) at the width-correct offset. Used to distinguish M4
-    // (kd_len=0) from M2 (kd_len>0) when key_ack=0. [IEEE 802.11-2024] §12.7.2
-    let kd_len = u16::from_be_bytes([
-        *data.get(LLC_SNAP_LEN + off_kd_len).unwrap_or(&0),
-        *data.get(LLC_SNAP_LEN + off_kd_len + 1).unwrap_or(&0),
-    ]);
-
-    // M4 heuristic: key_ack=0, key_mic=1, key_data_len=0.
-    // M4 NULL nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5.
-    let is_likely_m4 = !key_ack && key_mic_flag && kd_len == 0;
 
     // Nonce at eapol offset 17. [IEEE 802.11-2024] §12.7.2
+    // Every garbage pattern flags on every message type. NULL on M4 is spec-valid
+    // on the wire (§12.7.6.5) but cryptographically dead (the live PTK requires
+    // M2's `SNonce`, which the M4 frame does not carry), so the line cannot crack
+    // and is rejected like any other garbage. Matches hcxpcapngtool's
+    // eapolm4zeroedcount drop at hcxpcapngtool.c:3636.
     let nonce_slice = data.get(LLC_SNAP_LEN + OFF_NONCE..LLC_SNAP_LEN + OFF_NONCE + NONCE_LEN);
-    // For M4, NULL nonce is spec-compliant -- map "null" to None there. Every other
-    // garbage pattern (ff, repeat_1, repeat_2, repeat_4) still flags on M4.
-    let nonce_garbage = nonce_slice
-        .and_then(|s| {
-            let arr: [u8; NONCE_LEN] = s.try_into().ok()?;
-            garbage_pattern_kind(&arr).map(|kind| (kind, arr))
-        })
-        .filter(|(kind, _)| !(is_likely_m4 && *kind == "null"));
+    let nonce_garbage = nonce_slice.and_then(|s| {
+        let arr: [u8; NONCE_LEN] = s.try_into().ok()?;
+        garbage_pattern_kind(&arr).map(|kind| (kind, arr))
+    });
 
     // MIC at eapol offset 81 with width 16 or 24. Only relevant when Key MIC flag
     // is set (M2/M3/M4). M1 MIC is legitimately NULL per spec and is never flagged.
@@ -535,19 +531,20 @@ pub fn parse(data: &[u8], direction: Option<FrameDirection>) -> Option<EapolKey>
     }
 
     // Nonce validation.
-    // M4: NULL nonce (all-0x00) is spec-valid per §12.7.6.5 -- the spec says M4 Key Nonce
-    //   SHALL be zero. §12.7.2 NOTE 9 acknowledges some non-conforming implementations
-    //   copy M2's SNonce into M4. Both forms are accepted. M4 is excluded from the NULL
-    //   branch only; every other garbage pattern still rejects on M4.
-    // M1/M2/M3: nonce MUST be a non-NULL cryptographically random value. NULL nonce
-    //   indicates entropy starvation or a firmware bug; repeating-byte patterns
-    //   indicate firmware stub values; all-0xFF is a flash-erase sentinel.
+    // Every garbage pattern (null, ff, repeat_1/2/4) rejects on every message type.
+    // M4 NULL nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5 NOTE 9
+    // (the spec mandates an all-zero M4 Key Nonce), but an EAPOL hash line built from
+    // such an M4 carries no usable `SNonce`: the live PTK was derived from M2's `SNonce`,
+    // which the M4 frame does not carry. Combining the M4 NULL with M3's ANonce in
+    // an N3E4 line, or with M3's EAPOL body in an N4E3 line, yields a PTK input pair
+    // (NULL, M3_ANonce) that does not reproduce the live PTK -- the line cannot crack
+    // for any spec-compliant M4. Drop at extract so those dead lines are never built,
+    // matching hcxpcapngtool's eapolm4zeroedcount drop at hcxpcapngtool.c:3636. The
+    // rare non-conforming firmware that copies M2's `SNonce` into M4 still passes here
+    // (non-NULL nonce -> no garbage pattern).
     // [IEEE 802.11-2024] §12.7.2, §12.7.6.5
-    if let Some(kind) = garbage_pattern_kind(&nonce) {
-        let m4_null_exception = msg_type == MsgType::M4 && kind == "null";
-        if !m4_null_exception {
-            return None;
-        }
+    if garbage_pattern_kind(&nonce).is_some() {
+        return None;
     }
 
     // --- 6. Extract PMKID from M1 Key Data KDE (if present) ---
@@ -731,8 +728,9 @@ mod tests {
     fn parse_wpa_m4_by_length() {
         // WPA legacy M4 has Ack=0, Secure=0, MIC=1, body_len=95 (no key data).
         // hcxpcapngtool identifies these as M4 via `authlen == 0x5f`.
-        // NULL nonce is spec-valid for M4 per §12.7.6.5.
-        let frame = make_eapol(false, true, false, false, [0u8; 32], mic_nonzero(), &[]);
+        // Use a non-NULL nonce: NULL M4 is dropped at extract (§12.7.6.5 spec-valid
+        // on the wire but cryptographically dead -- see parse()).
+        let frame = make_eapol(false, true, false, false, nonce_nonzero(), mic_nonzero(), &[]);
         let result = parse(&frame, None).unwrap();
         assert_eq!(result.msg_type, MsgType::M4, "WPA M4 with body_len=95 must classify as M4");
     }
@@ -782,13 +780,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_m4_null_nonce_accepted() {
-        // M4 with all-NULL nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5:
-        // "M4 Key Nonce SHALL be zero." Must be accepted.
+    fn parse_m4_null_nonce_rejected() {
+        // M4 with all-NULL nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5
+        // ("M4 Key Nonce SHALL be zero"), but an EAPOL hash line built from it cannot
+        // crack -- the live PTK was derived from M2's `SNonce`, which the M4 frame does not
+        // carry. Drop at extract to avoid emitting cryptographically dead N1E4 / N4E3 /
+        // N3E4 lines, matching hcxpcapngtool's eapolm4zeroedcount drop at
+        // hcxpcapngtool.c:3636.
         let frame = make_eapol(false, true, true, false, [0u8; 32], mic_nonzero(), &[]);
-        let result = parse(&frame, None).unwrap();
-        assert_eq!(result.msg_type, MsgType::M4);
-        assert_eq!(result.nonce, [0u8; 32], "NULL M4 nonce is spec-valid and must be accepted");
+        assert!(parse(&frame, None).is_none(), "M4 with all-zero Key Nonce must be dropped at extract");
     }
 
     #[test]
@@ -1127,11 +1127,11 @@ mod tests {
     #[test]
     fn direction_from_sta_no_key_data_is_m4() {
         // STA transmitted, key_data_len == 0 -> M4 regardless of Secure flag.
-        // NULL nonce is accepted for M4 (spec-valid per §12.7.6.5).
-        let frame = make_eapol(false, true, true, false, [0u8; 32], mic_nonzero(), &[]);
+        // Use a non-NULL nonce -- NULL M4 is dropped at extract (cryptographically dead).
+        let frame = make_eapol(false, true, true, false, nonce_nonzero(), mic_nonzero(), &[]);
         let result = parse(&frame, Some(FrameDirection::FromSta)).unwrap();
         assert_eq!(result.msg_type, MsgType::M4);
-        assert_eq!(result.nonce, [0u8; 32], "NULL M4 nonce must be accepted");
+        assert_eq!(result.nonce, nonce_nonzero());
     }
 
     #[test]
@@ -1152,8 +1152,8 @@ mod tests {
     fn direction_from_sta_wpa_m4_no_secure() {
         // STA transmitted, Secure=0, body_len=95, no key data -> M4.
         // Direction-based: kd_len=0 -> M4 (correct, no body_len heuristic needed).
-        // NULL nonce is accepted for M4 (spec-valid).
-        let frame = make_eapol(false, true, false, false, [0u8; 32], mic_nonzero(), &[]);
+        // Use a non-NULL nonce -- NULL M4 is dropped at extract (cryptographically dead).
+        let frame = make_eapol(false, true, false, false, nonce_nonzero(), mic_nonzero(), &[]);
         let result = parse(&frame, Some(FrameDirection::FromSta)).unwrap();
         assert_eq!(result.msg_type, MsgType::M4, "direction-based correctly identifies WPA M4");
     }
@@ -1169,8 +1169,8 @@ mod tests {
     #[test]
     fn direction_none_falls_back_to_flags() {
         // None direction -> falls through to flag-based Tier 3.
-        // NULL M4 nonce is spec-valid.
-        let frame = make_eapol(false, true, true, false, [0u8; 32], mic_nonzero(), &[]);
+        // Use a non-NULL nonce -- NULL M4 is dropped at extract (cryptographically dead).
+        let frame = make_eapol(false, true, true, false, nonce_nonzero(), mic_nonzero(), &[]);
         let result = parse(&frame, None).unwrap();
         assert_eq!(result.msg_type, MsgType::M4, "None direction uses flag-based (Secure=1 -> M4)");
     }

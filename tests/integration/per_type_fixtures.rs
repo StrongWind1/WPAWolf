@@ -379,7 +379,7 @@ fn handshake_4_way_16(kdv: u8, m2_key_data: &[u8]) -> Vec<Vec<u8>> {
     let m1 = data_frame_downlink(&eapol_key_16(kdv, true, false, false, false, NONCE_AP, [0u8; 16], &[]));
     let m2 = data_frame_uplink(&eapol_key_16(kdv, false, false, true, false, NONCE_STA, MIC16, m2_key_data));
     let m3 = data_frame_downlink(&eapol_key_16(kdv, true, true, true, true, NONCE_AP, MIC16, &[]));
-    let m4 = data_frame_uplink(&eapol_key_16(kdv, false, false, true, true, [0u8; 32], MIC16, &[]));
+    let m4 = data_frame_uplink(&eapol_key_16(kdv, false, false, true, true, NONCE_STA, MIC16, &[]));
     vec![m1, m2, m3, m4]
 }
 
@@ -389,7 +389,7 @@ fn handshake_4_way_24(m2_key_data: &[u8]) -> Vec<Vec<u8>> {
     let m1 = data_frame_downlink(&eapol_key_24(0, true, false, false, false, NONCE_AP, [0u8; 24], &[]));
     let m2 = data_frame_uplink(&eapol_key_24(0, false, false, true, false, NONCE_STA, MIC24, m2_key_data));
     let m3 = data_frame_downlink(&eapol_key_24(0, true, true, true, true, NONCE_AP, MIC24, &[]));
-    let m4 = data_frame_uplink(&eapol_key_24(0, false, false, true, true, [0u8; 32], MIC24, &[]));
+    let m4 = data_frame_uplink(&eapol_key_24(0, false, false, true, true, NONCE_STA, MIC24, &[]));
     vec![m1, m2, m3, m4]
 }
 
@@ -498,7 +498,7 @@ fn type_07_ft_psk_eapol() {
     let m1 = data_frame_downlink(&eapol_key_16(2, true, false, false, false, NONCE_AP, [0u8; 16], &mde_fte()));
     let m2 = data_frame_uplink(&eapol_key_16(2, false, false, true, false, NONCE_STA, MIC16, &m2_kd));
     let m3 = data_frame_downlink(&eapol_key_16(2, true, true, true, true, NONCE_AP, MIC16, &[]));
-    let m4 = data_frame_uplink(&eapol_key_16(2, false, false, true, true, [0u8; 32], MIC16, &[]));
+    let m4 = data_frame_uplink(&eapol_key_16(2, false, false, true, true, NONCE_STA, MIC16, &[]));
     let frames = vec![beacon, m1, m2, m3, m4];
     let _ = assert_fixture_emits("type_07", frames, "--ft-out", "WPA*07*");
 }
@@ -560,7 +560,7 @@ fn type_11_ft_psk_sha384_eapol() {
     let m1 = data_frame_downlink(&eapol_key_24(0, true, false, false, false, NONCE_AP, [0u8; 24], &mde_fte()));
     let m2 = data_frame_uplink(&eapol_key_24(0, false, false, true, false, NONCE_STA, MIC24, &m2_kd));
     let m3 = data_frame_downlink(&eapol_key_24(0, true, true, true, true, NONCE_AP, MIC24, &[]));
-    let m4 = data_frame_uplink(&eapol_key_24(0, false, false, true, true, [0u8; 32], MIC24, &[]));
+    let m4 = data_frame_uplink(&eapol_key_24(0, false, false, true, true, NONCE_STA, MIC24, &[]));
     let frames = vec![beacon, m1, m2, m3, m4];
     let contents = assert_fixture_emits("type_11", frames, "--ft-psk-sha384-out", "WPA*11*");
     let line = contents.lines().find(|l| l.starts_with("WPA*11*")).unwrap();

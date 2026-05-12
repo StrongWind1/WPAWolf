@@ -104,20 +104,17 @@ fn mac_hdr_3addr(ftype: u8, subtype: u8, to_ds: bool, from_ds: bool, a1: [u8; 6]
     h
 }
 
-/// Builds a 26-byte QoS Data MAC header (3-address + 2-byte QoS Control).
+/// Builds a 32-byte QoS Data MAC header (4-address + 2-byte QoS Control).
 ///
+/// Mesh BSS data frames use 4-address format per [IEEE 802.11-2024] §9.3.2.1.
 /// `mesh_control_present` sets bit B0 of the LE-high byte of QoS Control per
-/// [IEEE 802.11-2024] §9.2.4.5.4 -- the only signal wpawolf uses to gate the
-/// Mesh Control header skip path.
-fn mac_hdr_qos_3addr(
-    to_ds: bool,
-    from_ds: bool,
-    a1: [u8; 6],
-    a2: [u8; 6],
-    a3: [u8; 6],
-    mesh_control_present: bool,
-) -> Vec<u8> {
-    let mut h = mac_hdr_3addr(TYPE_DATA, SUBTYPE_QOS_DATA, to_ds, from_ds, a1, a2, a3);
+/// [IEEE 802.11-2024] §9.2.4.5.7 -- this subfield is defined for QoS Data
+/// frames "transmitted between mesh STAs" only, and wpawolf only honors it on
+/// 4-address frames.
+fn mac_hdr_qos_mesh(a1: [u8; 6], a2: [u8; 6], a3: [u8; 6], a4: [u8; 6], mesh_control_present: bool) -> Vec<u8> {
+    // Mesh data frames are 4-address: ToDS=1 AND FromDS=1.
+    let mut h = mac_hdr_3addr(TYPE_DATA, SUBTYPE_QOS_DATA, true, true, a1, a2, a3);
+    h.extend_from_slice(&a4); // Address 4
     let qos_high = u8::from(mesh_control_present);
     h.push(0); // QoS Control LE-low byte (TID + EOSP + Ack Policy)
     h.push(qos_high); // QoS Control LE-high byte; bit B0 = Mesh Control Present
@@ -238,9 +235,12 @@ fn data_frame_uplink_eapol(ethertype: u16, eapol_body: &[u8]) -> Vec<u8> {
 
 /// Builds a Mesh Data QoS frame (downlink) with a 6-byte Mesh Control header
 /// followed by the EAPOL body. Mesh Address Extension Mode is `00` (no Address
-/// Extension), so total Mesh Control length is 6 bytes.
+/// Extension), so total Mesh Control length is 6 bytes. Mesh BSS data frames
+/// are 4-address per [IEEE 802.11-2024] §9.3.2.1 (mesh STAs as both transmitter
+/// and receiver of forwarded MSDUs).
 fn mesh_data_frame_downlink_eapol(eapol_body: &[u8]) -> Vec<u8> {
-    let mut frame = mac_hdr_qos_3addr(false, true, STA, AP, AP, true);
+    // Address mapping for a 4-addr mesh frame: addr1=RA, addr2=TA, addr3=DA, addr4=SA.
+    let mut frame = mac_hdr_qos_mesh(STA, AP, STA, AP, true);
     // Mesh Control: Flags(1) + TTL(1) + Sequence(4) -> Address Extension Mode = 00.
     frame.extend_from_slice(&[0x00, 0x20, 0x01, 0x02, 0x03, 0x04]);
     frame.extend_from_slice(eapol_body);
@@ -248,7 +248,7 @@ fn mesh_data_frame_downlink_eapol(eapol_body: &[u8]) -> Vec<u8> {
 }
 
 fn mesh_data_frame_uplink_eapol(eapol_body: &[u8]) -> Vec<u8> {
-    let mut frame = mac_hdr_qos_3addr(true, false, AP, STA, AP, true);
+    let mut frame = mac_hdr_qos_mesh(AP, STA, AP, STA, true);
     frame.extend_from_slice(&[0x00, 0x20, 0x05, 0x06, 0x07, 0x08]);
     frame.extend_from_slice(eapol_body);
     frame
@@ -315,7 +315,7 @@ fn mesh_control_skip_recovers_eapol_handshake() {
         mesh_data_frame_downlink_eapol(&eapol_key_body(0x888E, 2, true, false, false, false, NONCE_AP, [0u8; 16], &[]));
     let m2 = mesh_data_frame_uplink_eapol(&eapol_key_body(0x888E, 2, false, false, true, false, NONCE_STA, MIC16, &[]));
     let m3 = mesh_data_frame_downlink_eapol(&eapol_key_body(0x888E, 2, true, true, true, true, NONCE_AP, MIC16, &[]));
-    let m4 = mesh_data_frame_uplink_eapol(&eapol_key_body(0x888E, 2, false, false, true, true, [0u8; 32], MIC16, &[]));
+    let m4 = mesh_data_frame_uplink_eapol(&eapol_key_body(0x888E, 2, false, false, true, true, NONCE_STA, MIC16, &[]));
     let pcap = temp_path("mesh_control.pcap");
     let out = temp_path("mesh_control.22000");
     write_pcap(&pcap, &[beacon, m1, m2, m3, m4]);
@@ -345,7 +345,7 @@ fn preauth_ethertype_88c7_emits_handshake() {
     let m3 =
         data_frame_downlink_eapol(0x88C7, &eapol_key_body(0x88C7, 2, true, true, true, true, NONCE_AP, MIC16, &[]));
     let m4 =
-        data_frame_uplink_eapol(0x88C7, &eapol_key_body(0x88C7, 2, false, false, true, true, [0u8; 32], MIC16, &[]));
+        data_frame_uplink_eapol(0x88C7, &eapol_key_body(0x88C7, 2, false, false, true, true, NONCE_STA, MIC16, &[]));
     let pcap = temp_path("preauth.pcap");
     let out = temp_path("preauth.22000");
     write_pcap(&pcap, &[beacon, m1, m2, m3, m4]);

@@ -19,11 +19,14 @@
 //!   not match any supported capture format (typically a sub-4-byte stub or a
 //!   non-capture file slipped through). Counted in stats and silenced on stderr;
 //!   triage detail goes here.
-//! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL (M1/M2/M3),
-//!   all-`0xFF`, or a short-period repeating pattern (`repeat_1` / `repeat_2`
-//!   / `repeat_4`). M4 NULL nonce is spec-valid and is NOT discarded. The
-//!   line carries `nonce_hex=` (32 bytes lowercase hex) so the rejected
-//!   bytes are preserved for forensic triage.
+//! - `invalid_nonce`      -- EAPOL frame discarded: nonce was NULL, all-`0xFF`,
+//!   or a short-period repeating pattern (`repeat_1` / `repeat_2` / `repeat_4`).
+//!   Applies to every message type including M4: M4 NULL nonce is spec-valid on
+//!   the wire per [IEEE 802.11-2024] §12.7.6.5 but the resulting EAPOL hash
+//!   line is cryptographically dead because the live PTK requires M2's `SNonce`,
+//!   which the M4 frame does not carry. The line carries `nonce_hex=` (32
+//!   bytes lowercase hex) so the rejected bytes are preserved for forensic
+//!   triage.
 //! - `invalid_mic`        -- EAPOL frame discarded: MIC was NULL, all-`0xFF`, or
 //!   a short-period repeating pattern when the Key MIC flag was set (M2/M3/M4).
 //!   The line carries `mic_hex=` (16 or 24 bytes lowercase hex per AKM).
@@ -124,14 +127,17 @@ impl Logger {
 
     /// Logs an EAPOL-Key frame whose Key Nonce was rejected as a sentinel value.
     ///
-    /// `kind` is one of `"null"` (all-`0x00` nonce in M1/M2/M3 -- spec violation),
-    /// `"ff"` (all-`0xFF` nonce in any message -- firmware flash-erase pattern),
+    /// `kind` is one of `"null"` (all-`0x00` nonce, applies to every message type
+    /// including M4), `"ff"` (all-`0xFF` nonce, firmware flash-erase pattern),
     /// or `"repeat_1"` / `"repeat_2"` / `"repeat_4"` (short-period repeating
     /// patterns indicative of firmware stub or test-fixture data). M4 NULL
-    /// nonce is spec-valid per [IEEE 802.11-2024] §12.7.6.5 and is NOT logged.
-    /// `nonce` is the rejected 32-byte Key Nonce; the line carries it as
-    /// `nonce_hex=` in lowercase hex so the operator can grep the source
-    /// capture for the exact bytes.
+    /// nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5 but
+    /// the resulting EAPOL hash line is mathematically uncrackable -- the
+    /// live PTK depends on M2's `SNonce`, which the M4 frame does not carry --
+    /// so it is dropped and logged like any other garbage nonce. `nonce` is
+    /// the rejected 32-byte Key Nonce; the line carries it as `nonce_hex=` in
+    /// lowercase hex so the operator can grep the source capture for the
+    /// exact bytes.
     pub fn log_invalid_nonce(
         &mut self,
         timestamp_us: u64,

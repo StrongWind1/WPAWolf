@@ -386,9 +386,12 @@ pub struct Stats {
     pub eapol_kdv3: u64,
     /// EAPOL-Key frames with Key Descriptor Version 0 or 4-7 (reserved / non-standard).
     pub eapol_kdv_other: u64,
-    /// EAPOL frames rejected because the Key Nonce was all-NULL (`0x00...00`) in an M1/M2/M3
-    /// frame. Spec requires a non-NULL random nonce for M1/M2/M3. M4 NULL nonce is
-    /// spec-valid (§12.7.6.5) and is NOT counted here.
+    /// EAPOL frames rejected because the Key Nonce was all-NULL (`0x00...00`). Applies to
+    /// every message type including M4. M4 NULL nonce is spec-valid on the wire per
+    /// [IEEE 802.11-2024] §12.7.6.5, but the resulting EAPOL hash line is mathematically
+    /// uncrackable -- the live PTK depends on M2's `SNonce`, which the M4 frame does not
+    /// carry. Matches hcxpcapngtool's `eapolm4zeroedcount++; return;` drop at
+    /// hcxpcapngtool.c:3636.
     pub null_nonce_rejected: u64,
     /// EAPOL frames rejected because the Key Nonce was all-`0xFF`. Applies to all msg types
     /// including M4 (firmware flash-erase sentinel, never spec-valid).
@@ -1100,7 +1103,10 @@ impl Stats {
             );
         }
         stat!("  M4 messages", self.eapol_m4);
-        nz!("  NULL nonce rejected (frame dropped; M1/M2/M3; M4 NULL is spec-valid)", self.null_nonce_rejected);
+        nz!(
+            "  NULL nonce rejected (frame dropped; spec-valid on M4 wire but cryptographically dead)",
+            self.null_nonce_rejected
+        );
         nz!("  0xFF nonce rejected (frame dropped)", self.ff_nonce_rejected);
         nz!("  garbage-pattern nonce rejected (repeating period; frame dropped)", self.repeat_nonce_rejected);
         nz!("  NULL MIC rejected (frame dropped; M2/M3/M4)", self.null_mic_rejected);

@@ -255,11 +255,19 @@ pub fn parse(data: &[u8]) -> ParseResult {
             is_amsdu = (b & 0x80) != 0;
         }
         // Mesh Control Present bit (bit B0 of the LE-high byte of QoS Control,
-        // i.e. bit 8 of the 16-bit field) on mesh-BSS Data frames. The QoS Control
-        // field overloads bits 8-15 by direction; the Mesh Control Present bit
-        // sits in the same low position regardless. [IEEE 802.11-2024] §9.2.4.5.7
-        if let Some(&b_hi) = data.get(qos_offset + 1) {
-            mesh_control_present = (b_hi & 0x01) != 0;
+        // i.e. bit 8 of the 16-bit field). Per [IEEE 802.11-2024] §9.2.4.5.7 this
+        // subfield is defined for QoS Data frames "transmitted between mesh STAs"
+        // only -- mesh BSS data frames use 4-address format. In 3-address
+        // infrastructure frames the same bit position holds Queue Size LSB
+        // (uplink, when bit B4 = 1), TXOP Duration Requested LSB (uplink, B4 = 0),
+        // or AP-PS Buffer State / TXOP Limit LSB (downlink), per Tables 9-7 / 9-8.
+        // Honoring B8 unconditionally caused 3-address EAPOL bodies whose Queue
+        // Size happened to be odd to be misclassified as mesh frames and have a
+        // phantom 6-byte mesh-control header stripped, mangling the EAPOL body.
+        if four_addr {
+            if let Some(&b_hi) = data.get(qos_offset + 1) {
+                mesh_control_present = (b_hi & 0x01) != 0;
+            }
         }
     }
 
@@ -437,6 +445,36 @@ mod tests {
         frame.resize(32, 0u8);
 
         let hdr = unwrap_frame(parse(&frame));
+        assert_eq!(hdr.body_offset, 32);
+    }
+
+    #[test]
+    fn qos_3addr_b8_set_is_not_mesh() {
+        // Regression: a 3-address QoS Data uplink with QoS Control = 0x0b10 (Queue
+        // Size = 11, bit B4 = 1) has bit B8 = 1 because B8-B15 carry Queue Size.
+        // That is NOT Mesh Control Present -- mesh data frames are 4-address only.
+        // Pre-fix: wpawolf stripped a phantom 6-byte mesh-control header from the
+        // body, butchering the EAPOL inside and dropping the M2 / M4 of a real
+        // WPA2 handshake (regression captured from a Vladimir's-iPhone wpa-sec
+        // sample where 5x M2 + 5x M4 all had QoS Control = 0x0b10).
+        let mut frame = build(fc(TYPE_DATA, 8, true, false), mac(0x01), mac(0x02), mac(0x03));
+        frame.push(0x10); // QoS Control LE-low: TID=0, B4=1 (Queue-Size mode)
+        frame.push(0x0b); // QoS Control LE-high: Queue Size = 11; B8 = 1
+        let hdr = unwrap_frame(parse(&frame));
+        assert!(!hdr.mesh_control_present, "3-address frame must never set mesh_control_present");
+        assert_eq!(hdr.body_offset, 26);
+    }
+
+    #[test]
+    fn qos_4addr_b8_set_is_mesh() {
+        // 4-address QoS Data with bit B8 set: this is the only legitimate mesh
+        // signal (mesh BSS data uses 4-address per [IEEE 802.11-2024] §9.3.2.1).
+        let mut frame = build(fc(TYPE_DATA, 8, true, true), mac(0x01), mac(0x02), mac(0x03));
+        frame.extend_from_slice(&mac(0x04)); // Address 4
+        frame.push(0x00); // QoS Control LE-low
+        frame.push(0x01); // QoS Control LE-high: B8 = 1
+        let hdr = unwrap_frame(parse(&frame));
+        assert!(hdr.mesh_control_present);
         assert_eq!(hdr.body_offset, 32);
     }
 

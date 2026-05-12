@@ -267,8 +267,12 @@ fn data_frame_uplink(ap: [u8; 6], sta: [u8; 6], body: &[u8]) -> Vec<u8> {
 /// Builds the four EAPOL-Key data frames of a WPA2-PSK 4-way handshake.
 ///
 /// M1 carries a PMKID KDE so both `WPA*01*` (PMKID line) and `WPA*02*` (EAPOL
-/// pair line) reach the legacy `--22000-out` sink. M4 zeros the SNonce, which
-/// `extract::common::store_eapol_key` accepts (zero-nonce M4 is spec-legal).
+/// pair line) reach the legacy `--22000-out` sink. M4 carries the same SNonce
+/// as M2 (matches non-conforming firmware that copies M2's SNonce into M4 per
+/// [IEEE 802.11-2024] §12.7.6.5 NOTE 9). The spec-mandated all-zero M4 Key
+/// Nonce is dropped at extract because the resulting hash line is
+/// mathematically uncrackable -- the live PTK depends on M2's SNonce, which
+/// the M4 frame does not carry. See parse() in src/ieee80211/eapol.rs.
 fn build_handshake(ap: [u8; 6], sta: [u8; 6], pmkid: [u8; 16]) -> [Vec<u8>; 4] {
     let m1 = data_frame_downlink(
         ap,
@@ -277,7 +281,7 @@ fn build_handshake(ap: [u8; 6], sta: [u8; 6], pmkid: [u8; 16]) -> [Vec<u8>; 4] {
     );
     let m2 = data_frame_uplink(ap, sta, &eapol_key_body(false, false, true, false, NONCE_STA, MIC16, &[]));
     let m3 = data_frame_downlink(ap, sta, &eapol_key_body(true, true, true, true, NONCE_AP, MIC16, &[]));
-    let m4 = data_frame_uplink(ap, sta, &eapol_key_body(false, false, true, true, [0u8; 32], MIC16, &[]));
+    let m4 = data_frame_uplink(ap, sta, &eapol_key_body(false, false, true, true, NONCE_STA, MIC16, &[]));
     [m1, m2, m3, m4]
 }
 
