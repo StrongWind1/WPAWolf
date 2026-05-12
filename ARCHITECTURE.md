@@ -540,6 +540,12 @@ Examples:
 | `82` | N3E2, NC flag set (nonce error correction applied) |
 | `22` | N3E2, LE replay-counter detected |
 
+**FLAG_NC is set on a three-source OR.** For M3-anchored pairs (N3E2 / N3E4) wpawolf sets `FLAG_NC` (`0x80`) when any one of three independent sources fires:
+
+1. The (AP, STA) session has seen any M1 frame. hcxpcapngtool stores every M1 with `status=ST_NC` (`hcxpcapngtool.c:4190`) and the `addhandshake` inheritance loop (`hcxpcapngtool.c:2758-2767`) ORs that into every subsequent non-APLESS handshake for the same AP. Mirroring this is required because hashcat module `module_22000.c::module_hash_decode_postprocess` (lines 1302-1326) gates the nonce-error-corrections iteration window on `FLAG_NC=1`: without the bit, sessions where M1 and M3 ANonce differ are uncrackable.
+2. Nonce endianness has been detected on M1 or M3 -- hcx sets `ST_LE+ST_NC` or `ST_BE+ST_NC` on both the stored and current message (`hcxpcapngtool.c:3814-3826`, `4242-4253`). The detector compares M1s against M3s across (AP, STA) groups, matching hcx's loop guard at `hcxpcapngtool.c:3810` / `4238`.
+3. Per-pair replay-counter gap is non-zero (`hcxpcapngtool.c:2787-2790`).
+
 ### §5.8  6 -> 3 equivalence collapse
 
 Within a single handshake session (where M1 and M3 carry the same ANonce, M2 and M4 carry the same SNonce), the 6 combos produce at most 3 unique crackable hashes:
@@ -830,7 +836,7 @@ Unlike EAPOL lines where the message_pair byte encodes the combo type, for PMKID
 | `0x10` | PMKID from AP, FT-PSK |
 | `0x20` | PMKID from client, FT-PSK |
 
-These mirror the `PMKID_AP`, `PMKID_APPSK256`, `PMKID_CLIENT`, `PMKID_AP_FTPSK`, `PMKID_CLIENT_FTPSK` constants in hcxtools (`hcxpcapngtool.h:386-390`).
+These mirror the `PMKID_AP`, `PMKID_APPSK256`, `PMKID_CLIENT`, `PMKID_AP_FTPSK`, `PMKID_CLIENT_FTPSK` constants in hcxtools (`hcxpcapngtool.h:386-390`). hcx routes each PMKID through `addpmkid` for non-FT or `addpmkid_ftpsk` for FT so the byte that surfaces in each output line is the right kind for the line's prefix. In wpawolf the same `PmkidEntry` feeds both 22000 and 37100 sinks, so `pmkid_message_pair` in `src/output/hashcat.rs` inspects `entry.akm.is_ft()` and returns the FT pair when the line is FT.
 
 ### §6.8  Sanity checks before storing
 
@@ -1500,6 +1506,16 @@ Any stat, frame type, or metadata category `hcxpcapngtool` emits, wpawolf emits 
 - Relay frames without `--all` (wpawolf processes WDS unconditionally per §4 invariant 4).
 
 wpawolf emits and documents the difference. The Phase 8 superset test in `tests/integration/superset_test.rs` enforces this parity at every release.
+
+### §9.7  Operational verification -- cross-version corpus comparison
+
+Beyond unit + fixture tests, wpawolf is verified at release time against a multi-vendor capture corpus via a five-script harness that lives under gitignored `tools/` (`cross_version_run.sh` driver + four phase scripts). The harness sweeps every wpawolf binary `v0.3.2..v0.3.6 + HEAD` in both `WIDE` (bare) and `STRICT` (`--strict` bundle) modes plus the upstream `hcxpcapngtool` in `default` and `wide` (`--all --nonce-error-corrections=8 --eapoltimeout=900000 --max-essids=100 --ignore-ie`) modes across the same corpus, sorted-unique-diffs the resulting hashcat lines per capture and corpus-wide, and emits a markdown anomaly report. See `tools/cross_version_corpus_diff.README.md` for layout and invocation.
+
+The harness pins three corpus-scale invariants:
+
+1. **Cross-version drops.** For each adjacent (older, newer) version pair, every line emitted by the older binary on a capture must also appear in the newer binary's output. Non-empty `diff/cross_version_drops_<channel>.tsv` rows must trace to a documented intentional spec-compliance transition (e.g. v0.3.5's Mesh Control bit gate, v0.3.6's MessageStore dedup-on-insert) -- never to a regression.
+2. **Superset invariant.** `hcx-default ⊆ wpawolf-HEAD-WIDE` per capture. Non-empty `diff/superset_violations_<channel>.tsv` rows must trace to documented per-(AP, STA) precision differences (different `message_pair` flag byte for the same body, which are body-matched diffs not genuinely missing handshakes) -- never to a missing line. The 2026-05-12 corpus run on a 5.4 GB / 1788-capture multi-vendor corpus closed the FLAG_NC three-source rule (CC-1, see §5.7) and the FT-PSK PMKID `message_pair` byte (see §6.7 and `hcxpcapngtool.h:386-390`); the residual 753 22000-channel missed lines are all body-matched flag-byte differences from hcx-default's data-structure quirks (AP-wide M1 cross-leakage and 20-entry eviction window).
+3. **Mode parity `STRICT ⊆ WIDE`.** For every (capture, version, channel) tuple, the STRICT line-set must be a subset of the WIDE line-set. The `--strict` bundle (`--eapoltimeout` / `--rc-drift` / `--dedup-hash-combos` / `--per-file` / `--nc-dedup`) is a pure output filter; none of its passes can synthesize lines the WIDE pipeline did not produce. Non-empty `diff/mode_parity_violations.tsv` rows are a P0 STRICT-mode logic bug: `tools/cross_version_run_diffs.sh` exits non-zero on any violation, and the fixture-level test `tests/integration/mode_parity_strict_subset_wide.rs` gates the same invariant in CI without requiring the corpus.
 
 ---
 
