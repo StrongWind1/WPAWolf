@@ -144,6 +144,18 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // M1 presence and endianness are session-level inputs to the FLAG_NC decision
     // for M3-anchored pairs -- precompute once so the per-pair loops below stay
     // tight. The rcgap deviation is per-pair (uses each pair's `rc_gap_magnitude`).
+    //
+    // Scope note. wpawolf intentionally restricts the M1-presence source to
+    // THIS (AP, STA) session's messages. hcxpcapngtool's addhandshake
+    // inheritance loop scans all messagelist entries matched on AP MAC only
+    // (regardless of STA), so an M1 captured for STA-A leaks ST_NC onto an
+    // N3E2 / N3E4 handshake for STA-B at the same AP. That's an artefact of
+    // hcx's global messagelist data structure, not a spec-driven choice --
+    // knowing the AP was active on STA-A says nothing useful about STA-B's
+    // individual session, where the M1 / M3 ANonce relationship is what
+    // determines crackability. wpawolf-WIDE will therefore emit `*02` for
+    // these sessions where hcx-default emits `*82`; this is wpawolf being
+    // more precise, not a regression.
     let session_carries_nc = !m1s.is_empty() || router_endian.0 || router_endian.1;
 
     let mut pairs: Vec<PairedHash> = Vec::new();
@@ -161,10 +173,25 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // an empty ESSID (ESSID is resolved later). Eliminates ~50-90% of pairs at
     // generation time by catching retransmission duplicates (same nonce + EAPOL frame).
     //
-    // Also overlays the session's detected router-endianness (LE/BE) onto the
-    // message_pair byte, but only when the pair already carries FLAG_NC -- hcx
-    // only emits LE/BE alongside NC (status = ST_LE + ST_NC or ST_BE + ST_NC).
-    // Applying it here keeps try_pair's per-pair logic unchanged.
+    // Endianness overlay. When the session shows nonce-counter drift on
+    // M1 / M3 (`router_endian.0` or `.1`) and the pair already carries
+    // `FLAG_NC`, overlay `FLAG_LE` / `FLAG_BE` so hashcat knows to try the
+    // endianness-swapped nonce variants in addition to NC iteration. This is
+    // wpawolf's authoritative emission and is semantically a strict superset
+    // of hcx-default's bare-`FLAG_NC` variant: hashcat with `FLAG_LE` enables
+    // every search hashcat with bare `FLAG_NC` would do, plus the
+    // byte-swapped tail variant.
+    //
+    // hcxpcapngtool emits the bare-`FLAG_NC` variant in this scenario when its
+    // bounded `messagelist` had already evicted the second M3 nonce by
+    // addhandshake time -- a data-structure artefact, not a spec-driven
+    // choice. wpawolf's collect-then-pair model always sees both M3 nonces
+    // and detects the drift, so emitting only the more-informative
+    // `FLAG_LE` / `FLAG_BE` line is the correct behaviour. The line-by-line
+    // superset invariant fails on these specific captures (hcx-default emits
+    // `*82`, wpawolf emits only `*a2`); accept the divergence as wpawolf
+    // being more thorough rather than back-fill a duplicate `*82` line that
+    // wouldn't help hashcat find any additional crack.
     macro_rules! dedup_push {
         ($pair:expr) => {{
             let mut p: PairedHash = $pair;
