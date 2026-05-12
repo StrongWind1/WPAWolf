@@ -128,6 +128,15 @@ pub struct InvalidCheck {
     /// `None` when clean. M1 frames have no MIC by spec and are never flagged
     /// here -- the gate is `key_mic_flag`, not `msg_type`.
     pub mic_garbage: Option<(&'static str, MicBytes)>,
+    /// EAPOL-Key message classification computed from the same Key Information /
+    /// body-length bits the parser later uses. `None` when the frame is not a
+    /// valid EAPOL-Key (`ACK=0 MIC=0`) or when truncation prevents
+    /// classification. Surfaced to callers so the operator-visible stats
+    /// breakdown and the `[invalid_*]` log lines can distinguish M4 NULL nonce
+    /// (spec-zero, expected, harmless) from M1 / M2 / M3 NULL nonce (abnormal,
+    /// entropy starvation or firmware bug). The classification is informational
+    /// -- the same garbage gate fires on every message type regardless.
+    pub msg_type: Option<MsgType>,
 }
 
 /// Checks for invalid field values (NULL, `0xFF`, repeating patterns) in a raw frame body.
@@ -149,14 +158,19 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
     }
 
     // Key Information (BE u16) at eapol offset 5. [IEEE 802.11-2024] §12.7.2, Figure 12-36.
-    // Only the Key MIC flag is needed here -- the MIC garbage check is gated on it because
-    // M1 carries no MIC and must not be flagged. The other Key Information bits and the
-    // Key Data Length are parsed by `parse()` proper for message-type classification.
+    // We extract every bit needed to classify the message type pre-parse so the
+    // operator-visible counters and log lines can distinguish M4 NULL nonce
+    // (spec-zero, expected) from M1 / M2 / M3 NULL nonce (abnormal). The flag /
+    // body-length logic here mirrors what `parse()` does later; the MIC garbage
+    // check is still gated on `key_mic_flag` because M1 carries no MIC.
     let ki = u16::from_be_bytes([
         *data.get(LLC_SNAP_LEN + OFF_KEY_INFO).unwrap_or(&0),
         *data.get(LLC_SNAP_LEN + OFF_KEY_INFO + 1).unwrap_or(&0),
     ]);
+    let key_ack = (ki >> 7) & 1 != 0;
+    let key_install = (ki >> 6) & 1 != 0;
     let key_mic_flag = (ki >> 8) & 1 != 0;
+    let key_secure = (ki >> 9) & 1 != 0;
 
     // Body length (BE u16) at eapol offset 2-3. Used to disambiguate the MIC width:
     // 16-B MIC frames satisfy `body_len == 95 + key_data_len_16`; 24-B SHA-384 frames
@@ -165,6 +179,12 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
         u16::from_be_bytes([*data.get(LLC_SNAP_LEN + 2).unwrap_or(&0), *data.get(LLC_SNAP_LEN + 3).unwrap_or(&0)])
             as usize;
     let mic_width = detect_mic_width(data.get(LLC_SNAP_LEN..).unwrap_or(&[]), body_len);
+
+    // Message-type classification by flags + body length (same heuristic as `parse()`).
+    // Used purely to label the rejection in stats / log lines so the operator can
+    // tell at a glance whether the dropped frame was a spec-zero M4 (expected) or
+    // an abnormal NULL nonce on M1 / M2 / M3 (entropy starvation, firmware bug).
+    let msg_type = classify_by_flags(key_ack, key_install, key_mic_flag, key_secure, body_len);
 
     // Nonce at eapol offset 17. [IEEE 802.11-2024] §12.7.2
     // Every garbage pattern flags on every message type. NULL on M4 is spec-valid
@@ -188,7 +208,7 @@ pub fn check_invalid_fields(data: &[u8]) -> InvalidCheck {
         None
     };
 
-    InvalidCheck { nonce_garbage, mic_garbage }
+    InvalidCheck { nonce_garbage, mic_garbage, msg_type }
 }
 
 // --- MIC width disambiguation ---

@@ -147,21 +147,27 @@ impl Logger {
     /// nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5 but
     /// the resulting EAPOL hash line is mathematically uncrackable -- the
     /// live PTK depends on M2's `SNonce`, which the M4 frame does not carry --
-    /// so it is dropped and logged like any other garbage nonce. `nonce` is
-    /// the rejected 32-byte Key Nonce; the line carries it as `nonce_hex=` in
-    /// lowercase hex so the operator can grep the source capture for the
+    /// so it is dropped and logged like any other garbage nonce. `msg_type` is
+    /// the pre-parse EAPOL-Key classification (M1 / M2 / M3 / M4 or `None`
+    /// when truncation prevented it); rendered as `msg_type=mN` (or
+    /// `msg_type=unknown`) so the operator can grep for an M4 spec-zero
+    /// rejection (expected) vs an M1 / M2 / M3 NULL nonce (abnormal). `nonce`
+    /// is the rejected 32-byte Key Nonce; the line carries it as `nonce_hex=`
+    /// in lowercase hex so the operator can grep the source capture for the
     /// exact bytes.
     pub fn log_invalid_nonce(
         &mut self,
         timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
+        msg_type: Option<crate::types::MsgType>,
         kind: &str,
         nonce: &[u8],
     ) {
         let nonce_hex = render_lower_hex(nonce);
+        let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} nonce_hex={nonce_hex}"
+            "[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
         ));
     }
 
@@ -170,19 +176,23 @@ impl Logger {
     /// `kind` is one of `"null"` / `"ff"` / `"repeat_1"` / `"repeat_2"` /
     /// `"repeat_4"` (see [`Self::log_invalid_nonce`]). Only fires when the Key
     /// MIC flag (Key Information bit B8) is set, i.e. M2 / M3 / M4. M1 has no
-    /// MIC by spec and is never logged here. `mic` is the rejected MIC bytes
-    /// (16 or 24 wide per AKM); rendered as `mic_hex=` in lowercase hex.
+    /// MIC by spec and is never logged here. `msg_type` is the pre-parse
+    /// classification rendered as `msg_type=mN` so the operator can filter the
+    /// log by message type. `mic` is the rejected MIC bytes (16 or 24 wide
+    /// per AKM); rendered as `mic_hex=` in lowercase hex.
     pub fn log_invalid_mic(
         &mut self,
         timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
+        msg_type: Option<crate::types::MsgType>,
         kind: &str,
         mic: &[u8],
     ) {
         let mic_hex = render_lower_hex(mic);
+        let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} mic_hex={mic_hex}"
+            "[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
         ));
     }
 
@@ -296,6 +306,21 @@ impl Logger {
         if let Some(w) = &mut self.writer {
             let _ = writeln!(w, "{line}");
         }
+    }
+}
+
+/// Renders an `Option<MsgType>` as a short label suitable for the
+/// `msg_type=` field in `[invalid_nonce]` / `[invalid_mic]` log lines. M1 / M2
+/// / M3 / M4 -> `m1` / `m2` / `m3` / `m4`; `None` -> `unknown` (the pre-parse
+/// classifier could not determine the message type, typically because the
+/// frame is truncated).
+const fn msg_type_label(mt: Option<crate::types::MsgType>) -> &'static str {
+    match mt {
+        Some(crate::types::MsgType::M1) => "m1",
+        Some(crate::types::MsgType::M2) => "m2",
+        Some(crate::types::MsgType::M3) => "m3",
+        Some(crate::types::MsgType::M4) => "m4",
+        None => "unknown",
     }
 }
 
@@ -424,16 +449,45 @@ mod tests {
             // the line layout, not the rejection logic (which is tested in
             // ieee80211::eapol).
             let nonce = [0x12u8, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34];
-            logger.log_invalid_nonce(7_000, "aabbccddeeff", "112233445566", "repeat_2", &nonce);
+            logger.log_invalid_nonce(
+                7_000,
+                "aabbccddeeff",
+                "112233445566",
+                Some(crate::types::MsgType::M2),
+                "repeat_2",
+                &nonce,
+            );
             logger.flush().unwrap();
         }
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
             contents.contains(
-                "[invalid_nonce] 7000 ap=aabbccddeeff sta=112233445566 kind=repeat_2 nonce_hex=1234123412341234"
+                "[invalid_nonce] 7000 ap=aabbccddeeff sta=112233445566 msg_type=m2 kind=repeat_2 nonce_hex=1234123412341234"
             ),
-            "missing invalid_nonce line with nonce_hex; got: {contents}"
+            "missing invalid_nonce line with msg_type + nonce_hex; got: {contents}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn writes_invalid_nonce_with_unknown_msg_type() {
+        // When the pre-parse classifier could not determine the message type
+        // (truncated frame, malformed Key Info), `None` renders as `unknown` so
+        // an operator can still grep the log line consistently.
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_invalid_nonce_unknown.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            let nonce = [0u8; 8];
+            logger.log_invalid_nonce(1_000, "aabbccddeeff", "112233445566", None, "null", &nonce);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(
+            contents.contains("msg_type=unknown"),
+            "expected msg_type=unknown when classifier returned None; got: {contents}"
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -445,14 +499,14 @@ mod tests {
         {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
             let mic = [0xFFu8; 16];
-            logger.log_invalid_mic(8_000, "aabbccddeeff", "112233445566", "ff", &mic);
+            logger.log_invalid_mic(8_000, "aabbccddeeff", "112233445566", Some(crate::types::MsgType::M3), "ff", &mic);
             logger.flush().unwrap();
         }
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
             contents.contains(
-                "[invalid_mic] 8000 ap=aabbccddeeff sta=112233445566 kind=ff \
+                "[invalid_mic] 8000 ap=aabbccddeeff sta=112233445566 msg_type=m3 kind=ff \
                  mic_hex=ffffffffffffffffffffffffffffffff"
             ),
             "missing invalid_mic line with mic_hex; got: {contents}"

@@ -408,13 +408,28 @@ pub struct Stats {
     /// carry. Matches hcxpcapngtool's `eapolm4zeroedcount++; return;` drop at
     /// hcxpcapngtool.c:3636.
     pub null_nonce_rejected: u64,
+    /// M4-specific subset of `null_nonce_rejected`. Useful to distinguish the
+    /// spec-zero case (expected per [IEEE 802.11-2024] §12.7.6.5; hcxpcapngtool
+    /// counts these as `eapolm4zeroedcount`) from a NULL nonce on M1 / M2 / M3
+    /// (abnormal -- entropy starvation, firmware bug, capture tampering). The
+    /// difference `null_nonce_rejected - null_nonce_rejected_on_m4` is the
+    /// abnormal subset worth a closer look.
+    pub null_nonce_rejected_on_m4: u64,
     /// EAPOL frames rejected because the Key Nonce was all-`0xFF`. Applies to all msg types
     /// including M4 (firmware flash-erase sentinel, never spec-valid).
     pub ff_nonce_rejected: u64,
+    /// M4-specific subset of `ff_nonce_rejected`. Tracked symmetrically with
+    /// `null_nonce_rejected_on_m4`; an all-`0xFF` nonce is never spec-valid on
+    /// any message type, but the split exists so the banner can render every
+    /// rejection counter with a consistent on-M4 vs on-other breakdown.
+    pub ff_nonce_rejected_on_m4: u64,
     /// EAPOL frames rejected because the Key Nonce was a non-NULL non-FF garbage pattern
     /// (all-same-byte, 2-byte period, or 4-byte period). Catches firmware stub nonces such
     /// as all-`0x55`, `5555AAAA`-style alternations, and `01020304` repeating slabs.
     pub repeat_nonce_rejected: u64,
+    /// M4-specific subset of `repeat_nonce_rejected`. Tracked symmetrically
+    /// with `null_nonce_rejected_on_m4`.
+    pub repeat_nonce_rejected_on_m4: u64,
     /// EAPOL frames rejected because the Key MIC was all-NULL (`0x00...00`) with the Key MIC
     /// flag set (M2/M3/M4). NULL MIC means the frame is unauthenticated. M1 NULL MIC is
     /// spec-valid and is never counted.
@@ -763,14 +778,26 @@ impl Stats {
         Some(kind)
     }
 
-    /// Bumps the per-pattern nonce-rejection counter. Pass the kind string
+    /// Bumps the per-pattern nonce-rejection counter, plus the M4-specific
+    /// sibling when the rejected frame was an M4. Pass the kind string
     /// returned by [`check_invalid_fields`](crate::ieee80211::eapol::check_invalid_fields)
-    /// (`"null"`, `"ff"`, `"repeat_1"`, `"repeat_2"`, `"repeat_4"`).
-    pub const fn record_invalid_nonce(&mut self, kind: &str) {
+    /// (`"null"`, `"ff"`, `"repeat_1"`, `"repeat_2"`, `"repeat_4"`) and the
+    /// pre-parse message classification from the same source. The on-M4
+    /// breakdown lets the banner distinguish the spec-zero M4 case (expected,
+    /// harmless, hcxpcapngtool calls it `eapolm4zeroedcount`) from an
+    /// abnormal NULL nonce on M1 / M2 / M3 (entropy starvation, firmware bug).
+    pub const fn record_invalid_nonce(&mut self, kind: &str, msg_type: Option<MsgType>) {
         match kind.as_bytes() {
             b"null" => self.null_nonce_rejected += 1,
             b"ff" => self.ff_nonce_rejected += 1,
             _ => self.repeat_nonce_rejected += 1,
+        }
+        if matches!(msg_type, Some(MsgType::M4)) {
+            match kind.as_bytes() {
+                b"null" => self.null_nonce_rejected_on_m4 += 1,
+                b"ff" => self.ff_nonce_rejected_on_m4 += 1,
+                _ => self.repeat_nonce_rejected_on_m4 += 1,
+            }
         }
     }
 
@@ -1123,12 +1150,29 @@ impl Stats {
             );
         }
         stat!("  M4 messages", self.eapol_m4);
-        nz!(
-            "  NULL nonce rejected (frame dropped; spec-valid on M4 wire but cryptographically dead)",
-            self.null_nonce_rejected
-        );
+        nz!("  NULL nonce rejected (frame dropped)", self.null_nonce_rejected);
+        if self.null_nonce_rejected > 0 {
+            // Split the operator-visible NULL nonce count into the spec-zero
+            // M4 case (expected, harmless; matches hcxpcapngtool's
+            // eapolm4zeroedcount) and the abnormal M1 / M2 / M3 case (entropy
+            // starvation, firmware bug, capture tampering -- worth a closer
+            // look).
+            stat!("    on M4 (spec-zero per §12.7.6.5; expected)", self.null_nonce_rejected_on_m4);
+            stat!(
+                "    on M1 / M2 / M3 (abnormal -- entropy starvation or firmware bug)",
+                self.null_nonce_rejected - self.null_nonce_rejected_on_m4
+            );
+        }
         nz!("  0xFF nonce rejected (frame dropped)", self.ff_nonce_rejected);
+        if self.ff_nonce_rejected > 0 {
+            stat!("    on M4", self.ff_nonce_rejected_on_m4);
+            stat!("    on M1 / M2 / M3", self.ff_nonce_rejected - self.ff_nonce_rejected_on_m4);
+        }
         nz!("  garbage-pattern nonce rejected (repeating period; frame dropped)", self.repeat_nonce_rejected);
+        if self.repeat_nonce_rejected > 0 {
+            stat!("    on M4", self.repeat_nonce_rejected_on_m4);
+            stat!("    on M1 / M2 / M3", self.repeat_nonce_rejected - self.repeat_nonce_rejected_on_m4);
+        }
         nz!("  NULL MIC rejected (frame dropped; M2/M3/M4)", self.null_mic_rejected);
         nz!("  0xFF MIC rejected (frame dropped; M2/M3/M4)", self.ff_mic_rejected);
         nz!("  garbage-pattern MIC rejected (repeating period; frame dropped)", self.repeat_mic_rejected);
@@ -1359,8 +1403,11 @@ mod tests {
         assert_eq!(s.time_zones_extracted, 0);
         assert_eq!(s.eapol_pairs_generated, 0);
         assert_eq!(s.null_nonce_rejected, 0);
+        assert_eq!(s.null_nonce_rejected_on_m4, 0);
         assert_eq!(s.ff_nonce_rejected, 0);
+        assert_eq!(s.ff_nonce_rejected_on_m4, 0);
         assert_eq!(s.repeat_nonce_rejected, 0);
+        assert_eq!(s.repeat_nonce_rejected_on_m4, 0);
         assert_eq!(s.null_mic_rejected, 0);
         assert_eq!(s.ff_mic_rejected, 0);
         assert_eq!(s.repeat_mic_rejected, 0);
@@ -1471,14 +1518,37 @@ mod tests {
     #[test]
     fn record_invalid_nonce_routes_kind_to_correct_counter() {
         let mut s = Stats::new();
-        s.record_invalid_nonce("null");
-        s.record_invalid_nonce("ff");
-        s.record_invalid_nonce("repeat_1");
-        s.record_invalid_nonce("repeat_2");
-        s.record_invalid_nonce("repeat_4");
+        s.record_invalid_nonce("null", None);
+        s.record_invalid_nonce("ff", None);
+        s.record_invalid_nonce("repeat_1", None);
+        s.record_invalid_nonce("repeat_2", None);
+        s.record_invalid_nonce("repeat_4", None);
         assert_eq!(s.null_nonce_rejected, 1);
         assert_eq!(s.ff_nonce_rejected, 1);
         assert_eq!(s.repeat_nonce_rejected, 3, "repeat_1, repeat_2, repeat_4 all flow to repeat counter");
+        assert_eq!(s.null_nonce_rejected_on_m4, 0, "no msg_type -> M4 split stays at 0");
+        assert_eq!(s.ff_nonce_rejected_on_m4, 0);
+        assert_eq!(s.repeat_nonce_rejected_on_m4, 0);
+    }
+
+    #[test]
+    fn record_invalid_nonce_splits_m4_subset_when_msg_type_is_m4() {
+        let mut s = Stats::new();
+        // Three M4 rejections, three non-M4 rejections, same kinds.
+        s.record_invalid_nonce("null", Some(MsgType::M4));
+        s.record_invalid_nonce("null", Some(MsgType::M2));
+        s.record_invalid_nonce("ff", Some(MsgType::M4));
+        s.record_invalid_nonce("ff", Some(MsgType::M1));
+        s.record_invalid_nonce("repeat_1", Some(MsgType::M4));
+        s.record_invalid_nonce("repeat_2", Some(MsgType::M3));
+        // Aggregate counters reflect every rejection regardless of msg_type.
+        assert_eq!(s.null_nonce_rejected, 2);
+        assert_eq!(s.ff_nonce_rejected, 2);
+        assert_eq!(s.repeat_nonce_rejected, 2);
+        // On-M4 subset only counts the three M4 rejections.
+        assert_eq!(s.null_nonce_rejected_on_m4, 1, "the M4 null is in the subset");
+        assert_eq!(s.ff_nonce_rejected_on_m4, 1, "the M4 ff is in the subset");
+        assert_eq!(s.repeat_nonce_rejected_on_m4, 1, "the M4 repeat_1 is in the subset");
     }
 
     #[test]
