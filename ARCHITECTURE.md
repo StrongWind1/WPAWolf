@@ -16,8 +16,8 @@ File-only tool: no capture, no injection, no cracking. Authorised use only.
 
 | Tool | Lang | pcap/pcapng/gzip | WPA2-PSK | PMKID | FT-PSK | mode 22000 | mode 37100 | Dedup |
 |---|---|---|---|---|---|---|---|---|
-| **wpawolf** | Rust | yes / yes / yes | yes | yes | yes (no 255 B gate) | yes | yes | global SipHash set |
-| **hcxpcapngtool** | C | yes / yes / yes | yes | yes | yes (truncated at 255 B) | yes | yes | 20-entry look-back |
+| **wpawolf** | Rust | yes / yes / yes | yes | yes | yes (no 512 B parse gate) | yes | yes | global SipHash set |
+| **hcxpcapngtool** | C | yes / yes / yes | yes | yes | yes (parse cap 512 B; legacy hccap/hccapx output paths drop > 255 B) | yes | yes | full dedup at write time (equivalent to wpawolf) |
 | `wpapcap2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
 | `wlan2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
 
@@ -310,7 +310,7 @@ For EAPOL lines:
 SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID )
 ```
 
-This is a global filter, not a 20-entry look-back window. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines.
+This is a global filter. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines. (hcxpcapngtool uses an internal 20-entry look-back ring in `cleanbackhandshake` as a speedup, then a full dedup at write time; the two tools are therefore equivalent at the output boundary.)
 
 ### 6. PMKID and EAPOL pipelines are strictly separate (OUT-1)
 

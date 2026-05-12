@@ -57,9 +57,8 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 | Behaviour                              | `hcxpcapngtool` (default)                                      | `wpawolf` (default)                                |
 |----------------------------------------|----------------------------------------------------------------|----------------------------------------------------|
 | EAPOL session window                   | 5 seconds (`EAPOLTIMEOUT` constant)                            | unlimited; `--eapoltimeout` opts in                |
-| Replay-counter drift check             | always on, no off switch                                       | off; `--rc-drift` opts in                          |
-| EAPOL frame size ceiling               | 255 bytes (`EAPOL_AUTHLEN_OLD_MAX`); larger frames are skipped | no size gate; oversized FT-PSK M2 passes through   |
-| Duplicate-handshake detection          | 20-entry sliding window in `cleanbackhandshake`                | global SipHash fingerprint set                     |
+| Nonce-error / replay-counter handling  | off by default; `--nonce-error-corrections=N` widens cracker-side NC range during PTK derivation | off by default; `--rc-drift` discards wpawolf-side pairs whose EAPOL-Key replay-counter delta exceeds tolerance. Different mechanism, different scope -- hcx adjusts nonce bytes during cracking, wpawolf filters pairs at extract |
+| EAPOL frame size ceiling               | 512 bytes at parse (`EAPOL_AUTHLEN_MAX`); 255 bytes (`EAPOL_AUTHLEN_OLD_MAX`) is a stricter gate that only applies to the deprecated hccap / hccapx output sinks | no size gate; oversized FT-PSK M2 passes through   |
 | Per-(AP, STA) message buffer           | one shared 64-entry circular buffer                            | `HashMap<(AP, STA), Vec<Message>>`, no ceiling     |
 | WDS / 4-address relay frames           | skipped unless `--all` is passed                               | always processed                                   |
 | Pairing strategy                       | streams pairs as frames arrive                                 | reads everything, then pairs                       |
