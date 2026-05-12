@@ -156,15 +156,26 @@ pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, ess
 
 /// Maps a `PmkidSource` to the hashcat `message_pair` byte for PMKID lines.
 ///
-/// Values from hcxpcapngtool `hcxpcapngtool.h`:
-/// `PMKID_AP = 0x01`, `PMKID_APPSK256 = 0x02`, `PMKID_CLIENT = 0x04`.
+/// Values from hcxpcapngtool `hcxpcapngtool.h` lines 386-390:
+///   - Mode 22000 (non-FT): `PMKID_AP = 0x01`, `PMKID_APPSK256 = 0x02`, `PMKID_CLIENT = 0x04`.
+///   - Mode 37100 (FT-PSK): `PMKID_AP_FTPSK = 0x10`, `PMKID_CLIENT_FTPSK = 0x20`.
+///
+/// hcxpcapngtool routes the same PMKID through different `addpmkid` /
+/// `addpmkid_ftpsk` paths depending on the AKM at extract time, so the
+/// status byte that surfaces in the output line is always the right kind
+/// for the line's prefix (`WPA*01*` vs `WPA*03*`). wpawolf reuses one
+/// `PmkidEntry` across both sinks, so this function inspects `entry.akm`
+/// to pick the FT-PSK pair when emitting a `WPA*03*` / mode 37100 line.
+///
 /// New sources use the same AP/client convention from the source-map table
 /// in `ARCHITECTURE.md §6`.
 const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
     use crate::types::PmkidSource;
+    let is_ft = entry.akm.is_ft();
     match entry.source {
-        // AP-side sources (0x01): M1 KDE, assoc frames, AP-sent auth responses,
+        // AP-side sources: M1 KDE, assoc frames, AP-sent auth responses,
         // AP-originated mgmt frames (Beacon, ProbeResp), FT Action Response.
+        // hcx: PMKID_AP=0x01 in mode 22000, PMKID_AP_FTPSK=0x10 in mode 37100.
         PmkidSource::M1KeyData
         | PmkidSource::AssocRequest
         | PmkidSource::ReassocRequest
@@ -173,9 +184,16 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         | PmkidSource::PasnAuthApToSta
         | PmkidSource::FtActionResponse
         | PmkidSource::BeaconRsnIe
-        | PmkidSource::ProbeRespRsnIe => 0x01,
-        // Client-side sources (0x04): M2 RSN IE, STA-sent auth, probe req,
+        | PmkidSource::ProbeRespRsnIe => {
+            if is_ft {
+                0x10
+            } else {
+                0x01
+            }
+        },
+        // Client-side sources: M2 RSN IE, STA-sent auth, probe req,
         // FT Action Request/Confirm, Mesh Peering, OSEN.
+        // hcx: PMKID_CLIENT=0x04 in mode 22000, PMKID_CLIENT_FTPSK=0x20 in mode 37100.
         PmkidSource::M2RsnIe
         | PmkidSource::FtAuthStaToAp
         | PmkidSource::FilsAuthStaToAp
@@ -185,7 +203,13 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         | PmkidSource::ProbeRequest
         | PmkidSource::MeshPeeringOpen
         | PmkidSource::MeshPeeringConfirm
-        | PmkidSource::OsenIe => 0x04,
+        | PmkidSource::OsenIe => {
+            if is_ft {
+                0x20
+            } else {
+                0x04
+            }
+        },
     }
 }
 
@@ -490,7 +514,8 @@ mod tests {
 
     #[test]
     fn format_pmkid_37100_prefix() {
-        let entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        entry.akm = AkmType::FtPsk;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB, 0xCD], [0x55; 6]);
         let line = format_pmkid_37100(&entry, &ft, b"ssid");
         assert!(line.starts_with("WPA*03*"), "expected WPA*03* prefix: {line}");
@@ -501,7 +526,8 @@ mod tests {
         // Verify that MDID, R0KH-ID, and R1KH-ID appear after the message_pair byte.
         // Format: WPA*03*{pmkid}*{ap}*{sta}*{essid}***{mp}*{mdid}*{r0khid}*{r1khid}
         // [hcxpcapngtool:2551-2554]
-        let entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        entry.akm = AkmType::FtPsk;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB, 0xCD, 0xEF], [0x55; 6]);
         let line = format_pmkid_37100(&entry, &ft, b"net");
         // Split: WPA * 03 * pmkid * ap * sta * essid * * * mp * mdid * r0khid * r1khid
@@ -510,6 +536,53 @@ mod tests {
         assert_eq!(fields[9], "1234", "MDID: 2 bytes as 4 hex chars");
         assert_eq!(fields[10], "abcdef", "R0KH-ID: 3 bytes");
         assert_eq!(fields[11], "555555555555", "R1KH-ID: 6 bytes");
+    }
+
+    #[test]
+    fn format_pmkid_37100_message_pair_ap_side_is_ftpsk_value() {
+        // FT-PSK PMKID sourced from an AP-side frame (M1 KDE in this case) must
+        // emit `PMKID_AP_FTPSK = 0x10`, not the mode-22000 `PMKID_AP = 0x01`.
+        // [hcxpcapngtool.h:386-390 + hcxpcapngtool.c:2554]
+        let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        entry.akm = AkmType::FtPsk;
+        entry.source = PmkidSource::M1KeyData;
+        let ft = make_ft_fields([0x12, 0x34], &[0xAB], [0x55; 6]);
+        let line = format_pmkid_37100(&entry, &ft, b"net");
+        let fields: Vec<&str> = line.splitn(13, '*').collect();
+        assert_eq!(fields[8], "10", "AP-side FT-PSK PMKID must emit PMKID_AP_FTPSK=0x10");
+    }
+
+    #[test]
+    fn format_pmkid_37100_message_pair_client_side_is_ftpsk_value() {
+        // FT-PSK PMKID sourced from a client-side frame (M2 RSN IE) must emit
+        // `PMKID_CLIENT_FTPSK = 0x20`, not the mode-22000 `PMKID_CLIENT = 0x04`.
+        // Worked example: capture 4b2a84b7 in the 2026-05-12 corpus run --
+        // hcx-default emitted *20 for a Hitron VastVortex FT-PSK session and
+        // wpawolf was emitting *04, causing per-capture superset violations.
+        let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        entry.akm = AkmType::FtPsk;
+        entry.source = PmkidSource::M2RsnIe;
+        let ft = make_ft_fields([0x12, 0x34], &[0xAB], [0x55; 6]);
+        let line = format_pmkid_37100(&entry, &ft, b"net");
+        let fields: Vec<&str> = line.splitn(13, '*').collect();
+        assert_eq!(fields[8], "20", "client-side FT-PSK PMKID must emit PMKID_CLIENT_FTPSK=0x20");
+    }
+
+    #[test]
+    fn format_pmkid_22000_message_pair_unchanged_for_non_ft() {
+        // Regression pin: non-FT entries keep the mode-22000 mp bytes
+        // (PMKID_AP=0x01 for AP-side, PMKID_CLIENT=0x04 for client-side).
+        let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
+        entry.akm = AkmType::Wpa2Psk;
+        entry.source = PmkidSource::M1KeyData;
+        let line = format_pmkid_22000(&entry, b"net");
+        let fields: Vec<&str> = line.splitn(10, '*').collect();
+        assert_eq!(fields[8], "01", "AP-side non-FT PMKID must keep PMKID_AP=0x01");
+
+        entry.source = PmkidSource::M2RsnIe;
+        let line = format_pmkid_22000(&entry, b"net");
+        let fields: Vec<&str> = line.splitn(10, '*').collect();
+        assert_eq!(fields[8], "04", "client-side non-FT PMKID must keep PMKID_CLIENT=0x04");
     }
 
     // --- WPA*04* ---
