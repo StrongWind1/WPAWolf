@@ -353,6 +353,15 @@ pub struct Stats {
     pub pairs_le: u64,
     /// EAPOL pairs written with `FLAG_BE` set (BE endianness correction applied).
     pub pairs_be: u64,
+    /// Lines collapsed away by NC-dedup (`--nc-dedup`): sum across all clusters of
+    /// `cluster_size - 1`. Zero when `--nc-dedup` is absent. See `ARCHITECTURE.md §5.8.1`.
+    pub nc_dedup_collapsed_lines: u64,
+    /// Number of NC-dedup clusters with at least two members. Zero when `--nc-dedup`
+    /// is absent.
+    pub nc_dedup_cluster_count: u64,
+    /// Largest NC-dedup cluster observed across all (AP, STA) groups. Zero when
+    /// `--nc-dedup` is absent.
+    pub nc_dedup_max_cluster_size: u64,
     /// EAPOL pairs that passed the dedup filter and were written (useful pairs).
     pub eapol_pairs_useful: u64,
 
@@ -1251,6 +1260,9 @@ impl Stats {
         nz!("  NC flag set on pair (nonce-error-correction hint passed to hashcat)", self.pairs_nc);
         nz!("  LE endianness flag set on pair (LE-router hint passed to hashcat)", self.pairs_le);
         nz!("  BE endianness flag set on pair (BE-router hint passed to hashcat)", self.pairs_be);
+        nz!("  NC-dedup near-identical-nonce lines collapsed (--nc-dedup)", self.nc_dedup_collapsed_lines);
+        nz!("  NC-dedup cluster count (--nc-dedup)", self.nc_dedup_cluster_count);
+        nz!("  NC-dedup max cluster size (--nc-dedup)", self.nc_dedup_max_cluster_size);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
             stat!("  RC gap max (suggested NC threshold)", self.rc_gap_max);
         }
@@ -1434,6 +1446,9 @@ mod tests {
         assert_eq!(s.pairs_nc, 0);
         assert_eq!(s.pairs_le, 0);
         assert_eq!(s.pairs_be, 0);
+        assert_eq!(s.nc_dedup_collapsed_lines, 0);
+        assert_eq!(s.nc_dedup_cluster_count, 0);
+        assert_eq!(s.nc_dedup_max_cluster_size, 0);
         assert_eq!(s.eapol_pairs_useful, 0);
     }
 
@@ -1592,6 +1607,9 @@ mod tests {
         s.pairs_written_n1e4 = 2;
         s.pairs_nc = 10;
         s.pairs_le = 2;
+        s.nc_dedup_collapsed_lines = 6;
+        s.nc_dedup_cluster_count = 2;
+        s.nc_dedup_max_cluster_size = 4;
         s.rc_gap_max = 3;
         s.last_file = "example.pcap".to_owned();
         s.input_file_count = 1;

@@ -156,6 +156,15 @@ pub struct OutputStats {
     pub pairs_le: usize,
     /// Pairs written with `FLAG_BE` set.
     pub pairs_be: usize,
+    /// Lines collapsed by NC-dedup across all (AP, STA) groups. Equal to
+    /// `NcDedupStats::collapsed_lines` summed during `pair_all_groups`.
+    pub nc_dedup_collapsed_lines: u64,
+    /// Number of NC-dedup clusters with at least two members. Equal to
+    /// `NcDedupStats::cluster_count` summed during `pair_all_groups`.
+    pub nc_dedup_cluster_count: u64,
+    /// Largest single NC-dedup cluster observed. Equal to
+    /// `NcDedupStats::max_cluster_size` across `pair_all_groups`.
+    pub nc_dedup_max_cluster_size: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
@@ -631,9 +640,10 @@ impl OutputContext {
         // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
-        // NC-dedup stats are produced here but consumed in a follow-up commit
-        // (NC-4 -- stats banner wiring). Discard for now to keep the build clean.
-        let (all_pairs, _nc_stats) = pair_all_groups(message_store, pair_config, thread_count);
+        let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count);
+        stats.nc_dedup_collapsed_lines = nc_stats.collapsed_lines;
+        stats.nc_dedup_cluster_count = nc_stats.cluster_count;
+        stats.nc_dedup_max_cluster_size = nc_stats.max_cluster_size;
         if any_sink {
             for pair in &all_pairs {
                 let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };

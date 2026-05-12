@@ -952,6 +952,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.pairs_nc = output_stats.pairs_nc as u64;
         stats.pairs_le = output_stats.pairs_le as u64;
         stats.pairs_be = output_stats.pairs_be as u64;
+        stats.nc_dedup_collapsed_lines = output_stats.nc_dedup_collapsed_lines;
+        stats.nc_dedup_cluster_count = output_stats.nc_dedup_cluster_count;
+        stats.nc_dedup_max_cluster_size = output_stats.nc_dedup_max_cluster_size;
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;
