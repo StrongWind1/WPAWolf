@@ -393,17 +393,20 @@ struct Cli {
 
     /// shortcut for a hcxpcapngtool-like narrow output profile
     ///
-    /// One flag turns on the four output filters that together produce roughly
+    /// One flag turns on the five output filters that together produce roughly
     /// hcxpcapngtool-shape output from wpawolf's WIDE default: `--eapoltimeout=5`
     /// (5-second EAPOL session window, matches hcxpcapngtool's `EAPOLTIMEOUT`
     /// default), `--rc-drift=8` (replay-counter drift tolerance 8), `--dedup-hash-combos`
     /// (collapse the 6 N#E# combos to 3 cryptographically unique ones per session),
-    /// and `--per-file` (no cross-file pairing).
+    /// `--per-file` (no cross-file pairing), and `--nc-dedup` (cluster
+    /// near-identical-nonce siblings to one survivor with `FLAG_NC` set for
+    /// hashcat NC-iteration recovery).
     ///
     /// Later-flag-wins conflict semantics: an explicit `--eapoltimeout=30` after
     /// `--strict` keeps the explicit 30; an explicit `--rc-drift=4` overrides the
-    /// strict default of 8. The two boolean flags (`--dedup-hash-combos`, `--per-file`)
-    /// can only be turned on, not off, so `--strict` always enables them.
+    /// strict default of 8; an explicit `--nc-tolerance=4` overrides the strict
+    /// default of 8. The three boolean flags (`--dedup-hash-combos`, `--per-file`,
+    /// `--nc-dedup`) can only be turned on, not off, so `--strict` always enables them.
     ///
     /// Use this when you want hashcat-friendly density and accept the small
     /// hash-yield drop (~1% on wpa-sec-shape corpora). The bare wpawolf default
@@ -421,10 +424,10 @@ const OOS_LOG_CAP_PER_FILE: u32 = 10;
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
-/// turns on the four output filters that together close the volume gap against
+/// turns on the five output filters that together close the volume gap against
 /// hcxpcapngtool default (`--eapoltimeout=5`, `--rc-drift=8`,
-/// `--dedup-hash-combos`, `--per-file`), but uses later-flag-wins precedence so
-/// an explicit `--eapoltimeout=30` survives past `--strict`. The two boolean
+/// `--dedup-hash-combos`, `--per-file`, `--nc-dedup`), but uses later-flag-wins
+/// precedence so an explicit `--eapoltimeout=30` survives past `--strict`. The three boolean
 /// flags can only be turned on, never off, so `--strict` always sets them.
 const fn apply_strict_defaults(cli: &mut Cli) {
     if !cli.strict {
@@ -438,6 +441,7 @@ const fn apply_strict_defaults(cli: &mut Cli) {
     }
     cli.dedup_hash_combos = true;
     cli.per_file = true;
+    cli.nc_dedup = true;
 }
 
 // --- Entry point ---
@@ -1044,16 +1048,18 @@ mod tests {
         assert_eq!(cli.rc_drift, None, "no --strict -> rc_drift stays None (off)");
         assert!(!cli.dedup_hash_combos, "no --strict -> dedup_hash_combos stays off");
         assert!(!cli.per_file, "no --strict -> per_file stays off");
+        assert!(!cli.nc_dedup, "no --strict -> nc_dedup stays off");
     }
 
     #[test]
-    fn strict_alone_enables_all_four_bundled_filters() {
+    fn strict_alone_enables_all_five_bundled_filters() {
         let cli = parse_with_strict(&["--strict"]);
         assert!(cli.strict);
         assert_eq!(cli.eapoltimeout, Some(5), "--strict -> 5 s session window");
         assert_eq!(cli.rc_drift, Some(8), "--strict -> RC drift tolerance 8");
         assert!(cli.dedup_hash_combos, "--strict -> dedup_hash_combos on");
         assert!(cli.per_file, "--strict -> per_file on");
+        assert!(cli.nc_dedup, "--strict -> nc_dedup on");
     }
 
     #[test]
@@ -1065,6 +1071,7 @@ mod tests {
         assert_eq!(cli.rc_drift, Some(8), "untouched filters still take strict defaults");
         assert!(cli.dedup_hash_combos);
         assert!(cli.per_file);
+        assert!(cli.nc_dedup);
     }
 
     #[test]
@@ -1074,6 +1081,7 @@ mod tests {
         assert_eq!(cli.eapoltimeout, Some(5));
         assert!(cli.dedup_hash_combos);
         assert!(cli.per_file);
+        assert!(cli.nc_dedup);
     }
 
     #[test]
@@ -1081,18 +1089,29 @@ mod tests {
         let cli = parse_with_strict(&["--strict", "--eapoltimeout=60", "--rc-drift=2"]);
         assert_eq!(cli.eapoltimeout, Some(60));
         assert_eq!(cli.rc_drift, Some(2));
-        assert!(cli.dedup_hash_combos, "strict still enables the two boolean filters");
+        assert!(cli.dedup_hash_combos, "strict still enables the three boolean filters");
         assert!(cli.per_file);
+        assert!(cli.nc_dedup);
     }
 
     #[test]
     fn strict_idempotent_with_already_set_bools() {
-        // --strict --per-file --dedup-hash-combos is the same as --strict alone.
-        let cli = parse_with_strict(&["--strict", "--per-file", "--dedup-hash-combos"]);
+        // --strict --per-file --dedup-hash-combos --nc-dedup is the same as --strict alone.
+        let cli = parse_with_strict(&["--strict", "--per-file", "--dedup-hash-combos", "--nc-dedup"]);
         assert_eq!(cli.eapoltimeout, Some(5));
         assert_eq!(cli.rc_drift, Some(8));
         assert!(cli.dedup_hash_combos);
         assert!(cli.per_file);
+        assert!(cli.nc_dedup);
+    }
+
+    #[test]
+    fn strict_with_explicit_nc_tolerance_preserves_user_value() {
+        // --strict folds in --nc-dedup but leaves --nc-tolerance None for the
+        // PairConfig default of 8. An explicit --nc-tolerance=4 must survive.
+        let cli = parse_with_strict(&["--strict", "--nc-tolerance=4"]);
+        assert!(cli.nc_dedup, "--strict still enables nc_dedup");
+        assert_eq!(cli.nc_tolerance, Some(4), "explicit --nc-tolerance=4 wins through --strict");
     }
 
     #[test]
