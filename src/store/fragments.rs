@@ -20,13 +20,15 @@
 //!
 //! # Memory bounds
 //!
-//! A capture full of fragmented frames whose final piece never arrives could
-//! pin arbitrary memory. `MAX_ENTRIES` caps the in-flight buffer count: when
-//! the entry count would exceed this, the oldest entry by first-fragment
-//! timestamp is dropped (counter: `dropped_overflow`). Time-based expiry is
-//! intentionally not implemented -- EAPOL fragmentation is rare enough that
-//! 1024 partial-MSDU slots is generous for any real capture, and the
-//! oldest-first eviction reclaims any genuine orphan as new fragments arrive.
+//! A pathological capture full of fragment-0 frames with `MoreFrag=1` that
+//! never complete could in theory pin arbitrary memory. `MAX_ENTRIES` is a
+//! paranoid backstop against that, sized so generously (1 M slots, ~60-200 MiB
+//! worst case depending on body sizes) that no real-world capture should ever
+//! hit it. When the bound is reached, the oldest entry by first-fragment
+//! timestamp is evicted and `fragments_dropped_safety_cap` increments -- that
+//! counter is expected to stay at 0 on legitimate captures; non-zero values
+//! indicate either an adversarial input or that the bound itself needs
+//! revisiting. Time-based expiry is intentionally not implemented.
 //!
 //! # Out of scope
 //!
@@ -40,10 +42,13 @@ use std::collections::HashMap;
 use crate::types::MacAddr;
 
 /// Maximum number of in-flight fragmented MSDUs to keep buffered before evicting
-/// the oldest entry. Set high enough that legitimate concurrent reassemblies on
-/// a busy AP do not collide; low enough that a malicious capture cannot pin
-/// gigabytes of RAM. EAPOL fragmentation is rare, so 1024 is generous.
-const MAX_ENTRIES: usize = 1024;
+/// the oldest entry. Sized as a paranoid backstop against an adversarial capture
+/// that ships endless fragment-0 frames with `MoreFrag=1` that never complete;
+/// 1 M slots are deliberately way above what any real capture exercises so that
+/// legitimate fragments are never dropped. Worst-case memory at the cap is
+/// ~60-200 MiB depending on body sizes, small next to `MessageStore`'s working
+/// set on the same capture.
+const MAX_ENTRIES: usize = 1_000_000;
 
 /// Per-MSDU reassembly key. SA / RA pair plus Sequence Number identifies a
 /// single MSDU per [IEEE 802.11-2024] §9.2.4.4.
@@ -72,11 +77,20 @@ struct FragEntry {
 ///
 /// `push_fragment` adds a non-final fragment; `take_completed` consumes the
 /// final fragment and returns the concatenated MSDU body. Memory is bounded
-/// by `MAX_ENTRIES`: when full, the oldest entry by first-fragment timestamp
-/// is evicted to make room for the new one.
-#[derive(Debug, Default)]
+/// by `max_entries` (default `MAX_ENTRIES`): when full, the oldest entry by
+/// first-fragment timestamp is evicted to make room for the new one. The
+/// bound is a paranoid backstop sized so it should never fire on legitimate
+/// captures; see the module-level docs.
+#[derive(Debug)]
 pub struct FragmentStore {
     entries: HashMap<FragKey, FragEntry>,
+    max_entries: usize,
+}
+
+impl Default for FragmentStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Counters returned alongside reassembly events so the caller can update its
@@ -93,15 +107,25 @@ pub struct FragmentStats {
     pub fragments_reassembled: u64,
     /// Out-of-order, duplicate, or otherwise unusable fragments rejected.
     pub fragments_dropped_disorder: u64,
-    /// Entries evicted because `MAX_ENTRIES` was reached.
-    pub fragments_dropped_overflow: u64,
+    /// Entries evicted because the paranoid `MAX_ENTRIES` safety backstop was
+    /// reached. Expected to be 0 on legitimate captures; non-zero values
+    /// indicate either an adversarial input or that the backstop is sized
+    /// wrong for the workload.
+    pub fragments_dropped_safety_cap: u64,
 }
 
 impl FragmentStore {
-    /// Creates an empty fragment store.
+    /// Creates an empty fragment store with the production safety cap.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self { entries: HashMap::new(), max_entries: MAX_ENTRIES }
+    }
+
+    /// Test helper: creates an empty fragment store with a custom safety cap
+    /// so eviction can be exercised without building a million entries.
+    #[cfg(test)]
+    fn with_max_entries(max_entries: usize) -> Self {
+        Self { entries: HashMap::new(), max_entries }
     }
 
     /// Stores a non-final fragment (`MoreFrag=1`). For Fragment Number 0 a new
@@ -121,10 +145,10 @@ impl FragmentStore {
         let key = FragKey { sa, ra, seq_num };
         if frag_num == 0 {
             // First fragment of a new MSDU. Evict oldest entry if at capacity.
-            if self.entries.len() >= MAX_ENTRIES {
+            if self.entries.len() >= self.max_entries {
                 if let Some(victim_key) = self.oldest_key() {
                     self.entries.remove(&victim_key);
-                    stats.fragments_dropped_overflow += 1;
+                    stats.fragments_dropped_safety_cap += 1;
                 }
             }
             self.entries.insert(key, FragEntry { body: body.to_vec(), last_frag: 0, first_seen_us: timestamp_us });
@@ -199,7 +223,7 @@ impl FragmentStore {
     }
 
     /// Helper: find the key with the oldest `first_seen_us`, used for
-    /// `MAX_ENTRIES` eviction.
+    /// safety-cap eviction.
     fn oldest_key(&self) -> Option<FragKey> {
         self.entries.iter().min_by_key(|(_, e)| e.first_seen_us).map(|(k, _)| *k)
     }
@@ -327,26 +351,27 @@ mod tests {
     }
 
     #[test]
-    fn overflow_evicts_oldest() {
-        let mut s = FragmentStore::new();
+    fn safety_cap_evicts_oldest() {
+        // Use a tiny custom cap so the test does not have to build a million
+        // entries to exercise the eviction path. The production `new()` uses
+        // `MAX_ENTRIES`; this helper exists solely for this test.
+        const TEST_CAP: usize = 16;
+        let mut s = FragmentStore::with_max_entries(TEST_CAP);
         let mut st = FragmentStats::default();
         let ra = mac(0xFF);
 
-        // Fill to MAX_ENTRIES. The store is keyed by (SA, RA, SeqNum); we
-        // vary SA byte and SeqNum together so each entry is distinct without
-        // the casts triggering pedantic truncation lints.
-        for i in 0..MAX_ENTRIES {
-            let sa_byte = u8::try_from(i & 0xFF).unwrap();
-            let seq = u16::try_from(i & 0xFFFF).unwrap();
+        for i in 0..TEST_CAP {
+            let sa_byte = u8::try_from(i).unwrap();
+            let seq = u16::try_from(i).unwrap();
             let ts = u64::try_from(i).unwrap();
             s.push_fragment(mac(sa_byte), ra, seq, 0, b"X", ts, &mut st);
         }
-        assert_eq!(s.len(), MAX_ENTRIES);
+        assert_eq!(s.len(), TEST_CAP);
 
-        // One more entry: oldest must be evicted, len stays at MAX_ENTRIES.
+        // One more entry: oldest must be evicted, len stays at the cap.
         s.push_fragment(mac(0x77), ra, 9999, 0, b"X", u64::MAX, &mut st);
-        assert_eq!(s.len(), MAX_ENTRIES);
-        assert_eq!(st.fragments_dropped_overflow, 1);
+        assert_eq!(s.len(), TEST_CAP);
+        assert_eq!(st.fragments_dropped_safety_cap, 1);
     }
 
     #[test]

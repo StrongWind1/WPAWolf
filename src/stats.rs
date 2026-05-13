@@ -1004,7 +1004,10 @@ impl Stats {
         nz!("fragments seen (non-final, buffered for reassembly)", self.fragment_stats.fragments_seen);
         nz!("  reassembled MSDUs (recovered)", self.fragment_stats.fragments_reassembled);
         nz!("  fragments dropped (out of order; unrecoverable)", self.fragment_stats.fragments_dropped_disorder);
-        nz!("  fragments dropped (buffer overflow; unrecoverable)", self.fragment_stats.fragments_dropped_overflow);
+        nz!(
+            "  fragments dropped (safety cap; paranoid backstop, expect 0)",
+            self.fragment_stats.fragments_dropped_safety_cap
+        );
         nz!("AWDL frames (Apple AWDL)", self.awdl_frames);
         nz!("on 2.4 GHz band (from radiotap)", self.band_24ghz);
         nz!("on 5 GHz band (from radiotap)", self.band_5ghz);
@@ -1380,7 +1383,7 @@ mod tests {
         assert_eq!(s.fragment_stats.fragments_seen, 0);
         assert_eq!(s.fragment_stats.fragments_reassembled, 0);
         assert_eq!(s.fragment_stats.fragments_dropped_disorder, 0);
-        assert_eq!(s.fragment_stats.fragments_dropped_overflow, 0);
+        assert_eq!(s.fragment_stats.fragments_dropped_safety_cap, 0);
         assert_eq!(s.truncated_capture_files, 0);
         assert_eq!(s.unreadable_packets, 0);
         assert_eq!(s.files_skipped_unknown_format, 0);
