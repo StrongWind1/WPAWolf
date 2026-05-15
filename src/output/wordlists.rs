@@ -94,44 +94,17 @@ pub fn write_probe_essid_list(probe_set: &ProbeEssidSet, out: &mut impl Write) -
     Ok(count)
 }
 
-/// Writes all unique IE-scan printable-ASCII runs to `out`, one autohex-encoded
-/// entry per line.
+/// Writes IE-scan entries that do NOT appear in `-E`, `-R`, or `-W`.
 ///
-/// Output is sorted for deterministic ordering. Same trim + autohex contract as
-/// `write_wordlist`: leading / trailing NUL padding stripped, empty values
-/// silently skipped. Used for `--wordlist-scan-ies FILE` output. Returns the
-/// number of lines written.
-///
-/// Per the `--wordlist-scan-ies FILE` separation contract, this writer drains
-/// the dedicated `WordlistScanIesStore` and never reads from `WordlistStore`.
-///
-/// # Errors
-///
-/// Returns `Err` on I/O failure.
-pub fn write_wordlist_scan_ies(scan_ies_store: &WordlistScanIesStore, out: &mut impl Write) -> Result<usize> {
-    let mut entries: Vec<&Vec<u8>> = scan_ies_store.iter().collect();
-    entries.sort_unstable();
-    let mut count = 0usize;
-    for entry in entries {
-        if write_trimmed_autohex(entry, out)? {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Writes the IE-scan entries that do NOT appear in `-E`, `-R`, or `-W`.
-///
-/// Same sort + trim + autohex contract as `write_wordlist_scan_ies`. The
-/// subtraction set is the byte-level union of `EssidSet`, `ProbeEssidSet`,
+/// Sorted, trimmed, autohex-encoded -- same contract as `write_wordlist`.
+/// The subtraction set is the byte-level union of `EssidSet`, `ProbeEssidSet`,
 /// and `WordlistStore` (which already includes control-byte-split fragments).
-/// An IE-scan entry is suppressed if its raw bytes exactly match any entry in
-/// the subtraction set. Used for `--wordlist-scan-ies-delta FILE` output.
+/// `cat -E -R -W --wordlist-scan` is the maximum wordlist with no duplicates.
 ///
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-pub fn write_wordlist_scan_ies_delta(
+pub fn write_wordlist_scan(
     scan_ies_store: &WordlistScanIesStore,
     essid_set: &EssidSet,
     probe_essid_set: &ProbeEssidSet,
@@ -347,7 +320,7 @@ mod tests {
         wl.insert(b"WNDR3300".to_vec());
 
         let mut out = Vec::new();
-        let count = write_wordlist_scan_ies_delta(&scan, &essid, &probe, &wl, &mut out).unwrap();
+        let count = write_wordlist_scan(&scan, &essid, &probe, &wl, &mut out).unwrap();
         assert_eq!(count, 1);
         let text = std::str::from_utf8(&out).unwrap();
         assert_eq!(text, "VendorFirmware-1.2.3\n");
@@ -360,14 +333,9 @@ mod tests {
         scan.insert(b"AnotherRun".to_vec());
 
         let mut out = Vec::new();
-        let count = write_wordlist_scan_ies_delta(
-            &scan,
-            &EssidSet::new(),
-            &ProbeEssidSet::new(),
-            &WordlistStore::new(),
-            &mut out,
-        )
-        .unwrap();
+        let count =
+            write_wordlist_scan(&scan, &EssidSet::new(), &ProbeEssidSet::new(), &WordlistStore::new(), &mut out)
+                .unwrap();
         assert_eq!(count, 2);
         let text = std::str::from_utf8(&out).unwrap();
         assert!(text.contains("Firmware-X\n"));
@@ -383,8 +351,7 @@ mod tests {
         wl.insert(b"OnlyEntry".to_vec());
 
         let mut out = Vec::new();
-        let count =
-            write_wordlist_scan_ies_delta(&scan, &EssidSet::new(), &ProbeEssidSet::new(), &wl, &mut out).unwrap();
+        let count = write_wordlist_scan(&scan, &EssidSet::new(), &ProbeEssidSet::new(), &wl, &mut out).unwrap();
         assert_eq!(count, 0);
         assert!(out.is_empty());
     }

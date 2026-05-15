@@ -34,8 +34,7 @@ use self::dedup::{PerSinkDedup, SinkId};
 use self::device_info::write_device_info;
 use self::hashcat::{format_eapol_ft_line, format_eapol_line, format_pmkid_ft_line, format_pmkid_line};
 use self::wordlists::{
-    write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist,
-    write_wordlist_scan_ies, write_wordlist_scan_ies_delta,
+    write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist, write_wordlist_scan,
 };
 
 // --- EssidFilterConfig ---
@@ -98,13 +97,9 @@ pub struct OutputPaths {
     pub probe_essid_list: Option<PathBuf>,
     /// Path for leaked-information wordlist output (`-W`).
     pub wordlist: Option<PathBuf>,
-    /// Path for `--wordlist-scan-ies FILE` -- printable-ASCII runs from
-    /// management-frame IE bodies, kept separate from `-W` so the curated
-    /// wordlist is not diluted with vendor-IE noise.
-    pub wordlist_scan_ies: Option<PathBuf>,
-    /// Path for `--wordlist-scan-ies-delta FILE` -- scan-ies entries minus
-    /// everything already in `-E` / `-R` / `-W`.
-    pub wordlist_scan_ies_delta: Option<PathBuf>,
+    /// Path for `--wordlist-scan FILE` -- IE-scan entries minus everything
+    /// already in `-E` / `-R` / `-W`.
+    pub wordlist_scan: Option<PathBuf>,
     /// Path for EAP identity list output (`-I`).
     pub identity_list: Option<PathBuf>,
     /// Path for EAP username list output (`-U`).
@@ -806,14 +801,9 @@ impl OutputContext {
             write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
-        if let Some(path) = &paths.wordlist_scan_ies {
+        if let Some(path) = &paths.wordlist_scan {
             let mut f = BufWriter::new(std::fs::File::create(path)?);
-            write_wordlist_scan_ies(scan_ies_store, &mut f)?;
-            f.flush()?;
-        }
-        if let Some(path) = &paths.wordlist_scan_ies_delta {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
-            write_wordlist_scan_ies_delta(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
+            write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {

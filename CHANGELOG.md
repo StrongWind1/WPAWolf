@@ -195,7 +195,7 @@ Auxiliary outputs and runtime knobs.
 | `--mem-stats`         | print per-store byte-count table after closing banner |
 | `--essid-collapse-min N` | ESSID fan-out threshold (default 3) |
 | `--essid-collapse-ratio N` | ESSID dominance ratio (default 10) |
-| `--wordlist-scan-ies FILE` | opportunistic printable-ASCII run scan from IE bodies to FILE (standalone since v0.3.3) |
+| `--wordlist-scan FILE` | IE-body printable-ASCII runs not already in `-E`/`-R`/`-W` (delta output) |
 
 The defaults emit all 6 N#E# combos per session and apply no time or replay-counter filtering -- maximum hash yield. Output filter flags narrow that further. The closing stats summary on stdout is unconditional; there is no `--stats` toggle.
 

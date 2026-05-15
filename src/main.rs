@@ -243,34 +243,14 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "8")]
     rc_drift: Option<u8>,
 
-    /// opt-in IE-scan output: printable-ASCII runs from plaintext management IE bodies
+    /// IE-scan wordlist: printable-ASCII runs NOT already in `-E` / `-R` / `-W`
     ///
-    /// When set, every plaintext Beacon / Probe / Assoc / Reassoc / Action frame's IE
-    /// values are scanned for contiguous runs of `0x20..=0x7E` bytes of length >= 8,
-    /// and each unique run is written to FILE (autohex-trim format, sorted). Data frames
-    /// are never scanned.
-    ///
-    /// Output goes **only** to FILE; runs are no longer folded into `-W`. To get both
-    /// streams in one file, point `-W` and `--wordlist-scan-ies` at the same path.
-    /// `-W` therefore stays a curated wordlist (ESSIDs, WPS, EAP, country, vendor
-    /// names) while the IE-scan strand is a wider, noisier net for vendor IE bodies
-    /// wpawolf does not parse structurally. See `ARCHITECTURE.md §9`.
-    #[arg(long = "wordlist-scan-ies", value_name = "FILE")]
-    wordlist_scan_ies: Option<std::path::PathBuf>,
-
-    /// IE-scan delta: only entries NOT already in `-E` / `-R` / `-W`
-    ///
-    /// Same source data as `--wordlist-scan-ies` (printable-ASCII runs >= 8 bytes
-    /// from management-frame IE bodies), but at write time every entry that appears
-    /// in `-E`, `-R`, or `-W` is suppressed. The result is the set of strings that
-    /// the IE scanner found but the structured parsers did not surface -- the delta
-    /// an operator can append to a cracking wordlist without manually de-duplicating.
-    ///
-    /// Requires no other flag to be set (the IE-scan store is populated whenever
-    /// either `--wordlist-scan-ies` or `--wordlist-scan-ies-delta` is configured).
-    /// Both flags can be used simultaneously with different paths.
-    #[arg(long = "wordlist-scan-ies-delta", value_name = "FILE")]
-    wordlist_scan_ies_delta: Option<std::path::PathBuf>,
+    /// Scans every plaintext Beacon / Probe / Assoc / Reassoc / Action frame's IE
+    /// bodies for contiguous runs of `0x20..=0x7E` bytes of length >= 8. At write
+    /// time, entries that already appear in `-E`, `-R`, or `-W` are subtracted so
+    /// `cat -E -R -W --wordlist-scan` is the maximum wordlist with no duplicates.
+    #[arg(long = "wordlist-scan", value_name = "FILE")]
+    wordlist_scan: Option<std::path::PathBuf>,
 
     /// [output filter] only collapse SSID variants when an AP has more than N SSIDs (default 3)
     ///
@@ -512,11 +492,10 @@ fn main() {
         || cli.identity_output.is_some()
         || cli.username_output.is_some()
         || cli.device_output.is_some()
-        || cli.wordlist_scan_ies.is_some()
-        || cli.wordlist_scan_ies_delta.is_some();
+        || cli.wordlist_scan.is_some();
     if !has_output {
         println!(
-            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, --wordlist-scan-ies, or --wordlist-scan-ies-delta)"
+            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, or --wordlist-scan)"
         );
         println!("Run with --help for usage.");
         std::process::exit(1);
@@ -572,7 +551,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         populate_device: cli.device_output.is_some(),
         populate_identity: cli.identity_output.is_some(),
         populate_username: cli.username_output.is_some(),
-        scan_ies: cli.wordlist_scan_ies.is_some() || cli.wordlist_scan_ies_delta.is_some(),
+        scan_ies: cli.wordlist_scan.is_some(),
     };
 
     // Expand any directory arguments to the recursive set of capture files they
@@ -610,8 +589,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         essid_list: cli.essid_output.clone(),
         probe_essid_list: cli.probe_output.clone(),
         wordlist: cli.wordlist_output.clone(),
-        wordlist_scan_ies: cli.wordlist_scan_ies.clone(),
-        wordlist_scan_ies_delta: cli.wordlist_scan_ies_delta.clone(),
+        wordlist_scan: cli.wordlist_scan.clone(),
         identity_list: cli.identity_output.clone(),
         username_list: cli.username_output.clone(),
         device_info: cli.device_output.clone(),

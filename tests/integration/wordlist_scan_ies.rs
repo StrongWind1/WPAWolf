@@ -118,76 +118,21 @@ fn assert_not_contains(lines: &[String], needle: &str) {
 }
 
 #[test]
-fn wordlist_scan_ies_writes_to_dedicated_file_and_not_to_minus_w() {
-    let pcap_path = "/tmp/wpawolf_t22_fixture.pcap";
-    let wordlist_off = "/tmp/wpawolf_t22_off.wordlist";
-    let wordlist_on = "/tmp/wpawolf_t22_on.wordlist";
-    let scan_on = "/tmp/wpawolf_t22_on.scanies";
-    // Minimal dummy output so wolf does not error on "no output specified".
-    let dummy_hash_off = "/tmp/wpawolf_t22_off.22000";
-    let dummy_hash_on = "/tmp/wpawolf_t22_on.22000";
-
-    let ssid = b"TestSSID";
-    let firmware = b"VendorFirmware-1.2.3"; // 20 bytes, printable ASCII
-
-    fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
-
-    // --- Run A: no flag. Firmware string must be absent from -W. ---
-    let _ = fs::remove_file(wordlist_off);
-    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash_off, "-W", wordlist_off, pcap_path])
-        .status()
-        .expect("failed to spawn wpawolf");
-    assert!(status.success(), "wpawolf (off) exited non-zero: {status}");
-
-    let lines_off = read_lines(Path::new(wordlist_off));
-    assert_contains(&lines_off, "TestSSID"); // SSID always lands in -W
-    assert_not_contains(&lines_off, "VendorFirmware-1.2.3");
-
-    // --- Run B: separation contract. Firmware string must be in scan-ies file
-    //     ONLY, never in -W. ---
-    let _ = fs::remove_file(wordlist_on);
-    let _ = fs::remove_file(scan_on);
-    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash_on, "-W", wordlist_on, "--wordlist-scan-ies", scan_on, pcap_path])
-        .status()
-        .expect("failed to spawn wpawolf");
-    assert!(status.success(), "wpawolf (separate) exited non-zero: {status}");
-
-    let lines_w = read_lines(Path::new(wordlist_on));
-    let lines_scan = read_lines(Path::new(scan_on));
-    // -W: SSID still here, firmware string MUST NOT be (separation contract).
-    assert_contains(&lines_w, "TestSSID");
-    assert_not_contains(&lines_w, "VendorFirmware-1.2.3");
-    // Scan file: firmware string here, "short" still filtered by min_run.
-    assert_contains(&lines_scan, "VendorFirmware-1.2.3");
-    assert_not_contains(&lines_scan, "short");
-    // The IE-scan strand picks up the SSID IE value too (it iterates every IE
-    // body, and the SSID IE qualifies on length). The contract we assert here
-    // is *only* that the firmware string flows the right way -- both strands
-    // may legitimately contain the SSID under their own logic.
-}
-
-#[test]
-fn wordlist_scan_ies_delta_subtracts_e_r_w_entries() {
-    let pcap_path = "/tmp/wpawolf_t22_delta_fixture.pcap";
-    let scan_path = "/tmp/wpawolf_t22_delta.scanies";
-    let delta_path = "/tmp/wpawolf_t22_delta.delta";
-    let essid_path = "/tmp/wpawolf_t22_delta.essids";
-    let probe_path = "/tmp/wpawolf_t22_delta.probes";
-    let wordlist_path = "/tmp/wpawolf_t22_delta.wordlist";
-    let dummy_hash = "/tmp/wpawolf_t22_delta.22000";
+fn wordlist_scan_subtracts_e_r_w_entries() {
+    let pcap_path = "/tmp/wpawolf_t22_scan_fixture.pcap";
+    let scan_path = "/tmp/wpawolf_t22_scan.scan";
+    let essid_path = "/tmp/wpawolf_t22_scan.essids";
+    let wordlist_path = "/tmp/wpawolf_t22_scan.wordlist";
+    let dummy_hash = "/tmp/wpawolf_t22_scan.22000";
 
     let ssid = b"TestSSID";
     let firmware = b"VendorFirmware-1.2.3";
 
     fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
 
-    let _ = fs::remove_file(scan_path);
-    let _ = fs::remove_file(delta_path);
-    let _ = fs::remove_file(essid_path);
-    let _ = fs::remove_file(probe_path);
-    let _ = fs::remove_file(wordlist_path);
+    for p in [scan_path, essid_path, wordlist_path] {
+        let _ = fs::remove_file(p);
+    }
 
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args([
@@ -195,48 +140,40 @@ fn wordlist_scan_ies_delta_subtracts_e_r_w_entries() {
             dummy_hash,
             "-E",
             essid_path,
-            "-R",
-            probe_path,
             "-W",
             wordlist_path,
-            "--wordlist-scan-ies",
+            "--wordlist-scan",
             scan_path,
-            "--wordlist-scan-ies-delta",
-            delta_path,
             pcap_path,
         ])
         .status()
         .expect("failed to spawn wpawolf");
-    assert!(status.success(), "wpawolf (delta) exited non-zero: {status}");
+    assert!(status.success(), "wpawolf exited non-zero: {status}");
 
-    let lines_scan = read_lines(Path::new(scan_path));
-    let lines_delta = read_lines(Path::new(delta_path));
     let lines_e = read_lines(Path::new(essid_path));
     let lines_w = read_lines(Path::new(wordlist_path));
+    let lines_scan = read_lines(Path::new(scan_path));
 
     // -E and -W both contain the SSID.
     assert_contains(&lines_e, "TestSSID");
     assert_contains(&lines_w, "TestSSID");
-    // The SSID IE is >=8 bytes so the IE scanner picks it up too.
-    assert_contains(&lines_scan, "TestSSID");
-    // The firmware string is only in scan-ies, NOT in -W.
+    // --wordlist-scan subtracts entries already in -E / -W, so SSID must NOT
+    // appear. The firmware string is only reachable via the IE scanner.
+    assert_not_contains(&lines_scan, "TestSSID");
     assert_contains(&lines_scan, "VendorFirmware-1.2.3");
-    assert_not_contains(&lines_w, "VendorFirmware-1.2.3");
-
-    // Delta: SSID must be subtracted (it is in -E and -W), firmware survives.
-    assert_not_contains(&lines_delta, "TestSSID");
-    assert_contains(&lines_delta, "VendorFirmware-1.2.3");
+    // 5-byte "short" run is still filtered by the 8-byte minimum.
+    assert_not_contains(&lines_scan, "short");
 }
 
 #[test]
-fn wordlist_scan_ies_runs_independently_of_dash_w() {
-    // Without `-W` configured at all the IE-scan output must still work --
-    // the new flag is no longer a "scan + add to -W" tag-along; it is its
-    // own first-class output. This guards against regressing the new flag
-    // back into a tag-along.
-    let pcap_path = "/tmp/wpawolf_t22_no_w_fixture.pcap";
-    let scan_path = "/tmp/wpawolf_t22_no_w.scanies";
-    let dummy_hash = "/tmp/wpawolf_t22_no_w.22000";
+fn wordlist_scan_works_without_dash_w() {
+    // Without -W configured the WordlistStore component is empty, but EssidSet
+    // is always populated during extraction. The SSID "TestSSID" still gets
+    // subtracted because it lives in EssidSet regardless of whether -E is
+    // configured as a file output.
+    let pcap_path = "/tmp/wpawolf_t22_scan_no_w_fixture.pcap";
+    let scan_path = "/tmp/wpawolf_t22_scan_no_w.scan";
+    let dummy_hash = "/tmp/wpawolf_t22_scan_no_w.22000";
     let _ = fs::remove_file(scan_path);
 
     let ssid = b"TestSSID";
@@ -244,10 +181,13 @@ fn wordlist_scan_ies_runs_independently_of_dash_w() {
     fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
 
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash, "--wordlist-scan-ies", scan_path, pcap_path])
+        .args(["--22000-out", dummy_hash, "--wordlist-scan", scan_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf without -W exited non-zero: {status}");
     let lines_scan = read_lines(Path::new(scan_path));
+    // Firmware string survives (not in any store).
     assert_contains(&lines_scan, "VendorFirmware-1.2.3");
+    // SSID is subtracted even without -E configured -- EssidSet is always populated.
+    assert_not_contains(&lines_scan, "TestSSID");
 }
