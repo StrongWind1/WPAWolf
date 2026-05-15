@@ -419,14 +419,14 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     bytes.extend_from_slice(&pcap_packet_record(1000, &frame));
     fs::write(pcap, &bytes).unwrap();
 
-    let stderr_path = format!("{log}.stderr");
-    let _ = fs::remove_file(&stderr_path);
+    let stdout_path = format!("{log}.stdout");
+    let _ = fs::remove_file(&stdout_path);
     let out_path = format!("{log}.22000");
     let _ = fs::remove_file(&out_path);
-    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--log", log, "--22000-out", &out_path, pcap])
-        .stderr(stderr_file)
+        .stdout(stdout_file)
         .status()
         .unwrap();
     assert!(status.success());
@@ -436,10 +436,10 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     assert!(lines.is_empty(), "non-zero Protocol Version must not produce [malformed_frame]; got {lines:?}");
 
     // Phase 1 stats summary must include the forgiven count.
-    let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
+    let stdout_contents = fs::read_to_string(&stdout_path).unwrap();
     assert!(
-        stderr_contents.contains("frames with non-zero Protocol Version (forgiven"),
-        "expected stats line in stderr; got:\n{stderr_contents}"
+        stdout_contents.contains("frames with non-zero Protocol Version (forgiven"),
+        "expected stats line in stdout; got:\n{stdout_contents}"
     );
 }
 
@@ -473,16 +473,16 @@ fn skipped_input_routes_unknown_format_files_through_log_not_stderr() {
     fs::write(&junk, b"NOTACAP!").unwrap();
 
     let log = format!("{dir}/run.log");
-    let stderr_path = format!("{dir}/run.stderr");
+    let stdout_path = format!("{dir}/run.stdout");
     let out_path = format!("{dir}/run.22000");
     let _ = fs::remove_file(&log);
-    let _ = fs::remove_file(&stderr_path);
+    let _ = fs::remove_file(&stdout_path);
     let _ = fs::remove_file(&out_path);
 
-    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--log", &log, "--22000-out", &out_path, &zero_byte, &junk, &real_pcap])
-        .stderr(stderr_file)
+        .stdout(stdout_file)
         .status()
         .unwrap();
     assert!(status.success(), "wpawolf must finish successfully; bad inputs are skips, not aborts");
@@ -494,16 +494,16 @@ fn skipped_input_routes_unknown_format_files_through_log_not_stderr() {
     assert!(lines.iter().any(|l| l.contains(&junk)), "expected non-capture file in log; got {lines:?}");
     assert!(lines.iter().all(|l| l.contains("reason=")), "every line must carry reason=; got {lines:?}");
 
-    // Stderr must NOT carry the legacy `warning: cannot open` noise for these files.
-    let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
+    // Stdout must NOT carry the legacy `warning: cannot open` noise for these files.
+    let stdout_contents = fs::read_to_string(&stdout_path).unwrap();
     assert!(
-        !stderr_contents.contains("warning: cannot open"),
-        "unrecognised-format files must not warn on stderr; got:\n{stderr_contents}"
+        !stdout_contents.contains("warning: cannot open"),
+        "unrecognised-format files must not warn on stdout; got:\n{stdout_contents}"
     );
     // The Phase 1 summary must reflect the count.
     assert!(
-        stderr_contents.contains("input files skipped (magic unrecognised"),
-        "expected Phase 1 summary line for skipped files; got:\n{stderr_contents}"
+        stdout_contents.contains("input files skipped (magic unrecognised"),
+        "expected Phase 1 summary line for skipped files; got:\n{stdout_contents}"
     );
 
     let _ = fs::remove_dir_all(dir);
@@ -539,24 +539,24 @@ fn directory_walk_filters_sub_4_byte_stubs_silently() {
     fs::write(&real_pcap, &real_bytes).unwrap();
 
     let log = format!("{dir}/run.log");
-    let stderr_path = format!("{dir}/run.stderr");
+    let stdout_path = format!("{dir}/run.stderr");
     let out_path = format!("{dir}/run.22000");
     let _ = fs::remove_file(&log);
-    let _ = fs::remove_file(&stderr_path);
+    let _ = fs::remove_file(&stdout_path);
     let _ = fs::remove_file(&out_path);
 
-    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--log", &log, "--22000-out", &out_path, dir])
-        .stderr(stderr_file)
+        .stderr(stdout_file)
         .status()
         .unwrap();
     assert!(status.success());
 
-    let stderr_contents = fs::read_to_string(&stderr_path).unwrap();
+    let stdout_contents = fs::read_to_string(&stdout_path).unwrap();
     assert!(
-        !stderr_contents.contains("warning: cannot open"),
-        "stubs must be filtered silently; got:\n{stderr_contents}"
+        !stdout_contents.contains("warning: cannot open"),
+        "stubs must be filtered silently; got:\n{stdout_contents}"
     );
     // The directory walk caught them, so `[skipped_input]` should be empty here.
     let log_contents = fs::read_to_string(&log).unwrap_or_default();

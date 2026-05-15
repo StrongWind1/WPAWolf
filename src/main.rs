@@ -482,15 +482,15 @@ fn main() {
         || cli.device_output.is_some()
         || cli.wordlist_scan_ies.is_some();
     if !has_output {
-        eprintln!(
+        println!(
             "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, or --wordlist-scan-ies)"
         );
-        eprintln!("Run with --help for usage.");
+        println!("Run with --help for usage.");
         std::process::exit(1);
     }
 
     if let Err(e) = run(&cli) {
-        eprintln!("error: {e}");
+        println!("error: {e}");
         std::process::exit(1);
     }
 }
@@ -611,7 +611,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.files_skipped_unknown_format += 1;
                     logger.log_skipped_input(path, &e.to_string());
                 } else {
-                    eprintln!("warning: cannot open {}: {e}", path.display());
+                    println!("warning: cannot open {}: {e}", path.display());
                 }
                 continue;
             },

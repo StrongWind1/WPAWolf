@@ -121,12 +121,9 @@ impl ProgressReporter {
             // write! to String never fails; suppress the Result.
             let _ = write!(line, " rss={rss}MiB");
         }
-        // Manual stderr write so we can flush; `eprintln!` already flushes on
-        // newline for unbuffered handles, but `--quiet` aside we want this
-        // visible immediately even if a downstream collector buffers stderr.
-        let mut err = std::io::stderr().lock();
-        let _ = writeln!(err, "{line}");
-        let _ = err.flush();
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
 
         self.last_print = Instant::now();
         self.last_print_packets = total_packets;

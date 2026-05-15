@@ -297,11 +297,11 @@ fn temp_path(name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
-/// Runs wpawolf with `--22000-out FILE PCAP` and returns `(stdout+stderr, output_contents)`.
+/// Runs wpawolf with `--22000-out FILE PCAP` and returns `(stdout, output_contents)`.
 fn run_wpawolf_22000(pcap: &Path, out: &Path) -> (String, String) {
     let result = Command::new(binary_path()).arg("--22000-out").arg(out).arg(pcap).output().expect("run wpawolf");
     assert!(result.status.success(), "wpawolf exited non-zero on {pcap:?}");
-    let log = format!("{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    let log = String::from_utf8_lossy(&result.stdout).into_owned();
     let contents = fs::read_to_string(out).unwrap_or_default();
     (log, contents)
 }

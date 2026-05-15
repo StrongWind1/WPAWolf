@@ -192,7 +192,7 @@ impl<R: Read> PcapngReader<R> {
             BOM_LITTLE_ENDIAN => ByteOrder::Little,
             BOM_BIG_ENDIAN => ByteOrder::Big,
             _ => {
-                eprintln!("wpawolf: pcapng SHB BOM unrecognised ({bom_bytes:02X?}), assuming little-endian");
+                println!("wpawolf: pcapng SHB BOM unrecognised ({bom_bytes:02X?}), assuming little-endian");
                 ByteOrder::Little
             },
         };
@@ -249,7 +249,7 @@ impl<R: Read> PcapngReader<R> {
         // [draft-ietf-opsawg-pcapng-05] §4.1
         let major = byte_order.u16(read_array(&block_buf, 4, "pcapng SHB major version")?);
         if major != SHB_MAJOR_VERSION {
-            eprintln!("wpawolf: pcapng SHB major version {major} != {SHB_MAJOR_VERSION}, continuing anyway");
+            println!("wpawolf: pcapng SHB major version {major} != {SHB_MAJOR_VERSION}, continuing anyway");
         }
         let minor = byte_order.u16(read_array(&block_buf, 6, "pcapng SHB minor version")?);
 
@@ -292,7 +292,7 @@ impl<R: Read> PcapngReader<R> {
         let block_total_len = self.byte_order.u32(read_array(&hdr, 4, "pcapng block total length")?);
 
         if block_total_len < MIN_BLOCK_BYTES {
-            eprintln!(
+            println!(
                 "wpawolf: pcapng block type 0x{block_type:08X} has block_total_length {block_total_len} < {MIN_BLOCK_BYTES}, skipping"
             );
             return Ok(BlockOutcome::Skip);
@@ -374,7 +374,7 @@ impl<R: Read> PcapngReader<R> {
     fn parse_shb_body(&mut self, body_len: usize) -> Result<()> {
         if body_len < SHB_BODY_MIN {
             // Truncated SHB: reset state and continue.
-            eprintln!(
+            println!(
                 "wpawolf: pcapng SHB body too short ({body_len} bytes, need {SHB_BODY_MIN}), resetting interfaces"
             );
             self.interfaces.clear();
@@ -388,7 +388,7 @@ impl<R: Read> PcapngReader<R> {
             BOM_LITTLE_ENDIAN => ByteOrder::Little,
             BOM_BIG_ENDIAN => ByteOrder::Big,
             _ => {
-                eprintln!("wpawolf: pcapng SHB BOM unrecognised ({bom_bytes:02X?}), keeping current byte order");
+                println!("wpawolf: pcapng SHB BOM unrecognised ({bom_bytes:02X?}), keeping current byte order");
                 self.byte_order
             },
         };
@@ -397,7 +397,7 @@ impl<R: Read> PcapngReader<R> {
         // [draft-ietf-opsawg-pcapng-05] §4.1
         let major = self.byte_order.u16(read_array(&self.block_buf, 4, "pcapng SHB major version")?);
         if major != SHB_MAJOR_VERSION {
-            eprintln!("wpawolf: pcapng SHB major version {major} != {SHB_MAJOR_VERSION}, continuing anyway");
+            println!("wpawolf: pcapng SHB major version {major} != {SHB_MAJOR_VERSION}, continuing anyway");
         }
         let minor = self.byte_order.u16(read_array(&self.block_buf, 6, "pcapng SHB minor version")?);
         self.version = (major, minor);
@@ -418,7 +418,7 @@ impl<R: Read> PcapngReader<R> {
     /// [draft-ietf-opsawg-pcapng-05] §4.2
     fn parse_idb_body(&mut self, body: &[u8]) -> Result<()> {
         if body.len() < IDB_BODY_MIN {
-            eprintln!(
+            println!(
                 "wpawolf: pcapng IDB body too short ({} bytes, need {IDB_BODY_MIN}), skipping interface",
                 body.len()
             );
@@ -516,7 +516,7 @@ impl<R: Read> PcapngReader<R> {
     /// [draft-ietf-opsawg-pcapng-05] §4.3
     fn parse_epb_body(&self, body: &[u8]) -> Result<Option<Packet>> {
         if body.len() < EPB_HEADER_LEN {
-            eprintln!("wpawolf: pcapng EPB body too short ({} bytes, need {EPB_HEADER_LEN}), skipping", body.len());
+            println!("wpawolf: pcapng EPB body too short ({} bytes, need {EPB_HEADER_LEN}), skipping", body.len());
             return Ok(None);
         }
 

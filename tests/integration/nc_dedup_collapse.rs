@@ -207,8 +207,8 @@ fn run_and_count(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> usi
     fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count()
 }
 
-/// Runs wpawolf on `input_path` and returns `(output_line_count, stderr_text)`.
-/// The stderr text is needed by callers that assert against closing-banner
+/// Runs wpawolf on `input_path` and returns `(output_line_count, stdout_text)`.
+/// The stdout text is needed by callers that assert against closing-banner
 /// counters (e.g. NC-dedup stats under `--per-file`).
 fn run_capture(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> (usize, String) {
     let _ = fs::remove_file(out_path);
@@ -219,8 +219,8 @@ fn run_capture(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> (usiz
     let output = Command::new(common::binary_path()).args(&args).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf exited non-zero with args {extra_args:?}");
     let lines = fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count();
-    let stderr = String::from_utf8(output.stderr).expect("wpawolf stderr is UTF-8");
-    (lines, stderr)
+    let stdout = String::from_utf8(output.stdout).expect("wpawolf stdout is UTF-8");
+    (lines, stdout)
 }
 
 /// Extracts the integer printed after a banner-row label like
@@ -228,8 +228,8 @@ fn run_capture(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> (usiz
 /// when the row is absent (`nz!` suppresses zero values). Banner rows are
 /// indented with leading whitespace; `contains` + `split_once(':')` handles
 /// that without a prefix dance.
-fn banner_counter(stderr: &str, label: &str) -> u64 {
-    for line in stderr.lines() {
+fn banner_counter(stdout: &str, label: &str) -> u64 {
+    for line in stdout.lines() {
         if line.contains(label)
             && let Some((_, after_colon)) = line.split_once(':')
         {
@@ -397,23 +397,23 @@ fn nc_dedup_per_file_counters_accumulate_across_files() {
         let pcap_bytes = build_single_cluster_pcap(*ap, *sta, *ssid, *tail);
         fs::write(dir.join(format!("file{i}.pcap")), pcap_bytes).unwrap();
     }
-    let (lines, stderr) = run_capture(&dir, &out_path, &["--per-file", "--nc-dedup"]);
+    let (lines, stdout) = run_capture(&dir, &out_path, &["--per-file", "--nc-dedup"]);
     // One survivor per file -- three files -> three lines on disk.
     assert_eq!(lines, 3, "each file's 9-element cluster collapses to one survivor");
     // The fix in OutputContext::emit_inner accumulates these across emit
     // calls; the pre-fix value would have been 8 / 1 / 9 (last file only).
     assert_eq!(
-        banner_counter(&stderr, "NC-dedup near-identical-nonce lines collapsed"),
+        banner_counter(&stdout, "NC-dedup near-identical-nonce lines collapsed"),
         24,
         "per-file mode must accumulate collapsed_lines across files (3 files * 8 collapsed each)"
     );
     assert_eq!(
-        banner_counter(&stderr, "NC-dedup cluster count"),
+        banner_counter(&stdout, "NC-dedup cluster count"),
         3,
         "per-file mode must accumulate cluster_count across files (one cluster per file)"
     );
     assert_eq!(
-        banner_counter(&stderr, "NC-dedup max cluster size"),
+        banner_counter(&stdout, "NC-dedup max cluster size"),
         9,
         "per-file mode must take the global max across files (all three clusters are size 9)"
     );
@@ -431,15 +431,15 @@ fn nc_dedup_sparse_edge_cluster_does_not_collapse_via_cli() {
     // it unconditionally on every M1-sourced pair regardless of NC-dedup.
     let (pcap, out) = fixture_paths("sparse_edge");
     fs::write(&pcap, build_sparse_edge_pcap(8)).unwrap();
-    let (lines, stderr) = run_capture(&pcap, &out, &["--nc-dedup"]);
+    let (lines, stdout) = run_capture(&pcap, &out, &["--nc-dedup"]);
     assert_eq!(lines, 2, "sparse-edge 2-member cluster must stay as two singletons");
     assert_eq!(
-        banner_counter(&stderr, "NC-dedup near-identical-nonce lines collapsed"),
+        banner_counter(&stdout, "NC-dedup near-identical-nonce lines collapsed"),
         0,
         "safety guard must skip the collapse entirely (zero drops)"
     );
     assert_eq!(
-        banner_counter(&stderr, "NC-dedup cluster count"),
+        banner_counter(&stdout, "NC-dedup cluster count"),
         0,
         "safety guard must skip the collapse entirely (zero clusters formed)"
     );

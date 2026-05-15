@@ -283,7 +283,7 @@ fn collect_capture_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Resul
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("warning: cannot read entry in {}: {e}", dir.display());
+                println!("warning: cannot read entry in {}: {e}", dir.display());
                 continue;
             },
         };
@@ -292,7 +292,7 @@ fn collect_capture_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Resul
         let ft = match entry.file_type() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("warning: cannot stat {}: {e}", path.display());
+                println!("warning: cannot stat {}: {e}", path.display());
                 continue;
             },
         };
@@ -338,7 +338,7 @@ pub fn expand_inputs(inputs: &[std::path::PathBuf]) -> Result<Vec<std::path::Pat
         let meta = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("warning: cannot stat {}: {e}", path.display());
+                println!("warning: cannot stat {}: {e}", path.display());
                 continue;
             },
         };

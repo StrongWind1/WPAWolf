@@ -73,18 +73,18 @@ fn data_frame_uplink(ap: [u8; 6], sta: [u8; 6], seq_num: u16, frag_num: u8, more
 fn run_capture(pcap_path: &str) -> String {
     let out_path = format!("{pcap_path}.22000");
     let log_path = format!("{pcap_path}.log");
-    let stderr_path = format!("{pcap_path}.stderr");
+    let stdout_path = format!("{pcap_path}.stdout");
     let _ = fs::remove_file(&out_path);
     let _ = fs::remove_file(&log_path);
-    let _ = fs::remove_file(&stderr_path);
-    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let _ = fs::remove_file(&stdout_path);
+    let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--22000-out", &out_path, "--log", &log_path, pcap_path])
-        .stderr(stderr_file)
+        .stdout(stdout_file)
         .status()
         .unwrap();
     assert!(status.success(), "wpawolf exit {status}");
-    fs::read_to_string(&stderr_path).unwrap()
+    fs::read_to_string(&stdout_path).unwrap()
 }
 
 #[test]

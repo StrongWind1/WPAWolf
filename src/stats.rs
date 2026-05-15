@@ -915,13 +915,13 @@ impl Stats {
 
         macro_rules! stat {
             ($label:expr, $val:expr) => {
-                eprintln!("{:.<W$}: {}", $label, $val);
+                println!("{:.<W$}: {}", $label, $val);
             };
         }
         macro_rules! nz {
             ($label:expr, $val:expr) => {
                 if $val > 0 {
-                    eprintln!("{:.<W$}: {}", $label, $val);
+                    println!("{:.<W$}: {}", $label, $val);
                 }
             };
         }
@@ -929,11 +929,11 @@ impl Stats {
             ($num:expr, $name:expr) => {{
                 let hdr = format!("=== Phase {} -- {} ", $num, $name);
                 let fill = "=".repeat(SW.saturating_sub(hdr.len()).max(4));
-                eprintln!("{hdr}{fill}");
+                println!("{hdr}{fill}");
             }};
         }
 
-        eprintln!("---");
+        println!("---");
 
         // ======================================================================
         // Phase 1 -- Ingest: file metadata + raw packet/byte ingestion
@@ -1252,7 +1252,7 @@ impl Stats {
         // line to a single (AKM, attack surface) so the operator can read off
         // exactly what hashcat will see, type code by type code.
         if self.hash_type_emitted.values().any(|&n| n > 0) {
-            eprintln!("per-hash-type lines emitted (per ARCHITECTURE.md §2):");
+            println!("per-hash-type lines emitted (per ARCHITECTURE.md §2):");
             for ht in HashType::all() {
                 let n = self.hash_type_emitted.get(&ht).copied().unwrap_or(0);
                 if n > 0 {
@@ -1347,7 +1347,7 @@ impl Stats {
         stat!("hashes emitted (total)", total_hashes);
         stat!("distinct hash types observed", active_types);
 
-        eprintln!("---");
+        println!("---");
     }
 }
 

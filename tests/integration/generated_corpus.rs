@@ -70,7 +70,7 @@ fn nanos_unique() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
 }
 
-/// Capture wpawolf's stderr (where the stats summary is printed) for one
+/// Capture wpawolf's stdout (where the stats summary is printed) for one
 /// fixture. The combined `-o` sink swallows the hash output; we just want the
 /// human-readable counters here.
 fn run_wpawolf_capture_stats(input: &Path) -> String {
@@ -80,7 +80,7 @@ fn run_wpawolf_capture_stats(input: &Path) -> String {
     let _ = fs::remove_file(&combined);
     let output = Command::new(&bin).arg("-o").arg(&combined).arg(input).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf failed on {}", input.display());
-    String::from_utf8_lossy(&output.stderr).into_owned()
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn sentinel_rejection_fixtures_increment_their_counter_and_emit_nothing() {
             .lines()
             .filter(|l| l.contains(label))
             .any(|l| l.split(':').nth(1).is_some_and(|tail| tail.trim().parse::<u64>().unwrap_or(0) >= 1));
-        assert!(has_counter, "{rel}: rejection counter `{label}` did not fire\n--- stderr ---\n{stderr}");
+        assert!(has_counter, "{rel}: rejection counter `{label}` did not fire\n--- stdout ---\n{stderr}");
     }
 }
 
@@ -332,7 +332,7 @@ fn sentinel_rejection_fixtures_increment_their_counter_and_emit_nothing() {
 /// by the FR-OUT-3 emit gate). The parser still walks every byte and
 /// increments the source-tagged counter (`pmkid_fils_auth`, `pmkid_mesh`
 /// in `src/stats.rs`). This test asserts that the matching stats line
-/// appears in wpawolf's stderr summary for each non-emitting S-site, which
+/// appears in wpawolf's stdout summary for each non-emitting S-site, which
 /// proves the parse path is exercised end-to-end. Without this oracle a
 /// regression that silently skipped these frames would only be visible if
 /// someone ran the binary by hand.
@@ -363,7 +363,7 @@ fn non_emitting_s_sites_increment_their_stats_counter() {
             .lines()
             .filter(|l| l.contains(label))
             .any(|l| l.split(':').nth(1).is_some_and(|tail| tail.trim().parse::<u64>().unwrap_or(0) >= 1));
-        assert!(has_counter, "{rel}: stats counter `{label}` did not increment\n--- stderr ---\n{stderr}");
+        assert!(has_counter, "{rel}: stats counter `{label}` did not increment\n--- stdout ---\n{stderr}");
     }
 }
 

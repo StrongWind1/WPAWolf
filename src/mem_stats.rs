@@ -102,14 +102,14 @@ pub fn print_report(rows: &[(&'static str, usize, usize)]) {
     sorted.sort_by_key(|r| std::cmp::Reverse(r.2));
     let total: usize = rows.iter().map(|(_, _, b)| *b).sum();
 
-    let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "=== Memory stats (--mem-stats) ===============================");
-    let _ = writeln!(err, "{:<46}{:>14}{:>14}", "store", "entries", "approx_bytes");
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "=== Memory stats (--mem-stats) ===============================");
+    let _ = writeln!(out, "{:<46}{:>14}{:>14}", "store", "entries", "approx_bytes");
     for (name, entries, bytes) in &sorted {
-        let _ = writeln!(err, "{name:<46}{entries:>14}{:>14}", format_bytes(*bytes));
+        let _ = writeln!(out, "{name:<46}{entries:>14}{:>14}", format_bytes(*bytes));
     }
-    let _ = writeln!(err, "{:<46}{:>14}{:>14}", "TOTAL", "", format_bytes(total));
-    let _ = err.flush();
+    let _ = writeln!(out, "{:<46}{:>14}{:>14}", "TOTAL", "", format_bytes(total));
+    let _ = out.flush();
 }
 
 // --- Unit tests ---

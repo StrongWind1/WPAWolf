@@ -1,4 +1,4 @@
-//! Integration test: `[progress]` stderr lines and the `--quiet` escape hatch.
+//! Integration test: `[progress]` stdout lines and the `--quiet` escape hatch.
 //!
 //! Cadence is hybrid (every 5 s or every 2 000 000 packets, whichever first).
 //! A test capture cannot reach 2 M packets in a reasonable time and we don't
@@ -8,9 +8,9 @@
 //! we test here.
 //!
 //! Two assertions:
-//!   1) default run -> stderr contains a `[progress]` line with the expected
+//!   1) default run -> stdout contains a `[progress]` line with the expected
 //!      `key=value` fields, plus the closing Phase 1-5 banner.
-//!   2) `--quiet` run -> stderr contains the closing banner but no `[progress]`
+//!   2) `--quiet` run -> stdout contains the closing banner but no `[progress]`
 //!      line.
 
 #![allow(
@@ -55,25 +55,25 @@ fn minimal_pcap() -> Vec<u8> {
 fn default_run_prints_at_least_one_progress_line() {
     let pcap = "/tmp/wpawolf_progress_default.pcap";
     let out = "/tmp/wpawolf_progress_default.22000";
-    let stderr_path = "/tmp/wpawolf_progress_default.stderr";
+    let stdout_path = "/tmp/wpawolf_progress_default.stdout";
     let _ = fs::remove_file(out);
-    let _ = fs::remove_file(stderr_path);
+    let _ = fs::remove_file(stdout_path);
     fs::write(pcap, minimal_pcap()).unwrap();
 
-    let stderr_file = fs::File::create(stderr_path).unwrap();
+    let stdout_file = fs::File::create(stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--22000-out", out, pcap])
-        .stderr(stderr_file)
+        .stdout(stdout_file)
         .status()
         .unwrap();
     assert!(status.success(), "wpawolf must exit 0");
 
-    let stderr_contents = fs::read_to_string(stderr_path).unwrap();
+    let stdout_contents = fs::read_to_string(stdout_path).unwrap();
 
-    let progress_lines: Vec<&str> = stderr_contents.lines().filter(|l| l.starts_with("[progress]")).collect();
+    let progress_lines: Vec<&str> = stdout_contents.lines().filter(|l| l.starts_with("[progress]")).collect();
     assert!(
         !progress_lines.is_empty(),
-        "expected at least one [progress] line on default stderr; got:\n{stderr_contents}"
+        "expected at least one [progress] line on default stdout; got:\n{stdout_contents}"
     );
     let line = progress_lines[0];
     // Greppability + key fields. RSS is omitted on non-Linux platforms; we
@@ -85,34 +85,34 @@ fn default_run_prints_at_least_one_progress_line() {
     assert!(line.contains("pmkids="), "missing pmkids= field: {line}");
 
     // Closing Phase 1 banner is still present.
-    assert!(stderr_contents.contains("=== Phase 1 -- Ingest"), "expected Phase 1 banner; got:\n{stderr_contents}");
+    assert!(stdout_contents.contains("=== Phase 1 -- Ingest"), "expected Phase 1 banner; got:\n{stdout_contents}");
 }
 
 #[test]
 fn quiet_flag_suppresses_progress_lines_but_keeps_banner() {
     let pcap = "/tmp/wpawolf_progress_quiet.pcap";
     let out = "/tmp/wpawolf_progress_quiet.22000";
-    let stderr_path = "/tmp/wpawolf_progress_quiet.stderr";
+    let stdout_path = "/tmp/wpawolf_progress_quiet.stdout";
     let _ = fs::remove_file(out);
-    let _ = fs::remove_file(stderr_path);
+    let _ = fs::remove_file(stdout_path);
     fs::write(pcap, minimal_pcap()).unwrap();
 
-    let stderr_file = fs::File::create(stderr_path).unwrap();
+    let stdout_file = fs::File::create(stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
         .args(["--22000-out", out, "--quiet", pcap])
-        .stderr(stderr_file)
+        .stdout(stdout_file)
         .status()
         .unwrap();
     assert!(status.success(), "wpawolf must exit 0");
 
-    let stderr_contents = fs::read_to_string(stderr_path).unwrap();
+    let stdout_contents = fs::read_to_string(stdout_path).unwrap();
     assert!(
-        !stderr_contents.lines().any(|l| l.starts_with("[progress]")),
-        "--quiet must suppress every [progress] line; got:\n{stderr_contents}"
+        !stdout_contents.lines().any(|l| l.starts_with("[progress]")),
+        "--quiet must suppress every [progress] line; got:\n{stdout_contents}"
     );
     // Closing banner is still required.
     assert!(
-        stderr_contents.contains("=== Phase 1 -- Ingest"),
-        "even with --quiet the closing banner must be intact; got:\n{stderr_contents}"
+        stdout_contents.contains("=== Phase 1 -- Ingest"),
+        "even with --quiet the closing banner must be intact; got:\n{stdout_contents}"
     );
 }
