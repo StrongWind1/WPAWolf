@@ -653,6 +653,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // endian / DLT distribution rather than only the last file's values.
         stats.input_file_count += 1;
         let meta = reader.file_metadata();
+        // Save before meta fields are moved into stats HashMaps below.
+        let file_fmt = meta.format.clone();
+        let file_dlt = meta.dlt_desc.clone();
         *stats.file_formats_seen.entry(meta.format).or_insert(0) += 1;
         *stats.endians_seen.entry(meta.endian.to_owned()).or_insert(0) += 1;
         *stats.dlt_descs_seen.entry(meta.dlt_desc).or_insert(0) += 1;
@@ -836,6 +839,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.truncated_capture_files += 1;
                     stats.unreadable_packets += 1;
                     logger.log_capture_read_error(path, &format!("{e}"));
+                    debug.capture_error(&path.display().to_string(), &e.to_string());
                     break;
                 },
             }
@@ -848,12 +852,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 file_idx + 1,
                 total_inputs,
                 &path.display().to_string(),
+                &file_fmt,
+                &file_dlt,
                 stats.total_packets - pre_packets,
                 post_eapol - pre_eapol,
                 stats.pmkids_found - pre_pmkid,
                 message_store.group_count(),
             );
-            debug.memory_check(&format!("Phase 1 file {}/{total_inputs}: {}", file_idx + 1, path.display()));
+            debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
         }
 
         // --- Per-file emit (--per-file mode only) ---
@@ -914,6 +920,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // populated, resolve them using essid_map lookup, ACK-based AP discovery, or flag fallback.
     // In `--per-file` mode the resolve already ran per-file inside the ingest loop.
     if !cli.per_file && !pending_eapol.is_empty() {
+        let wds_count = pending_eapol.len();
         resolve_wds_eapol(
             &pending_eapol,
             &essid_map,
@@ -923,6 +930,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &mut stats,
             &mut logger,
         );
+        debug.wds_resolved(wds_count, 0);
     }
 
     // Snapshot ESSID count before handing off to output.
@@ -977,7 +985,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
         stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
 
-        // Phase 1 complete; log the store summary and the top heavy groups before Phase 4.
+        // Phase 1 complete; log the full store state and the top heavy groups before Phase 4.
         {
             let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
             debug.phase_done(
@@ -994,15 +1002,39 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             debug.memory_check("Phase 1 complete");
 
             if debug.enabled {
-                // Build top-25 group summaries sorted by Phase 4 cost.
+                // Build group summaries for the top-25 survey and cost-tier breakdown.
+                // Both come from the same single pass over the store.
                 let mut summaries: Vec<GroupSummary> = message_store
                     .groups()
                     .map(|(pair, msgs)| GroupSummary::from_messages(pair.ap, pair.sta, msgs))
-                    .filter(|g| g.cost > 0)
                     .collect();
+
+                let (mut cost_zero, mut cost_low, mut cost_medium, mut cost_heavy) = (0usize, 0usize, 0usize, 0usize);
+                for g in &summaries {
+                    match g.cost {
+                        0 => cost_zero += 1,
+                        1..=999 => cost_low += 1,
+                        1_000..=49_999 => cost_medium += 1,
+                        _ => cost_heavy += 1,
+                    }
+                }
+
                 summaries.sort_unstable_by_key(|g| std::cmp::Reverse(g.cost));
                 summaries.truncate(25);
                 let total_groups = message_store.group_count();
+
+                debug.pre_phase4_store_summary(
+                    stats.eapol_m1,
+                    stats.eapol_m2,
+                    stats.eapol_m3,
+                    stats.eapol_m4,
+                    total_groups,
+                    cost_zero,
+                    cost_low,
+                    cost_medium,
+                    cost_heavy,
+                    stats.eapol_type_saturated_dropped,
+                );
                 debug.top_groups(&summaries, total_groups);
             }
 

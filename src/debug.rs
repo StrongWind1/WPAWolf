@@ -2,10 +2,27 @@
 //!
 //! `DebugPrinter` writes timestamped, phase-annotated lines to stdout. When `enabled = false`
 //! every method is a no-op except `memory_check`, which always fires a `[MEMORY WARNING]` line
-//! when the system's used-RAM fraction exceeds `MEM_WARN_PCT` (80 %). The per-group Phase 4
-//! logging is the primary tool for diagnosing OOM crashes caused by rotating-ANonce captures:
-//! it shows every group's message-type breakdown and estimated pairing cost immediately before
-//! the allocations that can exhaust memory.
+//! when the system's used-RAM fraction exceeds `MEM_WARN_PCT` (80 %).
+//!
+//! ## Volume design
+//!
+//! Large corpora (100k+ groups) produce one debug line per group by default, which bloats
+//! output to hundreds of thousands of lines. To stay usable, per-group lines are suppressed
+//! unless `cost >= HEAVY_GROUP_COST`; lighter groups are instead captured by a periodic
+//! progress ticker (one line every `GROUP_PROGRESS_INTERVAL` groups). The breakdown:
+//!
+//! | Category | Volume |
+//! |---|---|
+//! | Phase transitions | ~10 |
+//! | Per-file (start + done) | `2 * file_count` |
+//! | Per-file memory check | `file_count` |
+//! | WDS resolution | 1 |
+//! | Pre-Phase-4 summary (tiers + top-25) | ~30 |
+//! | Phase 4 progress tickers | `groups / 5000` |
+//! | Phase 4 HEAVY groups (start + done + mem) | `3 * heavy_count` |
+//! | Capture parse errors | `error_count` |
+//!
+//! On a 282k-group corpus this yields ~5 500 lines vs 850 000 without filtering.
 
 use std::io::Write as _;
 use std::time::Instant;
@@ -14,23 +31,26 @@ use crate::types::{MacAddr, MsgType};
 
 // --- Constants ---
 
-/// Fraction of total RAM used (0-100) above which `memory_check` always prints.
+/// Fraction of total RAM (0-100) above which `memory_check` always prints, even
+/// without `--debug`. Matches the threshold described in the `--debug` help text.
 const MEM_WARN_PCT: f64 = 80.0;
 
-/// Groups with an estimated pairing cost above this threshold get a `[HEAVY GROUP]` marker
-/// on the group-start line so they stand out in a long debug trace.
-const HEAVY_GROUP_COST: u64 = 50_000;
+/// Groups above this cost get full per-group logging and a `[HEAVY]` flag in the survey.
+/// Lighter groups are tallied but not individually logged.
+pub const HEAVY_GROUP_COST: u64 = 50_000;
+
+/// Phase 4 progress ticker interval: emit one line every this many completed groups.
+const GROUP_PROGRESS_INTERVAL: usize = 5_000;
 
 // --- DebugPrinter ---
 
 /// Diagnostic output driver for `--debug` mode.
 ///
-/// All writes go to stdout via `stdout().lock()` so output is interleaved cleanly
-/// with the stats banner even in multi-threaded Phase 4. `DebugPrinter` is `Send + Sync`
-/// (only holds a `bool` and an `Instant`) and may be shared across scoped threads.
+/// `Send + Sync` (holds only a `bool` and an `Instant`). Safe to share across
+/// `std::thread::scope` workers in the parallel Phase 4 path.
 #[derive(Debug)]
 pub struct DebugPrinter {
-    /// When `false` all methods except `memory_check` are no-ops.
+    /// `false` = every method except `memory_check` is a no-op.
     pub enabled: bool,
     start: Instant,
 }
@@ -64,7 +84,7 @@ impl DebugPrinter {
         self.emit(&format!("=== Phase {num} {name} START ==={rss}"));
     }
 
-    /// Logs the completion of a pipeline phase with a free-form detail string and RSS.
+    /// Logs the end of a pipeline phase with a detail string and RSS.
     pub fn phase_done(&self, num: u8, name: &str, detail: &str) {
         if !self.enabled {
             return;
@@ -73,9 +93,9 @@ impl DebugPrinter {
         self.emit(&format!("=== Phase {num} {name} DONE  === {detail}{rss}"));
     }
 
-    // --- Phase 1: per-file ingestion ---
+    // --- Phase 1: per-file ---
 
-    /// Logged immediately before a file is opened.
+    /// Logged before a file is opened.
     pub fn file_start(&self, idx: usize, total: usize, path: &str, size_bytes: u64) {
         if !self.enabled {
             return;
@@ -83,12 +103,15 @@ impl DebugPrinter {
         self.emit(&format!("file [{idx:>7}/{total}] START  size={:>10}  {path}", human_bytes(size_bytes)));
     }
 
-    /// Logged after a file finishes, showing delta counts vs the start-of-file baseline.
+    /// Logged after a file finishes. `fmt` is the file format string from `FileMetadata`
+    /// (e.g. `"pcap 2.4"`, `"pcapng"`); `dlt` is the link-layer descriptor string.
     pub fn file_done(
         &self,
         idx: usize,
         total: usize,
         path: &str,
+        fmt: &str,
+        dlt: &str,
         delta_packets: u64,
         delta_eapol: u64,
         delta_pmkid: u64,
@@ -99,27 +122,76 @@ impl DebugPrinter {
         }
         let rss = rss_tag();
         self.emit(&format!(
-            "file [{idx:>7}/{total}] DONE   pkt={delta_packets:>8} eapol={delta_eapol:>6} pmkid={delta_pmkid:>5} store_groups={store_groups}{rss}  {path}"
+            "file [{idx:>7}/{total}] DONE   pkt={delta_packets:>8} eapol={delta_eapol:>6} pmkid={delta_pmkid:>5}  store_groups={store_groups}  fmt={fmt} dlt={dlt}{rss}  {path}"
         ));
     }
 
-    // --- Pre-Phase-4: heavy-group survey ---
+    /// Logs a capture-level parse error (truncated record, corrupt length field, etc.).
+    /// These normally go only to `--log`; `--debug` echoes them to stdout so the operator
+    /// can correlate with the per-file progress without grepping a separate log file.
+    pub fn capture_error(&self, path: &str, reason: &str) {
+        if !self.enabled {
+            return;
+        }
+        self.emit(&format!("capture_error  {reason}  [{path}]"));
+    }
 
-    /// Prints the top `n` (AP, STA) groups sorted by Phase 4 pairing cost.
+    // --- Phase 1.5: WDS deferred EAPOL ---
+
+    /// Logged after Phase 1.5 resolves deferred WDS relay frames.
+    pub fn wds_resolved(&self, resolved: usize, still_pending: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.emit(&format!("WDS deferred EAPOL: {resolved} resolved, {still_pending} unresolvable (no ESSID context)"));
+    }
+
+    // --- Pre-Phase-4 store summary ---
+
+    /// Full store breakdown logged immediately before Phase 4 starts.
     ///
-    /// Call this once after Phase 1 completes and before Phase 4 starts. Entries with
-    /// cost 0 are excluded (they produce no pairs regardless). Groups above
-    /// `HEAVY_GROUP_COST` are flagged `[HEAVY]` so they stand out in the trace.
-    pub fn top_groups(&self, groups: &[GroupSummary], store_total: usize) {
+    /// Covers: per-type EAPOL totals, cost-tier group counts, saturation drops, and
+    /// the top-`n` groups by pairing cost (from `top_groups`). Shows the exact load
+    /// Phase 4 is about to process so OOM culprits are visible before the crash.
+    #[allow(clippy::too_many_arguments, reason = "store summary: every field is a distinct diagnostic dimension")]
+    pub fn pre_phase4_store_summary(
+        &self,
+        m1_total: u64,
+        m2_total: u64,
+        m3_total: u64,
+        m4_total: u64,
+        groups_total: usize,
+        cost_zero: usize,
+        cost_low: usize,
+        cost_medium: usize,
+        cost_heavy: usize,
+        saturated_dropped: u64,
+    ) {
         if !self.enabled {
             return;
         }
         let rss = rss_tag();
-        self.emit(&format!("top-{} groups by Phase-4 cost (of {store_total} total){rss}:", groups.len()));
+        self.emit(&format!(
+            "store before Phase 4:  {groups_total} groups  m1={m1_total} m2={m2_total} m3={m3_total} m4={m4_total}{rss}"
+        ));
+        self.emit(&format!(
+            "  cost tiers:  zero={cost_zero}  low(1-999)={cost_low}  medium(1k-49k)={cost_medium}  heavy(>=50k)={cost_heavy}"
+        ));
+        if saturated_dropped > 0 {
+            self.emit(&format!("  per-type cap: {saturated_dropped} frames dropped (--max-eapol-per-type cap hit)"));
+        }
+    }
+
+    /// Prints the top groups by Phase 4 cost. Call after `pre_phase4_store_summary`.
+    pub fn top_groups(&self, groups: &[GroupSummary], store_total: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.emit(&format!("  top-{} by cost (of {store_total} total):", groups.len()));
         for (rank, g) in groups.iter().enumerate() {
             let heavy = if g.cost >= HEAVY_GROUP_COST { "  [HEAVY]" } else { "" };
             self.emit(&format!(
-                "  {:>4}.  ap={}  sta={}  m1={:>6} m2={:>6} m3={:>4} m4={:>4}  cost={:>12}{heavy}",
+                "    {:>4}.  ap={}  sta={}  m1={:>5} m2={:>5} m3={:>4} m4={:>4}  cost={:>12}{heavy}",
                 rank + 1,
                 g.ap,
                 g.sta,
@@ -132,46 +204,61 @@ impl DebugPrinter {
         }
     }
 
-    // --- Phase 4: per-group pairing ---
+    // --- Phase 4: per-group (HEAVY only) and progress ticker ---
 
-    /// Logged immediately before pairing a single (AP, STA) group.
+    /// Logged before pairing a group. Only emits when `cost >= HEAVY_GROUP_COST`;
+    /// lighter groups are captured by the progress ticker instead.
     pub fn group_start(&self, ap: MacAddr, sta: MacAddr, m1: usize, m2: usize, m3: usize, m4: usize, cost: u64) {
-        if !self.enabled {
+        if !self.enabled || cost < HEAVY_GROUP_COST {
             return;
         }
-        let heavy = if cost >= HEAVY_GROUP_COST { "  [HEAVY]" } else { "" };
         self.emit(&format!(
-            "group ap={ap}  sta={sta}  m1={m1:>5} m2={m2:>5} m3={m3:>4} m4={m4:>4}  cost={cost:>10}{heavy}"
+            "group ap={ap}  sta={sta}  m1={m1:>5} m2={m2:>5} m3={m3:>4} m4={m4:>4}  cost={cost:>10}  [HEAVY]"
         ));
     }
 
-    /// Logged after pairing completes for a group, including wall-clock time.
-    pub fn group_done(&self, ap: MacAddr, sta: MacAddr, pairs: usize, elapsed_us: u128) {
+    /// Logged after pairing a group. Only emits when `cost >= HEAVY_GROUP_COST`.
+    pub fn group_done(&self, ap: MacAddr, sta: MacAddr, pairs: usize, elapsed_us: u128, cost: u64) {
+        if !self.enabled || cost < HEAVY_GROUP_COST {
+            return;
+        }
+        self.emit(&format!("group ap={ap}  sta={sta}  DONE  {pairs:>8} pairs  {elapsed_us}us  [HEAVY]"));
+    }
+
+    /// Periodic progress line emitted every `GROUP_PROGRESS_INTERVAL` completed groups.
+    /// `groups_done` is the number of groups completed so far (1-based after the last
+    /// increment), `total` is the full group count, `pairs_so_far` is the running pair total.
+    pub fn group_progress(&self, groups_done: usize, total: usize, pairs_so_far: usize) {
         if !self.enabled {
             return;
         }
-        self.emit(&format!("group ap={ap}  sta={sta}  DONE  {pairs:>8} pairs  {elapsed_us}us"));
+        let rss = rss_tag();
+        let pct = groups_done.checked_mul(100).map_or(100, |n| n / total.max(1));
+        self.emit(&format!(
+            "Phase4 progress  {groups_done:>7}/{total} groups ({pct:>3}%)  {pairs_so_far:>10} pairs{rss}"
+        ));
     }
 
     // --- Memory monitoring ---
 
-    /// Reads system memory on Linux and either:
-    ///   - Always emits `[MEMORY WARNING]` when usage >= `MEM_WARN_PCT`, or
-    ///   - Emits a regular `[debug]` memory line when `self.enabled` and below threshold.
+    /// Checks system RAM on Linux.
     ///
-    /// `context` describes what the program is doing at the moment of the check; it is
-    /// appended verbatim to the output line so operators can correlate the warning with
-    /// the specific phase and group. Returns `Some(pct)` on Linux, `None` elsewhere.
+    /// Always emits `[MEMORY WARNING]` when usage >= `MEM_WARN_PCT`, regardless of
+    /// whether `--debug` is set. Below the threshold, emits a regular `[debug]` line only
+    /// when `enabled` is true.
+    ///
+    /// In Phase 4, this is called only for HEAVY groups (not every group) to avoid
+    /// flooding the output with 280k memory readings.
     #[allow(
         clippy::must_use_candidate,
-        reason = "callers that ignore the percentage are fine -- the warning prints as a side effect"
+        reason = "callers that discard the percentage are fine -- the warning prints as a side effect"
     )]
     pub fn memory_check(&self, context: &str) -> Option<f64> {
         let (total_kb, avail_kb) = ram_info()?;
         let used_kb = total_kb.saturating_sub(avail_kb);
         #[allow(
             clippy::cast_precision_loss,
-            reason = "coarse percentage display; precision loss at multi-TB RAM is acceptable"
+            reason = "coarse % display; precision loss above multi-TB RAM is irrelevant"
         )]
         let pct = used_kb as f64 / total_kb as f64 * 100.0;
         let used_mib = used_kb / 1024;
@@ -192,11 +279,8 @@ impl DebugPrinter {
 
 // --- GroupSummary ---
 
-/// Pre-computed per-(AP, STA) group statistics for the top-groups display.
-///
-/// Built by `main.rs` from the fully-populated `MessageStore` using
-/// `pair::estimate_group_cost` before Phase 4 starts. Kept separate from
-/// `DebugPrinter` to avoid a circular crate dependency between `debug` and `pair`.
+/// Pre-computed per-(AP, STA) group statistics used by the top-groups survey and
+/// the pre-Phase-4 cost-tier breakdown in `main.rs`.
 #[derive(Debug)]
 pub struct GroupSummary {
     /// AP MAC address.
@@ -211,12 +295,12 @@ pub struct GroupSummary {
     pub m3: usize,
     /// Number of stored M4 messages.
     pub m4: usize,
-    /// Estimated Phase 4 pairing cost (sum of all N#E# cross-product sizes).
+    /// Estimated Phase 4 pairing cost (sum of all six N#E# cross-product sizes).
     pub cost: u64,
 }
 
 impl GroupSummary {
-    /// Builds a `GroupSummary` from a message slice.
+    /// Builds a `GroupSummary` from a message slice, computing per-type counts and cost.
     #[must_use]
     pub fn from_messages(ap: MacAddr, sta: MacAddr, msgs: &[crate::store::messages::EapolMessage]) -> Self {
         let (mut m1, mut m2, mut m3, mut m4) = (0usize, 0usize, 0usize, 0usize);
@@ -240,7 +324,7 @@ impl GroupSummary {
 
 // --- Platform helpers ---
 
-/// Reads `MemTotal` and `MemAvailable` from `/proc/meminfo` (Linux).
+/// Returns `(MemTotal_kb, MemAvailable_kb)` from `/proc/meminfo` on Linux.
 #[cfg(target_os = "linux")]
 fn ram_info() -> Option<(u64, u64)> {
     let content = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -264,12 +348,10 @@ fn ram_info() -> Option<(u64, u64)> {
     None
 }
 
-/// Returns `"  rss=NMiB"` if readable, empty string otherwise.
 fn rss_tag() -> String {
     crate::progress::current_rss_mib().map_or_else(String::new, |r| format!("  rss={r}MiB"))
 }
 
-/// Formats a byte count as a human-readable string (`B`, `KiB`, `MiB`, `GiB`).
 #[allow(clippy::cast_precision_loss, reason = "coarse display; precision loss above 4 PiB is irrelevant")]
 fn human_bytes(bytes: u64) -> String {
     if bytes >= 1 << 30 {
@@ -281,4 +363,10 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes}B")
     }
+}
+
+/// Returns the Phase 4 progress-ticker interval (groups between ticker lines).
+#[must_use]
+pub const fn group_progress_interval() -> usize {
+    GROUP_PROGRESS_INTERVAL
 }

@@ -93,9 +93,10 @@ pub struct PairedHash {
 
 // --- Orchestration ---
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::debug::DebugPrinter;
+use crate::debug::{DebugPrinter, HEAVY_GROUP_COST, group_progress_interval};
 use crate::pair::collapse::collapse;
 use crate::pair::combos::{PairConfig, generate};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
@@ -186,6 +187,12 @@ pub fn pair_all_groups(
     }
 
     let effective_threads = thread_count.max(1).min(groups.len());
+    let total_groups = groups.len();
+
+    // Atomic counters shared between the serial / parallel paths for the progress ticker.
+    // Relaxed ordering is fine: the ticker is display-only and does not gate correctness.
+    let groups_done = AtomicUsize::new(0);
+    let pairs_done = AtomicUsize::new(0);
 
     // --- Serial fast path ---
     if effective_threads <= 1 {
@@ -194,14 +201,21 @@ pub fn pair_all_groups(
         for &(mac_pair, messages) in &groups {
             let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
             debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
-            debug.memory_check(&format!(
-                "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
-                mac_pair.ap, mac_pair.sta
-            ));
+            if cost >= HEAVY_GROUP_COST {
+                debug.memory_check(&format!(
+                    "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
+                    mac_pair.ap, mac_pair.sta
+                ));
+            }
             let t0 = Instant::now();
             let (pairs, nc) = pair_one_group(mac_pair, messages, config);
             let elapsed_us = t0.elapsed().as_micros();
-            debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us);
+            debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+            let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
+            pairs_done.fetch_add(pairs.len(), Ordering::Relaxed);
+            if done % group_progress_interval() == 0 || done == total_groups {
+                debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
+            }
             all_pairs.extend(pairs);
             merge_nc_stats(&mut all_nc, nc);
         }
@@ -227,6 +241,8 @@ pub fn pair_all_groups(
     // Spawn scoped threads -- each thread pairs its assigned groups and
     // returns (pairs, nc_stats). Stats merge after join.
     let groups_ref = &groups;
+    let groups_done_ref = &groups_done;
+    let pairs_done_ref = &pairs_done;
     std::thread::scope(|s| {
         let handles: Vec<_> = buckets
             .iter()
@@ -241,14 +257,21 @@ pub fn pair_all_groups(
                         };
                         let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
                         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
-                        debug.memory_check(&format!(
-                            "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
-                            mac_pair.ap, mac_pair.sta
-                        ));
+                        if cost >= HEAVY_GROUP_COST {
+                            debug.memory_check(&format!(
+                                "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
+                                mac_pair.ap, mac_pair.sta
+                            ));
+                        }
                         let t0 = Instant::now();
                         let (pairs, nc) = pair_one_group(mac_pair, messages, config);
                         let elapsed_us = t0.elapsed().as_micros();
-                        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us);
+                        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+                        let done = groups_done_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        pairs_done_ref.fetch_add(pairs.len(), Ordering::Relaxed);
+                        if done % group_progress_interval() == 0 || done == total_groups {
+                            debug.group_progress(done, total_groups, pairs_done_ref.load(Ordering::Relaxed));
+                        }
                         local_pairs.extend(pairs);
                         merge_nc_stats(&mut local_nc, nc);
                     }
