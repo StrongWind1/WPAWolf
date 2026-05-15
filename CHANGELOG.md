@@ -13,7 +13,7 @@ OOM prevention, full diagnostic mode, stdout migration, and per-failure-reason E
 - **All output routed to stdout; stderr is now silent.** Progress lines, the stats banner, `--mem-stats` output, and all `[log]` category warnings previously written to stderr are now written to stdout. stderr produces no output under any input. This aligns `wpawolf` with standard UNIX pipeline conventions where all user-visible diagnostic text travels on the same stream as hash output only when `-o /dev/stdout` is used, and makes log capture trivial (`wpawolf ... > run.log 2>&1` becomes `wpawolf ... > run.log`). Hash files written to paths supplied by `-o`, `--22000-out`, etc. are unaffected -- those go to files, not stdout.
 - **`--debug` diagnostic mode.** Emits timestamped, phase-annotated lines to stdout that give the operator a real-time picture of Phase 1–4 progress without requiring a post-run `--log` file. Volume is bounded by design: per-group lines are suppressed unless `cost ≥ 50 000` (HEAVY groups); lighter groups are covered by a progress ticker every 5 000 completed groups; the fan-out loop emits a ticker every 500 000 pairs and a summary line after the loop. On a 282 000-group corpus this yields approximately 5 500 debug lines. Key diagnostic outputs: Phase transition start/done with RSS; per-file format/DLT/packet/EAPOL/PMKID deltas; pre-Phase-4 store summary with cost-tier breakdown (zero, low 1–999, medium 1k–49k, heavy ≥50k), saturated-pair list (each `(AP, STA, msg_type)` that hit the per-type cap), and top-25 groups by pairing cost; Phase 4 HEAVY-group start/done with pair count and elapsed time; Phase 4 fan-out progress and a post-loop summary showing `in`, `written`, `dedup_dropped`, `nc_collapsed`, and `nc_clusters`; Linux memory check at each per-file boundary (always prints `[MEMORY WARNING]` when system RAM exceeds 80 % regardless of whether `--debug` is set).
 - **`[eapol_key_rejected]` log category.** A new `--log` category that fires at the `eapol_llc_invalid` increment site for frames that passed the LLC/packet-type gate (`EtherType 0x888E/0x88C7`, packet type = 3 = EAPOL-Key) but failed the EAPOL-Key parser for a structural reason other than a garbage nonce or MIC (those are already fully captured by `[invalid_nonce]` / `[invalid_mic]`). Each line carries `timestamp_us`, `ap=`, `sta=`, `reason=` (one of `bad_llc_header`, `bad_ethertype`, `truncated_short`, `bad_descriptor_type`, `bad_kdv`, `truncated_24mic`, `classify_flags_invalid`), and `bytes=` (first 32 raw bytes in lowercase colon-hex for cross-referencing with tshark / Wireshark). On the ALL_CAPS corpus: 15 589 of the 15 624 `eapol_llc_invalid` frames are spec-correct M4 null-nonce drops already captured by `[invalid_nonce]`; the remaining 25 log entries represent 7 unique `(AP, STA)` frame patterns across 3 capture files (KDV=4 vendor extensions, non-standard descriptor types, one tshark-confirmed `[Malformed Packet]`). Corpus cross-check against hcxpcapngtool and tshark confirms zero salvageable data in any structural-failure category.
-- 786 tests (up from 833 at v0.3.7 base; recount: 786 pass clean after the v0.3.8 additions); `make check-all` passes clean.
+- 844 tests (up from 833 in v0.3.7); `make check-all` passes clean.
 
 ### v0.3.7 -- 2026-05-12
 
@@ -116,7 +116,7 @@ Five explicit phases, each owned by a discrete module:
 | 2 Decode  | `src/link/` + `src/ieee80211/` | radiotap/PPI/Prism/AVS strip; 802.11 frame, IE, RSN, EAPOL, EAP, FT parsing |
 | 3 Extract | `src/extract/` + `src/store/` | per-subtype handlers populate AP / STA / EAPOL / PMKID / ESSID / aux stores |
 | 4 Emit    | `src/pair/` + `src/output/`   | N#E# pairing, hashcat 22000/37100 line formatting, dedup, wordlists |
-| 5 Report  | `src/stats.rs`   | operator-facing summary printed unconditionally on stderr |
+| 5 Report  | `src/stats.rs`   | operator-facing summary printed unconditionally on stdout |
 
 Each `src/**/*.rs` carries a `//! Phase N -- ...` doc-comment naming its phase and the relevant ARCHITECTURE.md section.
 
@@ -184,10 +184,20 @@ Auxiliary outputs and runtime knobs.
 | `--eapoltimeout [N]` | output filter: session window in seconds (omit = unlimited) |
 | `--rc-drift [N]`     | output filter: replay-counter drift tolerance (default 8) |
 | `--dedup-hash-combos` | output filter: collapse 6 N#E# combos to 3 unique per session |
+| `--nc-dedup`          | output filter: collapse near-identical-nonce siblings into one FLAG_NC survivor |
+| `--nc-tolerance N`    | NC-dedup cluster span tolerance (default 8, matches hashcat `NONCE_ERROR_CORRECTIONS`) |
+| `--strict`            | shortcut: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --per-file --nc-dedup` |
+| `--per-file`          | pair + emit per input file, then clear per-file stores (bounded memory) |
+| `--max-eapol-per-type N` | per-(AP, STA) cap per EAPOL type (default 2048; 0 = unlimited) |
 | `--threads N`         | pairing thread count (default = CPU count) |
-| `--wordlist-scan-ies` | opportunistic printable-ASCII run scan from IE bodies into `-W` |
+| `--debug`             | timestamped Phase 1-4 diagnostic output to stdout |
+| `--quiet`             | suppress progress lines; closing banner still prints |
+| `--mem-stats`         | print per-store byte-count table after closing banner |
+| `--essid-collapse-min N` | ESSID fan-out threshold (default 3) |
+| `--essid-collapse-ratio N` | ESSID dominance ratio (default 10) |
+| `--wordlist-scan-ies FILE` | opportunistic printable-ASCII run scan from IE bodies to FILE (standalone since v0.3.3) |
 
-The defaults emit all 6 N#E# combos per session and apply no time or replay-counter filtering -- maximum hash yield. Output filter flags narrow that further. The closing stats summary on stderr is unconditional; there is no `--stats` toggle.
+The defaults emit all 6 N#E# combos per session and apply no time or replay-counter filtering -- maximum hash yield. Output filter flags narrow that further. The closing stats summary on stdout is unconditional; there is no `--stats` toggle.
 
 ## Stats output (ARCHITECTURE.md §9)
 
@@ -216,7 +226,7 @@ The parity test parses the oracle banner, refuses stale versions, and hard-fails
 
 ## Quality bar
 
-- 735 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
+- 844 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
 - Sibling workspace crate `tools/fixturegen` emits a deterministic pcap/pcapng corpus covering all 11 hash types, the 20 PMKID extraction sites, the 6 N#E# combos, and the link-layer / container variants. Crypto primitives anchored to KAT vectors
 - Strict clippy: `pedantic`, `nursery`, `cargo` enabled; `-D warnings`
 - `#![forbid(unsafe_code)]` at crate root

@@ -258,6 +258,20 @@ struct Cli {
     #[arg(long = "wordlist-scan-ies", value_name = "FILE")]
     wordlist_scan_ies: Option<std::path::PathBuf>,
 
+    /// IE-scan delta: only entries NOT already in `-E` / `-R` / `-W`
+    ///
+    /// Same source data as `--wordlist-scan-ies` (printable-ASCII runs >= 8 bytes
+    /// from management-frame IE bodies), but at write time every entry that appears
+    /// in `-E`, `-R`, or `-W` is suppressed. The result is the set of strings that
+    /// the IE scanner found but the structured parsers did not surface -- the delta
+    /// an operator can append to a cracking wordlist without manually de-duplicating.
+    ///
+    /// Requires no other flag to be set (the IE-scan store is populated whenever
+    /// either `--wordlist-scan-ies` or `--wordlist-scan-ies-delta` is configured).
+    /// Both flags can be used simultaneously with different paths.
+    #[arg(long = "wordlist-scan-ies-delta", value_name = "FILE")]
+    wordlist_scan_ies_delta: Option<std::path::PathBuf>,
+
     /// [output filter] only collapse SSID variants when an AP has more than N SSIDs (default 3)
     ///
     /// One AP can show up under several SSID names: a few legitimately (dual-band
@@ -498,10 +512,11 @@ fn main() {
         || cli.identity_output.is_some()
         || cli.username_output.is_some()
         || cli.device_output.is_some()
-        || cli.wordlist_scan_ies.is_some();
+        || cli.wordlist_scan_ies.is_some()
+        || cli.wordlist_scan_ies_delta.is_some();
     if !has_output {
         println!(
-            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, or --wordlist-scan-ies)"
+            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, --wordlist-scan-ies, or --wordlist-scan-ies-delta)"
         );
         println!("Run with --help for usage.");
         std::process::exit(1);
@@ -557,7 +572,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         populate_device: cli.device_output.is_some(),
         populate_identity: cli.identity_output.is_some(),
         populate_username: cli.username_output.is_some(),
-        scan_ies: cli.wordlist_scan_ies.is_some(),
+        scan_ies: cli.wordlist_scan_ies.is_some() || cli.wordlist_scan_ies_delta.is_some(),
     };
 
     // Expand any directory arguments to the recursive set of capture files they
@@ -596,6 +611,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         probe_essid_list: cli.probe_output.clone(),
         wordlist: cli.wordlist_output.clone(),
         wordlist_scan_ies: cli.wordlist_scan_ies.clone(),
+        wordlist_scan_ies_delta: cli.wordlist_scan_ies_delta.clone(),
         identity_list: cli.identity_output.clone(),
         username_list: cli.username_output.clone(),
         device_info: cli.device_output.clone(),

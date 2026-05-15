@@ -169,6 +169,66 @@ fn wordlist_scan_ies_writes_to_dedicated_file_and_not_to_minus_w() {
 }
 
 #[test]
+fn wordlist_scan_ies_delta_subtracts_e_r_w_entries() {
+    let pcap_path = "/tmp/wpawolf_t22_delta_fixture.pcap";
+    let scan_path = "/tmp/wpawolf_t22_delta.scanies";
+    let delta_path = "/tmp/wpawolf_t22_delta.delta";
+    let essid_path = "/tmp/wpawolf_t22_delta.essids";
+    let probe_path = "/tmp/wpawolf_t22_delta.probes";
+    let wordlist_path = "/tmp/wpawolf_t22_delta.wordlist";
+    let dummy_hash = "/tmp/wpawolf_t22_delta.22000";
+
+    let ssid = b"TestSSID";
+    let firmware = b"VendorFirmware-1.2.3";
+
+    fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
+
+    let _ = fs::remove_file(scan_path);
+    let _ = fs::remove_file(delta_path);
+    let _ = fs::remove_file(essid_path);
+    let _ = fs::remove_file(probe_path);
+    let _ = fs::remove_file(wordlist_path);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
+        .args([
+            "--22000-out",
+            dummy_hash,
+            "-E",
+            essid_path,
+            "-R",
+            probe_path,
+            "-W",
+            wordlist_path,
+            "--wordlist-scan-ies",
+            scan_path,
+            "--wordlist-scan-ies-delta",
+            delta_path,
+            pcap_path,
+        ])
+        .status()
+        .expect("failed to spawn wpawolf");
+    assert!(status.success(), "wpawolf (delta) exited non-zero: {status}");
+
+    let lines_scan = read_lines(Path::new(scan_path));
+    let lines_delta = read_lines(Path::new(delta_path));
+    let lines_e = read_lines(Path::new(essid_path));
+    let lines_w = read_lines(Path::new(wordlist_path));
+
+    // -E and -W both contain the SSID.
+    assert_contains(&lines_e, "TestSSID");
+    assert_contains(&lines_w, "TestSSID");
+    // The SSID IE is >=8 bytes so the IE scanner picks it up too.
+    assert_contains(&lines_scan, "TestSSID");
+    // The firmware string is only in scan-ies, NOT in -W.
+    assert_contains(&lines_scan, "VendorFirmware-1.2.3");
+    assert_not_contains(&lines_w, "VendorFirmware-1.2.3");
+
+    // Delta: SSID must be subtracted (it is in -E and -W), firmware survives.
+    assert_not_contains(&lines_delta, "TestSSID");
+    assert_contains(&lines_delta, "VendorFirmware-1.2.3");
+}
+
+#[test]
 fn wordlist_scan_ies_runs_independently_of_dash_w() {
     // Without `-W` configured at all the IE-scan output must still work --
     // the new flag is no longer a "scan + add to -W" tag-along; it is its

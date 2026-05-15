@@ -6,6 +6,7 @@
 //! (0x20-0x7E) as plain text, all others as `$HEX[<hex>]`. All lists are sorted
 //! for deterministic output.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use crate::store::auxiliary::{EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore};
@@ -119,6 +120,49 @@ pub fn write_wordlist_scan_ies(scan_ies_store: &WordlistScanIesStore, out: &mut 
     Ok(count)
 }
 
+/// Writes the IE-scan entries that do NOT appear in `-E`, `-R`, or `-W`.
+///
+/// Same sort + trim + autohex contract as `write_wordlist_scan_ies`. The
+/// subtraction set is the byte-level union of `EssidSet`, `ProbeEssidSet`,
+/// and `WordlistStore` (which already includes control-byte-split fragments).
+/// An IE-scan entry is suppressed if its raw bytes exactly match any entry in
+/// the subtraction set. Used for `--wordlist-scan-ies-delta FILE` output.
+///
+/// # Errors
+///
+/// Returns `Err` on I/O failure.
+pub fn write_wordlist_scan_ies_delta(
+    scan_ies_store: &WordlistScanIesStore,
+    essid_set: &EssidSet,
+    probe_essid_set: &ProbeEssidSet,
+    wordlist_store: &WordlistStore,
+    out: &mut impl Write,
+) -> Result<usize> {
+    let mut subtract: HashSet<&[u8]> =
+        HashSet::with_capacity(essid_set.len() + probe_essid_set.len() + wordlist_store.len());
+    for e in essid_set.iter() {
+        subtract.insert(e.as_slice());
+    }
+    for e in probe_essid_set.iter() {
+        subtract.insert(e.as_slice());
+    }
+    for e in wordlist_store.iter() {
+        subtract.insert(e.as_slice());
+    }
+    let mut entries: Vec<&Vec<u8>> = scan_ies_store.iter().collect();
+    entries.sort_unstable();
+    let mut count = 0usize;
+    for entry in entries {
+        if subtract.contains(entry.as_slice()) {
+            continue;
+        }
+        if write_trimmed_autohex(entry, out)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Writes all unique EAP identity strings to `out`, one autohex-encoded entry per line.
 ///
 /// Identity strings come from EAP-Response/Identity frames per RFC 3748 §5.1.
@@ -177,7 +221,9 @@ mod tests {
     )]
 
     use super::*;
-    use crate::store::auxiliary::{EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistStore};
+    use crate::store::auxiliary::{
+        EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
+    };
 
     #[test]
     fn write_essid_list_empty() {
@@ -281,5 +327,65 @@ mod tests {
         assert_eq!(count, 1);
         // Pure ASCII -> plain text (autohex format)
         assert_eq!(out, b"admin\n");
+    }
+
+    #[test]
+    fn delta_subtracts_essid_probe_and_wordlist_entries() {
+        let mut scan = WordlistScanIesStore::new();
+        scan.insert(b"WNDR3300".to_vec());
+        scan.insert(b"VendorFirmware-1.2.3".to_vec());
+        scan.insert(b"TestSSID".to_vec());
+        scan.insert(b"linksysR0bbd15".to_vec());
+
+        let mut essid = EssidSet::new();
+        essid.insert(b"TestSSID");
+
+        let mut probe = ProbeEssidSet::new();
+        probe.insert(b"linksysR0bbd15");
+
+        let mut wl = WordlistStore::new();
+        wl.insert(b"WNDR3300".to_vec());
+
+        let mut out = Vec::new();
+        let count = write_wordlist_scan_ies_delta(&scan, &essid, &probe, &wl, &mut out).unwrap();
+        assert_eq!(count, 1);
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(text, "VendorFirmware-1.2.3\n");
+    }
+
+    #[test]
+    fn delta_empty_subtract_set_passes_everything_through() {
+        let mut scan = WordlistScanIesStore::new();
+        scan.insert(b"Firmware-X".to_vec());
+        scan.insert(b"AnotherRun".to_vec());
+
+        let mut out = Vec::new();
+        let count = write_wordlist_scan_ies_delta(
+            &scan,
+            &EssidSet::new(),
+            &ProbeEssidSet::new(),
+            &WordlistStore::new(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        let text = std::str::from_utf8(&out).unwrap();
+        assert!(text.contains("Firmware-X\n"));
+        assert!(text.contains("AnotherRun\n"));
+    }
+
+    #[test]
+    fn delta_all_subtracted_produces_empty_output() {
+        let mut scan = WordlistScanIesStore::new();
+        scan.insert(b"OnlyEntry".to_vec());
+
+        let mut wl = WordlistStore::new();
+        wl.insert(b"OnlyEntry".to_vec());
+
+        let mut out = Vec::new();
+        let count =
+            write_wordlist_scan_ies_delta(&scan, &EssidSet::new(), &ProbeEssidSet::new(), &wl, &mut out).unwrap();
+        assert_eq!(count, 0);
+        assert!(out.is_empty());
     }
 }
