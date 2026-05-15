@@ -301,6 +301,14 @@ fn process_msdu_payload(
     // frames and must NOT increment this counter.
     if is_eapol_key_packet(body) {
         stats.eapol_llc_invalid += 1;
+        // Garbage nonce/MIC are already logged by [invalid_nonce] / [invalid_mic].
+        // Only emit [eapol_key_rejected] for the remainder so the operator can see
+        // the exact structural reason (truncation, bad descriptor, bad KDV, etc.)
+        // without noise from the already-explained garbage-pattern drops.
+        let reason = eapol::parse_rejection_reason(body);
+        if reason != "garbage_nonce" && reason != "garbage_mic" {
+            logger.log_eapol_key_rejected(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), reason, body);
+        }
     }
 
     // --- EAP identity/username/outcome path ---

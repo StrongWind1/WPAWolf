@@ -196,6 +196,27 @@ impl Logger {
         ));
     }
 
+    /// Logs an EAPOL-Key frame that passed the LLC/packet-type gate but was rejected
+    /// by the EAPOL-Key parser for a reason other than a garbage nonce or MIC
+    /// (those are already captured by `[invalid_nonce]` / `[invalid_mic]`).
+    ///
+    /// `reason` is the string returned by `eapol::parse_rejection_reason`.
+    /// `raw` is the full MSDU body; the first 32 bytes are rendered as lowercase
+    /// hex in the `bytes=` field for cross-referencing with tshark / Wireshark.
+    pub fn log_eapol_key_rejected(
+        &mut self,
+        timestamp_us: u64,
+        ap_hex: impl std::fmt::Display,
+        sta_hex: impl std::fmt::Display,
+        reason: &str,
+        raw: &[u8],
+    ) {
+        let bytes_hex: String = raw.iter().take(32).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+        self.write_line(&format!(
+            "[eapol_key_rejected] {timestamp_us} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
+        ));
+    }
+
     /// Logs a PMKID rejected as a sentinel or repeating-pattern value.
     ///
     /// `kind` is one of `"null"` (AP placeholder meaning "no cached PMK"),

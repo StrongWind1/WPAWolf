@@ -600,6 +600,76 @@ pub fn parse(data: &[u8], direction: Option<FrameDirection>) -> Option<EapolKey>
     })
 }
 
+/// Diagnoses why [`parse`] returned `None` for a frame that passed the LLC/packet-type gate.
+///
+/// Walks the same validation steps as [`parse`] and returns a short static string
+/// naming the first failing constraint. Used at the `eapol_llc_invalid` logging
+/// site to give the operator an exact rejection reason without duplicating the
+/// full parse logic in the caller.
+///
+/// Returns `"garbage_nonce"` or `"garbage_mic"` for frames already counted by the
+/// dedicated `null_nonce_rejected` / `null_mic_rejected` stats; the caller can
+/// filter those to avoid redundant log entries.
+#[must_use]
+pub fn parse_rejection_reason(data: &[u8]) -> &'static str {
+    // Steps mirror parse() in declaration order.
+    if data.first() != Some(&DSAP) || data.get(1) != Some(&SSAP) || data.get(2) != Some(&CTRL) {
+        return "bad_llc_header";
+    }
+    let et_high = data.get(6);
+    let et_low = data.get(7);
+    let is_eapol = et_high == Some(&ETHERTYPE_EAPOL_HIGH) && et_low == Some(&ETHERTYPE_EAPOL_LOW);
+    let is_preauth = et_high == Some(&ETHERTYPE_PREAUTH_HIGH) && et_low == Some(&ETHERTYPE_PREAUTH_LOW);
+    if !is_eapol && !is_preauth {
+        return "bad_ethertype";
+    }
+    let Some(eapol) = data.get(LLC_SNAP_LEN..) else { return "truncated_at_llc" };
+    if eapol.get(1) != Some(&PACKET_TYPE_KEY) {
+        return "non_key_packet_type";
+    }
+    if eapol.len() < MIN_EAPOL_KEY_LEN_16 {
+        return "truncated_short";
+    }
+    let desc_type = *eapol.get(OFF_DESC_TYPE).unwrap_or(&0);
+    if desc_type != DESC_TYPE_RSN && desc_type != DESC_TYPE_WPA {
+        return "bad_descriptor_type";
+    }
+    let ki: u16 = eapol
+        .get(OFF_KEY_INFO..OFF_KEY_INFO + 2)
+        .and_then(|s| <[u8; 2]>::try_from(s).ok())
+        .map_or(0, u16::from_be_bytes);
+    let key_desc_version = (ki & 0x0007) as u8;
+    if key_desc_version > 3 {
+        return "bad_kdv";
+    }
+    let body_len_bytes: [u8; 2] = eapol.get(2..4).and_then(|s| s.try_into().ok()).unwrap_or([0u8; 2]);
+    let declared_body_len = u16::from_be_bytes(body_len_bytes) as usize;
+    let mic_len = detect_mic_width(eapol, declared_body_len);
+    if mic_len == 24 && eapol.len() < MIN_EAPOL_KEY_LEN_24 {
+        return "truncated_24mic";
+    }
+    // Nonce and MIC slices are in-bounds after the MIN_EAPOL_KEY_LEN checks above
+    // (nonce ends at offset 49, MIC at 97 for 16-B; both < 99 / 107).
+    if let Some(nonce_arr) = eapol.get(OFF_NONCE..OFF_NONCE + NONCE_LEN).and_then(|s| <[u8; 32]>::try_from(s).ok()) {
+        if garbage_pattern_kind(&nonce_arr).is_some() {
+            return "garbage_nonce";
+        }
+    }
+    let key_mic = (ki >> 8) & 1 != 0;
+    if key_mic {
+        if let Some(mic_slice) = eapol.get(OFF_MIC..OFF_MIC + mic_len) {
+            if let Some(mb) = MicBytes::from_slice(mic_slice) {
+                if mb.garbage_pattern_kind().is_some() {
+                    return "garbage_mic";
+                }
+            }
+        }
+    }
+    // Tier-3 (WDS/unknown direction) classify_by_flags returned None: ACK=0 MIC=0 is
+    // the only unclassifiable combination. [IEEE 802.11-2024] §12.7.2
+    "classify_flags_invalid"
+}
+
 // --- Unit tests ---
 
 #[cfg(test)]
