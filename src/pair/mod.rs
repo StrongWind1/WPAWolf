@@ -93,6 +93,9 @@ pub struct PairedHash {
 
 // --- Orchestration ---
 
+use std::time::Instant;
+
+use crate::debug::DebugPrinter;
 use crate::pair::collapse::collapse;
 use crate::pair::combos::{PairConfig, generate};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
@@ -115,7 +118,8 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
 /// Used by `pair_all_groups` for LPT (Longest Processing Time) scheduling: groups
 /// with higher cost are assigned first so the heaviest group doesn't end up queued
 /// behind lighter groups on the same thread.
-fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
+#[must_use]
+pub fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
     let (mut m1, mut m2, mut m3, mut m4) = (0u64, 0u64, 0u64, 0u64);
     for msg in messages {
         match msg.msg_type {
@@ -173,6 +177,7 @@ pub fn pair_all_groups(
     store: &MessageStore,
     config: &PairConfig,
     thread_count: usize,
+    debug: &DebugPrinter,
 ) -> (Vec<PairedHash>, NcDedupStats) {
     let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
 
@@ -187,7 +192,16 @@ pub fn pair_all_groups(
         let mut all_pairs: Vec<PairedHash> = Vec::new();
         let mut all_nc = NcDedupStats::default();
         for &(mac_pair, messages) in &groups {
+            let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
+            debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
+            debug.memory_check(&format!(
+                "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
+                mac_pair.ap, mac_pair.sta
+            ));
+            let t0 = Instant::now();
             let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+            let elapsed_us = t0.elapsed().as_micros();
+            debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us);
             all_pairs.extend(pairs);
             merge_nc_stats(&mut all_nc, nc);
         }
@@ -225,7 +239,16 @@ pub fn pair_all_groups(
                         let Some(&(mac_pair, messages)) = groups_ref.get(group_idx) else {
                             continue;
                         };
+                        let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
+                        debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
+                        debug.memory_check(&format!(
+                            "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
+                            mac_pair.ap, mac_pair.sta
+                        ));
+                        let t0 = Instant::now();
                         let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+                        let elapsed_us = t0.elapsed().as_micros();
+                        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us);
                         local_pairs.extend(pairs);
                         merge_nc_stats(&mut local_nc, nc);
                     }
@@ -249,6 +272,29 @@ pub fn pair_all_groups(
     })
 }
 
+/// Returns `(m1, m2, m3, m4, cost)` for a message slice.
+///
+/// Extracted from `pair_all_groups` so both the serial and parallel paths share the
+/// same counting logic without duplicating the iteration.
+fn group_counts_and_cost(messages: &[EapolMessage]) -> (usize, usize, usize, usize, u64) {
+    let (mut m1, mut m2, mut m3, mut m4) = (0usize, 0usize, 0usize, 0usize);
+    for msg in messages {
+        match msg.msg_type {
+            MsgType::M1 => m1 += 1,
+            MsgType::M2 => m2 += 1,
+            MsgType::M3 => m3 += 1,
+            MsgType::M4 => m4 += 1,
+        }
+    }
+    let cost = (m1 as u64) * (m2 as u64)
+        + (m1 as u64) * (m4 as u64)
+        + (m3 as u64) * (m2 as u64)
+        + (m2 as u64) * (m3 as u64)
+        + (m4 as u64) * (m3 as u64)
+        + (m3 as u64) * (m4 as u64);
+    (m1, m2, m3, m4, cost)
+}
+
 // --- Unit tests ---
 
 #[cfg(test)]
@@ -263,6 +309,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::debug::DebugPrinter;
     use crate::pair::combos::PairConfig;
     use crate::store::messages::{EapolMessage, MessageStore};
     use crate::types::{AkmType, MacAddr, MsgType};
@@ -295,11 +342,11 @@ mod tests {
     fn pair_all_groups_empty_store() {
         let store = MessageStore::new();
         let config = PairConfig::default();
-        let (pairs, nc) = pair_all_groups(&store, &config, 1);
+        let (pairs, nc) = pair_all_groups(&store, &config, 1, &DebugPrinter::new(false));
         assert!(pairs.is_empty());
         assert_eq!(nc.collapsed_lines, 0);
         // Also verify parallel path handles empty store.
-        let (pairs_par, nc_par) = pair_all_groups(&store, &config, 4);
+        let (pairs_par, nc_par) = pair_all_groups(&store, &config, 4, &DebugPrinter::new(false));
         assert!(pairs_par.is_empty());
         assert_eq!(nc_par.collapsed_lines, 0);
     }
@@ -310,7 +357,7 @@ mod tests {
         store.add(ap(), sta(), make_msg(MsgType::M1, 1, 0));
         store.add(ap(), sta(), make_msg(MsgType::M2, 1, 100));
         let config = PairConfig::default();
-        let (pairs, _nc) = pair_all_groups(&store, &config, 1);
+        let (pairs, _nc) = pair_all_groups(&store, &config, 1, &DebugPrinter::new(false));
         assert!(!pairs.is_empty(), "expected at least one PairedHash from M1+M2");
         assert_eq!(pairs[0].combo_type, ComboType::N1E2);
     }
@@ -370,8 +417,8 @@ mod tests {
         store.add(ap3, sta3, make_msg(MsgType::M3, 2, 100));
         store.add(ap3, sta3, make_msg(MsgType::M4, 2, 200));
 
-        let (serial, _nc_s) = pair_all_groups(&store, &config, 1);
-        let (parallel, _nc_p) = pair_all_groups(&store, &config, 4);
+        let (serial, _nc_s) = pair_all_groups(&store, &config, 1, &DebugPrinter::new(false));
+        let (parallel, _nc_p) = pair_all_groups(&store, &config, 4, &DebugPrinter::new(false));
 
         assert_eq!(serial.len(), parallel.len(), "serial and parallel must produce same count");
 
@@ -396,7 +443,7 @@ mod tests {
         store.add(ap2, sta2, make_msg(MsgType::M1, 1, 0));
         store.add(ap2, sta2, make_msg(MsgType::M2, 1, 100));
 
-        let (pairs, _nc) = pair_all_groups(&store, &config, 16);
+        let (pairs, _nc) = pair_all_groups(&store, &config, 16, &DebugPrinter::new(false));
         assert!(!pairs.is_empty());
     }
 }

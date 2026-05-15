@@ -17,6 +17,7 @@ use flate2 as _;
 use clap::Parser;
 
 use wpawolf::{
+    debug::{DebugPrinter, GroupSummary},
     extract::{ExtractConfig, process_data, process_mgmt, resolve_wds_eapol},
     ieee80211::frame,
     input, link,
@@ -350,6 +351,23 @@ struct Cli {
     #[arg(long)]
     threads: Option<u16>,
 
+    /// enable verbose diagnostic output on stdout
+    ///
+    /// Prints timestamped lines to stdout at every pipeline milestone:
+    ///   - Phase transitions with RSS and elapsed time.
+    ///   - Per-file ingestion: file path, size, and delta packet/EAPOL/PMKID counts.
+    ///   - Pre-Phase-4 top-25 groups sorted by pairing cost, flagged `[HEAVY]` above
+    ///     50 000 estimated pairs.
+    ///   - Per-group Phase 4: message-type breakdown, estimated cost, wall-clock time.
+    ///   - Memory checks before every Phase 4 group (Linux only). A `[MEMORY WARNING]`
+    ///     line fires unconditionally when RAM use exceeds 80 %, even without `--debug`.
+    ///
+    /// Intended for OOM triage and large-corpus bug hunting. Output volume is
+    /// proportional to the number of input files and (AP, STA) groups -- redirect to
+    /// a file for large corpora (`wpawolf --debug ... > run.log 2>&1`).
+    #[arg(long)]
+    debug: bool,
+
     /// suppress periodic `[progress]` lines on stderr
     ///
     /// Progress lines are emitted by default during Phase 1 (Ingest) every 5 seconds
@@ -505,6 +523,9 @@ fn main() {
 /// for I/O failures that should abort the run -- parse errors are logged and skipped.
 #[allow(clippy::too_many_lines, reason = "linear pipeline orchestrator; each step is small but cumulative")]
 fn run(cli: &Cli) -> wpawolf::types::Result<()> {
+    // --- Debug printer (created once; no-op when --debug is off) ---
+    let debug = DebugPrinter::new(cli.debug);
+
     // --- Initialise stores ---
     let mut message_store = MessageStore::with_per_type_cap(cli.max_eapol_per_type);
     let mut pmkid_store = PmkidStore::new();
@@ -595,8 +616,18 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut output_ctx = wpawolf::output::OutputContext::new(&paths);
 
     // --- Phase 1: Collect ---
-    for path in &inputs {
+    debug.phase_start(1, "Ingest");
+    let total_inputs = inputs.len();
+    for (file_idx, path) in inputs.iter().enumerate() {
         stats.last_file = path.display().to_string();
+
+        // Per-file debug: snapshot cumulative counters before processing so we can
+        // compute the delta (packets/EAPOL/PMKID contributed by this file alone).
+        let pre_packets = stats.total_packets;
+        let pre_eapol = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
+        let pre_pmkid = stats.pmkids_found;
+        let file_size = path.metadata().map_or(0, |m| m.len());
+        debug.file_start(file_idx + 1, total_inputs, &path.display().to_string(), file_size);
 
         let mut reader = match input::open_reader(path) {
             Ok(r) => r,
@@ -810,6 +841,21 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             }
         }
 
+        // Per-file debug summary.
+        {
+            let post_eapol = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
+            debug.file_done(
+                file_idx + 1,
+                total_inputs,
+                &path.display().to_string(),
+                stats.total_packets - pre_packets,
+                post_eapol - pre_eapol,
+                stats.pmkids_found - pre_pmkid,
+                message_store.group_count(),
+            );
+            debug.memory_check(&format!("Phase 1 file {}/{total_inputs}: {}", file_idx + 1, path.display()));
+        }
+
         // --- Per-file emit (--per-file mode only) ---
         //
         // Resolve any deferred WDS frames seen this file (they need an ESSID
@@ -848,6 +894,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 &pair_config,
                 thread_count,
                 essid_filter,
+                &debug,
             )?;
             message_store.clear();
             pmkid_store.clear();
@@ -930,6 +977,38 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
         stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
 
+        // Phase 1 complete; log the store summary and the top heavy groups before Phase 4.
+        {
+            let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
+            debug.phase_done(
+                1,
+                "Ingest",
+                &format!(
+                    "files={} packets={} groups={} eapol={}",
+                    stats.input_file_count,
+                    stats.total_packets,
+                    message_store.group_count(),
+                    eapol_total
+                ),
+            );
+            debug.memory_check("Phase 1 complete");
+
+            if debug.enabled {
+                // Build top-25 group summaries sorted by Phase 4 cost.
+                let mut summaries: Vec<GroupSummary> = message_store
+                    .groups()
+                    .map(|(pair, msgs)| GroupSummary::from_messages(pair.ap, pair.sta, msgs))
+                    .filter(|g| g.cost > 0)
+                    .collect();
+                summaries.sort_unstable_by_key(|g| std::cmp::Reverse(g.cost));
+                summaries.truncate(25);
+                let total_groups = message_store.group_count();
+                debug.top_groups(&summaries, total_groups);
+            }
+
+            debug.phase_start(4, "Emit");
+        }
+
         // Single-pass emit over the fully populated stores.
         output_ctx.emit(
             &message_store,
@@ -939,7 +1018,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &pair_config,
             thread_count,
             essid_filter,
+            &debug,
         )?;
+
+        debug.phase_done(4, "Emit", "");
     }
 
     let output_stats = output_ctx.finalize(

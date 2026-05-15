@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
+use crate::debug::DebugPrinter;
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
 use crate::pair::pair_all_groups;
@@ -430,9 +431,10 @@ pub fn run_output(
     thread_count: usize,
     essid_filter: EssidFilterConfig,
     logger: &mut Logger,
+    debug: &DebugPrinter,
 ) -> Result<OutputStats> {
     let mut ctx = OutputContext::new(paths);
-    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter)?;
+    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter, debug)?;
     ctx.finalize(
         paths,
         essid_set,
@@ -548,8 +550,18 @@ impl OutputContext {
         pair_config: &PairConfig,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
+        debug: &DebugPrinter,
     ) -> Result<()> {
-        self.emit_inner(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter)?;
+        self.emit_inner(
+            message_store,
+            pmkid_store,
+            essid_map,
+            akm_map,
+            pair_config,
+            thread_count,
+            essid_filter,
+            debug,
+        )?;
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
     }
@@ -564,6 +576,7 @@ impl OutputContext {
         pair_config: &PairConfig,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
+        debug: &DebugPrinter,
     ) -> Result<()> {
         let any_sink = self.sinks.any_configured();
         let stats = &mut self.stats;
@@ -640,7 +653,7 @@ impl OutputContext {
         // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
-        let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count);
+        let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count, debug);
         // Accumulate across `emit` calls so `--per-file` runs report the
         // total NC-dedup yield across every file's pair_all_groups pass
         // rather than just the last file's. `collapsed_lines` and
@@ -857,6 +870,7 @@ mod tests {
             1,
             EssidFilterConfig::default(),
             &mut logger,
+            &DebugPrinter::new(false),
         )
         .unwrap();
 

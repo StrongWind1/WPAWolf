@@ -10,6 +10,7 @@
 // lint that fires on the library compilation unit because both targets share [dependencies].
 use clap as _;
 
+pub mod debug;
 pub mod extract;
 pub mod ieee80211;
 pub mod input;
