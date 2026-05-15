@@ -119,7 +119,7 @@ wpawolf is a batch pipeline. The five phases run strictly in order; each phase r
 | -> packet |    | -> frame |    | aux ->   |    | write  |    | per     |
 |           |    |          |    | stores   |    |        |    | phase   |
 +-----------+    +----------+    +----------+    +--------+    +---------+
-   (I/O)         (CPU, fast)     (CPU, fast)     (CPU + I/O)   (stderr)
+   (I/O)         (CPU, fast)     (CPU, fast)     (CPU + I/O)   (stdout)
 ```
 
 | Phase | Crate path | Input | Output | Bound |
@@ -128,7 +128,7 @@ wpawolf is a batch pipeline. The five phases run strictly in order; each phase r
 | §3.2 Decode  | `src/link/` + `src/ieee80211/` | raw packets | parsed 802.11 frames + IEs + EAPOL | CPU |
 | §3.3 Extract | `src/extract/` + `src/store/` | parsed frames | populated stores keyed by `MacPair` | CPU |
 | §3.4 Emit    | `src/pair/` + `src/output/`   | populated stores | hashcat lines + auxiliary files | CPU + I/O |
-| §3.5 Report  | `src/stats.rs`             | counters from all earlier phases | summary on stderr | I/O |
+| §3.5 Report  | `src/stats.rs`             | counters from all earlier phases | summary on stdout | I/O |
 
 Phase 1 dominates wall time on warm caches at NVMe speeds (~50-500x phase 2). Phase 4 is parallelised via `std::thread::scope` with LPT round-robin group scheduling; `--threads=1` reproduces the serial path. Every shared structure is `Send + Sync` (see §4 invariant 9).
 
@@ -1123,7 +1123,7 @@ Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay
 No memory ceiling. Memory scales with EAPOL message count, not file size. Typical 100 GB capture with <1M EAPOL messages: <250 MiB. The OS OOM killer is the natural backstop for degenerate inputs.
 
 #### FR-MSG-4
-The statistics summary is printed to stderr unconditionally after every run. wpawolf does not report process memory usage; `/proc/self/status` VmRSS is misleading. Operators run `/usr/bin/time -v wpawolf ...` for an authoritative number.
+The statistics summary is printed to stdout unconditionally after every run. stderr produces no output. wpawolf does not report process memory usage; `/proc/self/status` VmRSS is misleading. Operators run `/usr/bin/time -v wpawolf ...` for an authoritative number.
 
 ### §8.6  Pairing - FR-PAIR-*
 
@@ -1284,9 +1284,11 @@ Output-filter and runtime flags (unfiltered defaults):
 | `--rc-drift` [*n*]    | off | require RC consistency, tolerance n (default 8 if bare) |
 | `--dedup-hash-combos` | false | 6 combos -> 3 unique per session |
 | `--threads` *n*       | CPU count | Phase 4 worker thread count |
+| `--max-eapol-per-type` *n* | 2048 | per-`(AP, STA)` stored-message cap per type (M1/M2/M3/M4 capped independently); 0 = unlimited |
+| `--debug`             | false | emit timestamped phase/file/group/memory diagnostic lines to stdout |
 
 #### FR-CLI-4
-Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary statistics are printed unconditionally to stderr on every run.
+Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary statistics are printed unconditionally to stdout on every run. stderr produces no output.
 
 `--log` categories (lowercase tags, written by `src/log.rs`):
 
@@ -1299,6 +1301,7 @@ Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary 
 - `invalid_nonce`       - EAPOL frame discarded: nonce matched a garbage pattern (`null` / `ff` / `repeat_1` / `repeat_2` / `repeat_4` on any message type, M4 included). M4 NULL nonce is spec-valid on the wire per §12.7.6.5 NOTE 9 but is dropped because the hash line is cryptographically dead; see §5.10. Line carries `kind=<k> nonce_hex=<32 B hex>` so downstream tooling can filter by pattern and an operator can grep the source capture for the rejected bytes
 - `invalid_mic`         - EAPOL frame discarded: MIC matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`) with the Key MIC flag set (M2/M3/M4). Line carries `kind=<k> mic_hex=<16/24 B hex>` (16 for AKMs 1-6, 8, 9, 11; 24 for the SHA-384 family)
 - `invalid_pmkid`       - PMKID discarded: matched a garbage pattern (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`). Line carries `kind=<k> pmkid_hex=<16 B hex>`
+- `eapol_key_rejected`  - EAPOL-Key frame passed the LLC/packet-type gate (EtherType `0x888E`/`0x88C7`, packet type = 3) but failed the EAPOL-Key parser for a structural reason other than a garbage nonce or MIC (those are already captured by `[invalid_nonce]` / `[invalid_mic]`). Carries `timestamp_us`, `ap=`, `sta=`, `reason=` (one of `truncated_short`, `bad_descriptor_type`, `bad_kdv`, `truncated_24mic`, `classify_flags_invalid`), and `bytes=` (first 32 raw bytes in lowercase colon-hex for Wireshark cross-reference). Only the ~10 genuinely structural failures per multi-GB corpus appear here; the ~15 600 spec-correct M4 null-nonce drops are already fully described by `[invalid_nonce] kind=null msg_type=m4`
 - `essid_control_bytes` - SSID informational notice, **not a discard and not a sign wpawolf altered the SSID**: the SSID byte run contained at least one byte in `0x00..=0x1F` (the full ASCII C0 control range, NUL through US -- every control character). Per [IEEE 802.11-2024] §9.4.2.2 the SSID element is "an arbitrary sequence of 0-32 octets" with no printable-character requirement, so a control-byte SSID is valid on the wire; wpawolf is required to handle it and ships the byte run to hashcat unchanged. The line carries `essid_hex=` in lowercase hex so the operator triaging a capture can locate the source frame. SSIDs that fail the spec-driven length / first-byte-zero gate are discarded silently by upstream counters and are NOT logged
 
 Format: `[category] <category-specific fields>`. Per-category field layout matches the `Logger::log_*` method signatures. Frame-bearing categories (`malformed_frame`, `plcp_error`, `invalid_nonce`, `invalid_mic`, `invalid_pmkid`, `essid_control_bytes`) lead with `timestamp_us`; `unknown_linktype`, `unknown_akm`, `essid_not_found_summary`, and `capture_read_error` do not (the event has no single packet timestamp; the summary line carries its own `first_seen_us` / `last_seen_us` range fields).
