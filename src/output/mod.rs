@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::debug::DebugPrinter;
+use crate::debug::{DebugPrinter, emit_progress_interval};
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
 use crate::pair::pair_all_groups;
@@ -654,6 +654,7 @@ impl OutputContext {
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
         let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count, debug);
+        debug.phase4_pairs_generated(all_pairs.len());
         // Accumulate across `emit` calls so `--per-file` runs report the
         // total NC-dedup yield across every file's pair_all_groups pass
         // rather than just the last file's. `collapsed_lines` and
@@ -663,8 +664,14 @@ impl OutputContext {
         stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
         stats.nc_dedup_cluster_count += nc_stats.cluster_count;
         stats.nc_dedup_max_cluster_size = stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+        let pairs_written_before = stats.pairs_written;
+        let dedup_dropped_before = stats.dedup_dropped;
         if any_sink {
-            for pair in &all_pairs {
+            for (emit_idx, pair) in all_pairs.iter().enumerate() {
+                if debug.enabled && (emit_idx + 1) % emit_progress_interval() == 0 {
+                    debug.emit_progress(emit_idx + 1, all_pairs.len(), stats.pairs_written - pairs_written_before);
+                }
+
                 let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
                 let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                 let is_ft = ht.is_ft();
@@ -722,6 +729,13 @@ impl OutputContext {
                 }
             }
         }
+        debug.emit_fan_out_done(
+            all_pairs.len(),
+            stats.pairs_written - pairs_written_before,
+            stats.dedup_dropped - dedup_dropped_before,
+            stats.nc_dedup_collapsed_lines,
+            stats.nc_dedup_cluster_count,
+        );
         Ok(())
     }
 

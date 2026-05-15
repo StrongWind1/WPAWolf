@@ -223,6 +223,14 @@ impl MessageStore {
         self.groups.len()
     }
 
+    /// Iterates over `(MacPair, MsgType)` combos that hit the per-type cap.
+    ///
+    /// Empty when `per_type_cap == 0` (unlimited) or no group reached the cap.
+    /// Used by `--debug` to list exactly which AP/STA pairs were saturated before Phase 4.
+    pub fn type_saturated_iter(&self) -> impl Iterator<Item = (&MacPair, MsgType)> {
+        self.type_saturated.iter().map(|(pair, mt)| (pair, *mt))
+    }
+
     /// Drops every group and resets the total-message counter.
     ///
     /// Used by `--per-file` mode to reclaim store memory after each input

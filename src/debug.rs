@@ -20,6 +20,8 @@
 //! | Pre-Phase-4 summary (tiers + top-25) | ~30 |
 //! | Phase 4 progress tickers | `groups / 5000` |
 //! | Phase 4 HEAVY groups (start + done + mem) | `3 * heavy_count` |
+//! | Phase 4 fan-out progress tickers | `pairs / 500000` |
+//! | Phase 4 fan-out summary (written, dedup\_dropped, NC-dedup) | 1 |
 //! | Capture parse errors | `error_count` |
 //!
 //! On a 282k-group corpus this yields ~5 500 lines vs 850 000 without filtering.
@@ -27,7 +29,7 @@
 use std::io::Write as _;
 use std::time::Instant;
 
-use crate::types::{MacAddr, MsgType};
+use crate::types::{MacAddr, MacPair, MsgType};
 
 // --- Constants ---
 
@@ -41,6 +43,10 @@ pub const HEAVY_GROUP_COST: u64 = 50_000;
 
 /// Phase 4 progress ticker interval: emit one line every this many completed groups.
 const GROUP_PROGRESS_INTERVAL: usize = 5_000;
+
+/// Phase 4 fan-out progress ticker interval: emit one line every this many pairs processed
+/// during the EAPOL fan-out loop. At 2.7M pairs this fires ~5 times.
+const EMIT_PROGRESS_INTERVAL: usize = 500_000;
 
 // --- DebugPrinter ---
 
@@ -180,6 +186,69 @@ impl DebugPrinter {
         if saturated_dropped > 0 {
             self.emit(&format!("  per-type cap: {saturated_dropped} frames dropped (--max-eapol-per-type cap hit)"));
         }
+    }
+
+    /// Lists each (AP, STA, `msg_type`) combo that hit the per-type cap.
+    ///
+    /// Call after `pre_phase4_store_summary` when `saturated_dropped > 0`. Pinpoints
+    /// the exact APs with rotating-ANonce or high-retransmit behaviour that triggered
+    /// the cap, so the operator can cross-reference with the top-groups survey.
+    #[allow(single_use_lifetimes, reason = "impl Trait requires named lifetime on stable")]
+    pub fn saturated_pairs_detail<'a>(&self, pairs: impl Iterator<Item = (&'a MacPair, MsgType)>) {
+        if !self.enabled {
+            return;
+        }
+        let mut entries: Vec<_> = pairs.collect();
+        entries.sort_by_key(|(p, mt)| (p.ap, p.sta, *mt as u8));
+        for (pair, mt) in &entries {
+            self.emit(&format!("    saturated  ap={}  sta={}  type={mt}", pair.ap, pair.sta));
+        }
+    }
+
+    /// Logs the raw pair count produced by `pair_all_groups` before global dedup.
+    ///
+    /// Called from `emit_inner` immediately after `pair_all_groups` returns. Gives
+    /// the operator an at-a-glance number without having to correlate the last
+    /// progress ticker.
+    pub fn phase4_pairs_generated(&self, count: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.emit(&format!("Phase 4 pairs_all_groups done: {count} pairs (before global dedup)"));
+    }
+
+    /// Progress ticker fired every `emit_progress_interval()` pairs during the EAPOL
+    /// fan-out loop. Shows how far through the 2.7M-pair loop the process is and
+    /// how many pairs have survived dedup so far.
+    pub fn emit_progress(&self, pairs_processed: usize, total_pairs: usize, pairs_written: usize) {
+        if !self.enabled {
+            return;
+        }
+        let rss = rss_tag();
+        let pct = pairs_processed.checked_mul(100).map_or(100, |n| n / total_pairs.max(1));
+        self.emit(&format!(
+            "Phase4 fan-out  {pairs_processed:>8}/{total_pairs} ({pct:>3}%)  written={pairs_written:>8}{rss}"
+        ));
+    }
+
+    /// Called once after the EAPOL fan-out loop completes. Shows final pair counts,
+    /// per-sink dedup drop totals, and NC-dedup cluster stats in one line so the
+    /// operator can see the net effect of all filters without grepping the stats banner.
+    pub fn emit_fan_out_done(
+        &self,
+        pairs_in: usize,
+        pairs_written: usize,
+        dedup_dropped: usize,
+        nc_collapsed: u64,
+        nc_clusters: u64,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let rss = rss_tag();
+        self.emit(&format!(
+            "Phase4 fan-out done:  in={pairs_in}  written={pairs_written}  dedup_dropped={dedup_dropped}  nc_collapsed={nc_collapsed}  nc_clusters={nc_clusters}{rss}"
+        ));
     }
 
     /// Prints the top groups by Phase 4 cost. Call after `pre_phase4_store_summary`.
@@ -369,4 +438,10 @@ fn human_bytes(bytes: u64) -> String {
 #[must_use]
 pub const fn group_progress_interval() -> usize {
     GROUP_PROGRESS_INTERVAL
+}
+
+/// Returns the Phase 4 fan-out progress-ticker interval (pairs between ticker lines).
+#[must_use]
+pub const fn emit_progress_interval() -> usize {
+    EMIT_PROGRESS_INTERVAL
 }

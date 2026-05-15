@@ -401,11 +401,11 @@ struct Cli {
     /// 1024 M2s, 1024 M3s, and 1024 M4s in the same group.
     ///
     /// Set to 0 to disable the cap (unlimited, the behavior before v0.3.8). The default
-    /// of 1024 prevents Phase 4's O(M1 * M2) pair-generation from crashing on captures
+    /// of 2048 prevents Phase 4's O(M1 * M2) pair-generation from crashing on captures
     /// where an AP retransmits M1 with a fresh `ANonce` on each attempt (rotating-ANonce
-    /// firmware behaviour). 1024 per type bounds the worst-case Phase 4 allocation to
-    /// ~600 MiB per `(AP, STA)` group.
-    #[arg(long, default_value_t = 1024)]
+    /// firmware behaviour). 2048 per type bounds the worst-case Phase 4 allocation to
+    /// ~2.4 GiB per `(AP, STA)` group.
+    #[arg(long, default_value_t = 2048)]
     max_eapol_per_type: usize,
 
     /// pair + emit hashes after each input file, clearing per-file stores in between
@@ -1036,6 +1036,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.eapol_type_saturated_dropped,
                 );
                 debug.top_groups(&summaries, total_groups);
+                if stats.eapol_type_saturated_dropped > 0 {
+                    debug.saturated_pairs_detail(message_store.type_saturated_iter());
+                }
             }
 
             debug.phase_start(4, "Emit");

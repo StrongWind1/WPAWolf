@@ -110,6 +110,17 @@ pub enum MsgType {
     M4 = 4,
 }
 
+impl std::fmt::Display for MsgType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::M1 => f.write_str("m1"),
+            Self::M2 => f.write_str("m2"),
+            Self::M3 => f.write_str("m3"),
+            Self::M4 => f.write_str("m4"),
+        }
+    }
+}
+
 // --- AKM suite types ---
 
 /// AKM (Authentication and Key Management) suite type detected from RSN IE, WPA1
