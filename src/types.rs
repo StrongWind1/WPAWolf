@@ -97,7 +97,7 @@ impl MacPair {
 /// - M2: ACK=0, MIC=1, Secure=0
 /// - M3: ACK=1, MIC=1, Install=1, Secure=1
 /// - M4: ACK=0, MIC=1, Secure=1, Nonce=all-zeros (per spec; some implementations deviate)
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum MsgType {
     /// EAPOL-Key Message 1: AP -> STA, carries `ANonce`.

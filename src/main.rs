@@ -376,6 +376,20 @@ struct Cli {
     #[arg(long)]
     mem_stats: bool,
 
+    /// per-type EAPOL message cap per (AP, STA) pair
+    ///
+    /// Limits the number of stored M1 / M2 / M3 / M4 messages per type per `(AP, STA)` pair.
+    /// Counts are independent per type: `--max-eapol-per-type=256` allows up to 256 M1s,
+    /// 256 M2s, 256 M3s, and 256 M4s in the same group.
+    ///
+    /// Set to 0 to disable the cap (unlimited, the behavior before v0.3.8). The default
+    /// of 256 prevents Phase 4's O(M1 * M2) pair-generation from crashing on captures
+    /// where an AP retransmits M1 with a fresh `ANonce` on each attempt (rotating-ANonce
+    /// firmware behaviour). 256 per type bounds the worst-case Phase 4 allocation to
+    /// ~37 MiB per `(AP, STA)` group.
+    #[arg(long, default_value_t = 256)]
+    max_eapol_per_type: usize,
+
     /// pair + emit hashes after each input file, clearing per-file stores in between
     ///
     /// Trades cross-file pairing for bounded memory: `MessageStore` and `PmkidStore`
@@ -492,7 +506,7 @@ fn main() {
 #[allow(clippy::too_many_lines, reason = "linear pipeline orchestrator; each step is small but cumulative")]
 fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // --- Initialise stores ---
-    let mut message_store = MessageStore::new();
+    let mut message_store = MessageStore::with_per_type_cap(cli.max_eapol_per_type);
     let mut pmkid_store = PmkidStore::new();
     let mut fragment_store = FragmentStore::new();
     let mut essid_map = EssidMap::new();

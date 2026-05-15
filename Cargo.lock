@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "wpawolf"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "clap",
  "flate2",

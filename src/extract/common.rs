@@ -11,7 +11,7 @@ use crate::stats::Stats;
 use crate::store::{
     AkmMap,
     essid::EssidMap,
-    messages::{EapolMessage, MessageStore},
+    messages::{Admission, EapolMessage, MessageStore},
     pmkid::{PmkidEntry, PmkidStore},
 };
 use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
@@ -366,18 +366,24 @@ pub fn store_eapol_key(
 
     // Per-message-type counters and auth-length maximum.
     let auth_len = key.eapol_frame.len();
-    match key.msg_type {
+    let msg_type = key.msg_type; // save before key is consumed by from_eapol_key
+    match msg_type {
         MsgType::M1 => stats.eapol_m1 += 1,
         MsgType::M2 => stats.eapol_m2 += 1,
         MsgType::M3 => stats.eapol_m3 += 1,
         MsgType::M4 => stats.eapol_m4 += 1,
     }
-    stats.update_auth_len(key.msg_type, u16::try_from(auth_len).unwrap_or(u16::MAX));
+    stats.update_auth_len(msg_type, u16::try_from(auth_len).unwrap_or(u16::MAX));
     // Key Descriptor Version breakdown. [IEEE 802.11-2024] §12.7.2, Key Info bits 0-2.
     stats.record_key_descriptor_version(key.key_version);
 
     let msg = EapolMessage::from_eapol_key(key, timestamp_us, akm, ft);
-    message_store.add(ap, sta, msg);
+    if let Admission::TypeSaturated { is_new_saturation } = message_store.add(ap, sta, msg) {
+        stats.eapol_type_saturated_dropped += 1;
+        if is_new_saturation {
+            logger.log_eapol_group_saturated(timestamp_us, ap, sta, msg_type, message_store.per_type_cap());
+        }
+    }
 }
 
 // --- Unit tests ---

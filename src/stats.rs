@@ -481,6 +481,11 @@ pub struct Stats {
     /// mismatch indicates interleaved sessions, buggy AP firmware, or an injected M3.
     /// Diagnostic only -- output correctness is unaffected. [ARCHITECTURE.md §4]
     pub anonce_m1_m3_mismatch_sessions: u64,
+    /// EAPOL frames dropped because the per-type cap (`--max-eapol-per-type`) was reached for
+    /// that `(AP, STA, msg_type)` group. A `[eapol_group_saturated]` log line is emitted on the
+    /// first drop per `(AP, STA, type)` combo; subsequent drops increment this counter silently.
+    /// Zero when `--max-eapol-per-type=0` (unlimited, the prior behavior).
+    pub eapol_type_saturated_dropped: u64,
 
     // WPA/WEP encrypted data frame counts.
     /// Data frames with the Protected Frame bit set (WPA/WEP encrypted payload).
@@ -1195,6 +1200,10 @@ impl Stats {
         nz!(
             "  ESSID control bytes seen (0x00-0x1F in body; informational, SSID shipped unchanged)",
             self.essid_control_bytes_warned
+        );
+        nz!(
+            "  per-type cap saturated (frame dropped; raise --max-eapol-per-type to increase cap)",
+            self.eapol_type_saturated_dropped
         );
         if self.eapol_time_gap_max_us > 0 {
             stat!("  session time gap max (ms)", self.eapol_time_gap_max_us / 1_000);
