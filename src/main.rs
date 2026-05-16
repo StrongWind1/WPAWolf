@@ -514,7 +514,6 @@ fn main() {
 /// respective collectors, and populates all in-memory stores. Phase 2 pairs EAPOL
 /// messages, deduplicates, and writes all requested output files. Returns `Err` only
 /// for I/O failures that should abort the run -- parse errors are logged and skipped.
-#[allow(clippy::too_many_lines, reason = "linear pipeline orchestrator; each step is small but cumulative")]
 fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // --- Debug printer (created once; no-op when --debug is off) ---
     let debug = DebugPrinter::new(cli.debug);

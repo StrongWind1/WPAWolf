@@ -410,7 +410,6 @@ fn fan_out(
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-#[allow(clippy::too_many_arguments, reason = "Phase 4 entry point owns every store + the structured logger")]
 pub fn run_output(
     message_store: &MessageStore,
     pmkid_store: &PmkidStore,

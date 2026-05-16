@@ -900,10 +900,6 @@ impl Stats {
     ///   4. Output   -- what was available per hashcat mode and what was written.
     ///
     /// Called unconditionally at the end of every run.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "stats summary: one stat! / nz! call per counter by design; splitting further would scatter related output across helpers"
-    )]
     pub fn print_summary(&self) {
         // W: dot-padding width for the label column. Longest label is 45 chars;
         // W must exceed that so every row gets at least several dots before ": ".
