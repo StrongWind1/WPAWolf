@@ -62,27 +62,28 @@ impl PmkidStore {
         Self::default()
     }
 
-    /// Inserts a `PmkidEntry` if its PMKID value is not already present for this pair.
+    /// Inserts a `PmkidEntry` if it passes the garbage-pattern check and is not
+    /// already present for this pair. Returns `true` if the entry was stored.
     ///
-    /// Rejects all-zero PMKIDs (`[0u8; 16]`) -- these are firmware or stack artifacts
-    /// with no cracking value. Matches hcxpcapngtool line 4012 zero-check before `addpmkid()`.
+    /// Rejects every garbage pattern detected by `garbage_pattern_kind`: `null`
+    /// (all-`0x00`), `ff` (all-`0xFF`), `repeat_1`, `repeat_2`, `repeat_4`. No healthy
+    /// HMAC-SHA1-128 output matches any of these patterns; they are firmware
+    /// stubs with zero cracking value. The caller uses the return value to
+    /// decide whether to increment `pmkids_found` and per-source counters.
     ///
     /// Deduplication is by the 16-byte PMKID value within the (AP, STA) pair.
     /// Different PMKID values for the same pair are all retained.
-    pub fn add(&mut self, entry: PmkidEntry) {
-        // Reject all-zero and all-0xFF PMKIDs -- firmware/stack artifacts with no cracking value.
-        // All-zero: hcxpcapngtool zeroed32 check [hcxpcapngtool:4012].
-        // All-0xFF: firmware sentinel value (same class of artifact).
-        if entry.pmkid == [0u8; 16] || entry.pmkid == [0xFFu8; 16] {
-            return;
+    pub fn add(&mut self, entry: PmkidEntry) -> bool {
+        if crate::types::garbage_pattern_kind(&entry.pmkid).is_some() {
+            return false;
         }
         let pair = MacPair::new(entry.ap, entry.sta);
         let entries = self.groups.entry(pair).or_default();
-        // Dedup: skip if this PMKID value is already stored for this pair.
         if entries.iter().any(|e| e.pmkid == entry.pmkid) {
-            return;
+            return false;
         }
         entries.push(entry);
+        true
     }
 
     /// Iterates over all stored PMKID entries across all (AP, STA) pairs.
@@ -169,20 +170,32 @@ mod tests {
         }
     }
 
+    /// Non-repeating 16-byte PMKID seeded from a single byte. Avoids
+    /// garbage-pattern rejection by XOR-ing the seed with a position offset.
+    #[allow(clippy::cast_possible_truncation, reason = "i is 0..16, always fits in u8")]
+    const fn realistic_pmkid(seed: u8) -> [u8; 16] {
+        let mut p = [0u8; 16];
+        let mut i = 0;
+        while i < 16 {
+            p[i] = seed ^ (i as u8).wrapping_mul(17);
+            i += 1;
+        }
+        p
+    }
+
     #[test]
     fn add_single_pmkid() {
         let mut store = PmkidStore::new();
-        store.add(make_entry(0x11, 0x22, [0xAA; 16]));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0xAA)));
         assert_eq!(store.total_count(), 1);
     }
 
     #[test]
     fn add_duplicate_pmkid_same_pair() {
         let mut store = PmkidStore::new();
-        store.add(make_entry(0x11, 0x22, [0xAA; 16]));
-        // Same PMKID bytes, same pair -- must be deduplicated.
-        let mut dup = make_entry(0x11, 0x22, [0xAA; 16]);
-        dup.source = PmkidSource::M2RsnIe; // different source, same value
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0xAA)));
+        let mut dup = make_entry(0x11, 0x22, realistic_pmkid(0xAA));
+        dup.source = PmkidSource::M2RsnIe;
         store.add(dup);
         assert_eq!(store.total_count(), 1);
     }
@@ -190,17 +203,16 @@ mod tests {
     #[test]
     fn add_different_pmkid_same_pair() {
         let mut store = PmkidStore::new();
-        store.add(make_entry(0x11, 0x22, [0xAA; 16]));
-        store.add(make_entry(0x11, 0x22, [0xBB; 16]));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0xAA)));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0xBB)));
         assert_eq!(store.total_count(), 2);
     }
 
     #[test]
     fn add_same_pmkid_different_pairs() {
         let mut store = PmkidStore::new();
-        // Same PMKID bytes but different (ap, sta) pairs -> both are distinct entries.
-        store.add(make_entry(0x11, 0x22, [0xAA; 16]));
-        store.add(make_entry(0x33, 0x44, [0xAA; 16]));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0xAA)));
+        store.add(make_entry(0x33, 0x44, realistic_pmkid(0xAA)));
         assert_eq!(store.total_count(), 2);
     }
 
@@ -222,35 +234,51 @@ mod tests {
 
     #[test]
     fn add_nonzero_nonff_pmkid_accepted() {
-        // A mixed-byte PMKID must be accepted.
         let mut store = PmkidStore::new();
-        store.add(make_entry(0x11, 0x22, [0xAB; 16]));
+        let pmkid = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10];
+        assert!(store.add(make_entry(0x11, 0x22, pmkid)));
         assert_eq!(store.total_count(), 1);
+    }
+
+    #[test]
+    fn add_repeat1_pmkid_rejected() {
+        let mut store = PmkidStore::new();
+        assert!(!store.add(make_entry(0x11, 0x22, [0x55; 16])));
+        assert_eq!(store.total_count(), 0);
+    }
+
+    #[test]
+    fn add_repeat2_pmkid_rejected() {
+        let mut store = PmkidStore::new();
+        let pmkid = [0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34];
+        assert!(!store.add(make_entry(0x11, 0x22, pmkid)));
+        assert_eq!(store.total_count(), 0);
+    }
+
+    #[test]
+    fn add_repeat4_pmkid_rejected() {
+        let mut store = PmkidStore::new();
+        let pmkid = [0xAA, 0xBB, 0xCC, 0xDD, 0xAA, 0xBB, 0xCC, 0xDD, 0xAA, 0xBB, 0xCC, 0xDD, 0xAA, 0xBB, 0xCC, 0xDD];
+        assert!(!store.add(make_entry(0x11, 0x22, pmkid)));
+        assert_eq!(store.total_count(), 0);
     }
 
     #[test]
     fn iter_yields_all() {
         let mut store = PmkidStore::new();
-        // Pair 1: two distinct PMKIDs.
-        store.add(make_entry(0x11, 0x22, [0x01; 16]));
-        store.add(make_entry(0x11, 0x22, [0x02; 16]));
-        // Pair 2: one PMKID.
-        store.add(make_entry(0x33, 0x44, [0x03; 16]));
-
-        let count = store.iter().count();
-        assert_eq!(count, 3);
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x01)));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x02)));
+        store.add(make_entry(0x33, 0x44, realistic_pmkid(0x03)));
+        assert_eq!(store.iter().count(), 3);
     }
 
     #[test]
     fn canonicalize_pairs_merges_duplicate_pmkid() {
-        // Same PMKID bytes observed under two link MACs that both map to one MLD ->
-        // after canonicalization the PMKID is stored once for the merged pair.
         let mut store = PmkidStore::new();
-        store.add(make_entry(0xAA, 0x11, [0x99; 16]));
-        store.add(make_entry(0xAA, 0x22, [0x99; 16]));
+        store.add(make_entry(0xAA, 0x11, realistic_pmkid(0x99)));
+        store.add(make_entry(0xAA, 0x22, realistic_pmkid(0x99)));
         assert_eq!(store.total_count(), 2, "before canonicalization: distinct pairs");
         store.canonicalize_pairs(|m| {
-            // Link STAs 0x11 and 0x22 both canonicalize to 0x55.
             if m == MacAddr::from_bytes([0x11; 6]) || m == MacAddr::from_bytes([0x22; 6]) {
                 MacAddr::from_bytes([0x55; 6])
             } else {
@@ -262,10 +290,9 @@ mod tests {
 
     #[test]
     fn canonicalize_pairs_noop_identity() {
-        // Identity canonicalization preserves every entry exactly.
         let mut store = PmkidStore::new();
-        store.add(make_entry(0x11, 0x22, [0x01; 16]));
-        store.add(make_entry(0x33, 0x44, [0x02; 16]));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x01)));
+        store.add(make_entry(0x33, 0x44, realistic_pmkid(0x02)));
         store.canonicalize_pairs(|m| m);
         assert_eq!(store.total_count(), 2);
     }
@@ -273,12 +300,11 @@ mod tests {
     #[test]
     fn total_count_correct() {
         let mut store = PmkidStore::new();
-        // 3 unique adds + 2 duplicates -> count stays at 3.
-        store.add(make_entry(0x11, 0x22, [0x01; 16]));
-        store.add(make_entry(0x11, 0x22, [0x02; 16]));
-        store.add(make_entry(0x33, 0x44, [0x03; 16]));
-        store.add(make_entry(0x11, 0x22, [0x01; 16])); // dup
-        store.add(make_entry(0x33, 0x44, [0x03; 16])); // dup
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x01)));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x02)));
+        store.add(make_entry(0x33, 0x44, realistic_pmkid(0x03)));
+        store.add(make_entry(0x11, 0x22, realistic_pmkid(0x01))); // dup
+        store.add(make_entry(0x33, 0x44, realistic_pmkid(0x03))); // dup
         assert_eq!(store.total_count(), 3);
     }
 }

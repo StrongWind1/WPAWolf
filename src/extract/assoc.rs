@@ -248,7 +248,7 @@ pub fn process_assoc_or_reassoc_req(
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
-            pmkid_store.add(PmkidEntry {
+            if pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,
                 ap: mac_hdr.ap,
                 sta: mac_hdr.sta,
@@ -256,17 +256,18 @@ pub fn process_assoc_or_reassoc_req(
                 source,
                 akm,
                 ft,
-            });
-            stats.pmkids_found += 1;
-            if akm.is_ft() {
-                stats.pmkid_ft_psk += 1;
-            } else {
-                stats.pmkid_wpa2_psk += 1;
-            }
-            if is_assoc {
-                stats.pmkid_assoc_req += 1;
-            } else {
-                stats.pmkid_reassoc_req += 1;
+            }) {
+                stats.pmkids_found += 1;
+                if akm.is_ft() {
+                    stats.pmkid_ft_psk += 1;
+                } else {
+                    stats.pmkid_wpa2_psk += 1;
+                }
+                if is_assoc {
+                    stats.pmkid_assoc_req += 1;
+                } else {
+                    stats.pmkid_reassoc_req += 1;
+                }
             }
         }
     }
@@ -287,7 +288,7 @@ pub fn process_assoc_or_reassoc_req(
                             &pmkid,
                         );
                     }
-                    pmkid_store.add(PmkidEntry {
+                    if pmkid_store.add(PmkidEntry {
                         timestamp: timestamp_us,
                         ap: mac_hdr.ap,
                         sta: mac_hdr.sta,
@@ -295,10 +296,11 @@ pub fn process_assoc_or_reassoc_req(
                         source: PmkidSource::OsenIe,
                         akm: AkmType::Unknown,
                         ft: None,
-                    });
-                    stats.pmkids_found += 1;
-                    stats.pmkid_wpa2_psk += 1;
-                    stats.pmkid_osen += 1;
+                    }) {
+                        stats.pmkids_found += 1;
+                        stats.pmkid_wpa2_psk += 1;
+                        stats.pmkid_osen += 1;
+                    }
                 }
             }
         }
@@ -451,7 +453,8 @@ mod tests {
         // AssocReq must land in the PmkidStore tagged with `AssocRequest`,
         // and `pmkid_assoc_req` plus `pmkids_found` must increment.
         let (mut em, mut es, mut akm, mut mld, mut pm, mut wl, mut stats, mut logger) = assoc_world();
-        let pmkid: [u8; 16] = [0xAB; 16];
+        let pmkid: [u8; 16] =
+            [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54];
         let hdr = assoc_hdr(SUBTYPE_ASSOC_REQ);
         let mut body = vec![0u8; ASSOC_REQ_FIXED];
         body.extend_from_slice(&rsn_ie_psk_with_pmkid(pmkid));

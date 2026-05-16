@@ -123,7 +123,7 @@ pub fn process_probe_req(
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
-            pmkid_store.add(PmkidEntry {
+            if pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,
                 ap: mac_hdr.ap,
                 sta: mac_hdr.sta,
@@ -131,14 +131,15 @@ pub fn process_probe_req(
                 source: PmkidSource::ProbeRequest,
                 akm,
                 ft: if akm.is_ft() { ft } else { None },
-            });
-            stats.pmkids_found += 1;
-            if akm.is_ft() {
-                stats.pmkid_ft_psk += 1;
-            } else {
-                stats.pmkid_wpa2_psk += 1;
+            }) {
+                stats.pmkids_found += 1;
+                if akm.is_ft() {
+                    stats.pmkid_ft_psk += 1;
+                } else {
+                    stats.pmkid_wpa2_psk += 1;
+                }
+                stats.pmkid_probe_req += 1;
             }
-            stats.pmkid_probe_req += 1;
         }
     }
 }
@@ -199,7 +200,7 @@ mod tests {
     // S14 -- Probe Request with RSN IE PMKID Count=1 extracts ProbeRequest.
     #[test]
     fn t13_10i_probe_req_pmkid_extracted() {
-        let pmkid = [0x14u8; 16];
+        let pmkid = [0x14, 0x05, 0x36, 0x27, 0x50, 0x41, 0x72, 0x63, 0x9C, 0x8D, 0xBE, 0xAF, 0xD8, 0xC9, 0xFA, 0xEB];
         let body = rsn_ie_tagged(pmkid);
 
         let mac_hdr = dummy_mac_hdr([0x11; 6], [0x22; 6]);
@@ -338,7 +339,7 @@ mod tests {
     // S20 -- Assoc Request with OSEN IE containing PMKID -> OsenIe (helper test).
     #[test]
     fn t13_10q_osen_ie_pmkid_extracted() {
-        let pmkid = [0x20u8; 16];
+        let pmkid = [0x20, 0x31, 0x02, 0x13, 0x64, 0x75, 0x46, 0x57, 0xA8, 0xB9, 0x8A, 0x9B, 0xEC, 0xFD, 0xCE, 0xDF];
         let mut rsn_body = Vec::new();
         rsn_body.extend_from_slice(&[0x01, 0x00]);
         rsn_body.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]);

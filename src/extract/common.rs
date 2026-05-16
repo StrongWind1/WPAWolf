@@ -315,7 +315,7 @@ pub fn store_eapol_key(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
-        pmkid_store.add(PmkidEntry {
+        if pmkid_store.add(PmkidEntry {
             timestamp: timestamp_us,
             ap,
             sta,
@@ -323,14 +323,15 @@ pub fn store_eapol_key(
             source: PmkidSource::M1KeyData,
             akm: pmkid_akm,
             ft,
-        });
-        stats.pmkids_found += 1;
-        if pmkid_akm.is_ft() {
-            stats.pmkid_ft_psk += 1;
-        } else {
-            stats.pmkid_wpa2_psk += 1;
+        }) {
+            stats.pmkids_found += 1;
+            if pmkid_akm.is_ft() {
+                stats.pmkid_ft_psk += 1;
+            } else {
+                stats.pmkid_wpa2_psk += 1;
+            }
+            stats.pmkid_m1 += 1;
         }
-        stats.pmkid_m1 += 1;
     }
 
     // M2 PMKID from embedded RSN IE in Key Data. [IEEE 802.11-2024] §12.7.2
@@ -342,7 +343,7 @@ pub fn store_eapol_key(
                         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                         }
-                        pmkid_store.add(PmkidEntry {
+                        if pmkid_store.add(PmkidEntry {
                             timestamp: timestamp_us,
                             ap,
                             sta,
@@ -350,14 +351,15 @@ pub fn store_eapol_key(
                             source: PmkidSource::M2RsnIe,
                             akm: pmkid_akm,
                             ft,
-                        });
-                        stats.pmkids_found += 1;
-                        if pmkid_akm.is_ft() {
-                            stats.pmkid_ft_psk += 1;
-                        } else {
-                            stats.pmkid_wpa2_psk += 1;
+                        }) {
+                            stats.pmkids_found += 1;
+                            if pmkid_akm.is_ft() {
+                                stats.pmkid_ft_psk += 1;
+                            } else {
+                                stats.pmkid_wpa2_psk += 1;
+                            }
+                            stats.pmkid_m2 += 1;
                         }
-                        stats.pmkid_m2 += 1;
                     }
                 }
             }
@@ -524,7 +526,7 @@ mod tests {
     // --- store_eapol_key: KDV-driven AKM reconciliation ---
 
     /// Non-uniform 16-byte MIC fixture for tests. The garbage-pattern detector
-    /// rejects uniform-byte MICs (`[0xAB; 16]` would flag as `repeat_1`); real
+    /// rejects uniform-byte MICs (`[0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54]` would flag as `repeat_1`); real
     /// MICs are HMAC outputs (uniformly random), so the fixture mirrors that.
     const MIC16_FIXTURE: [u8; 16] =
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
@@ -688,7 +690,7 @@ mod tests {
             0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, // AKM: 1x PSK (AKM 2)
             0x00, 0x00, // RSN caps
         ];
-        // Varied MIC bytes: a uniform [0xAB; 16] would now flag as `repeat_1`
+        // Varied MIC bytes: a uniform [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54] would now flag as `repeat_1`
         // garbage and be rejected by the parser. Real MICs are HMAC outputs
         // (uniformly random); the test fixture mirrors that property.
         let mic = MIC16_FIXTURE;
@@ -745,7 +747,8 @@ mod tests {
     #[test]
     fn store_eapol_key_m1_pmkid_kde_extracted() {
         // M1 with PMKID KDE in Key Data: PMKID must be added to pmkid_store as M1KeyData.
-        let pmkid_val: [u8; 16] = [0xAB; 16];
+        let pmkid_val: [u8; 16] =
+            [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54];
         let mut kde = vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
         kde.extend_from_slice(&pmkid_val);
         let key = make_key(2, true, false, [0u8; 16], &kde); // M1, KDV=2 + PMKID KDE
@@ -778,7 +781,8 @@ mod tests {
         // HMAC-SHA1 (AKM 2), so the stored PMKID's akm field MUST be Wpa2Psk so it
         // emits as a Type 2 PMKID line. The promotion lives in `store_eapol_key`
         // above (`pmkid_akm = if akm == AkmType::Wpa1 { AkmType::Wpa2Psk } else { akm }`).
-        let pmkid_val: [u8; 16] = [0xAB; 16];
+        let pmkid_val: [u8; 16] =
+            [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54];
         let mut kde = vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
         kde.extend_from_slice(&pmkid_val);
         let key = make_key(1, true, false, [0u8; 16], &kde);

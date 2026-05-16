@@ -344,25 +344,26 @@ pub fn process_beacon_or_probe_resp(
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
-            pmkid_store.add(PmkidEntry {
+            if pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,
                 ap: mac_hdr.ap,
-                sta: mac_hdr.sta, // typically broadcast for Beacon; directed for ProbeResp
+                sta: mac_hdr.sta,
                 pmkid,
                 source,
                 akm,
                 ft: None,
-            });
-            stats.pmkids_found += 1;
-            if akm.is_ft() {
-                stats.pmkid_ft_psk += 1;
-            } else {
-                stats.pmkid_wpa2_psk += 1;
-            }
-            if mac_hdr.subtype == SUBTYPE_BEACON {
-                stats.pmkid_beacon += 1;
-            } else {
-                stats.pmkid_probe_resp += 1;
+            }) {
+                stats.pmkids_found += 1;
+                if akm.is_ft() {
+                    stats.pmkid_ft_psk += 1;
+                } else {
+                    stats.pmkid_wpa2_psk += 1;
+                }
+                if mac_hdr.subtype == SUBTYPE_BEACON {
+                    stats.pmkid_beacon += 1;
+                } else {
+                    stats.pmkid_probe_resp += 1;
+                }
             }
         }
     }
@@ -405,7 +406,7 @@ mod tests {
     // S16 -- Beacon with RSN IE PMKID Count=1, non-zero PMKID -> BeaconRsnIe.
     #[test]
     fn t13_10k_beacon_rsn_pmkid_extracted() {
-        let pmkid = [0x16u8; 16];
+        let pmkid = [0x16, 0x07, 0x34, 0x25, 0x52, 0x43, 0x70, 0x61, 0x9E, 0x8F, 0xBC, 0xAD, 0xDA, 0xCB, 0xF8, 0xE9];
         let mut body = vec![0u8; 12];
         body.extend_from_slice(&rsn_ie_tagged(pmkid));
 
@@ -592,7 +593,8 @@ mod tests {
     // still lands in -D.
     #[test]
     fn wps_no_wordlist_when_flag_off() {
-        let uuid: [u8; 16] = [0xCC; 16];
+        let uuid: [u8; 16] =
+            [0xCC, 0xDD, 0xEE, 0xFF, 0x88, 0x99, 0xAA, 0xBB, 0x44, 0x55, 0x66, 0x77, 0x00, 0x11, 0x22, 0x33];
         let mut body = vec![0u8; 12];
         body.extend_from_slice(&wps_ie_tagged(b"Acme", Some(uuid)));
 
@@ -713,7 +715,7 @@ mod tests {
     // S17 -- Probe Response with PMKID Count=1 -> ProbeRespRsnIe.
     #[test]
     fn t13_10m_probe_resp_rsn_pmkid_extracted() {
-        let pmkid = [0x17u8; 16];
+        let pmkid = [0x17, 0x06, 0x35, 0x24, 0x53, 0x42, 0x71, 0x60, 0x9F, 0x8E, 0xBD, 0xAC, 0xDB, 0xCA, 0xF9, 0xE8];
         let mut body = vec![0u8; 12];
         body.extend_from_slice(&rsn_ie_tagged(pmkid));
 

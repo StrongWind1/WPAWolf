@@ -141,7 +141,7 @@ pub fn process_action(
                 if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                     logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                 }
-                pmkid_store.add(PmkidEntry {
+                if pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,
                     ap,
                     sta,
@@ -149,10 +149,11 @@ pub fn process_action(
                     source,
                     akm: AkmType::FtPsk,
                     ft,
-                });
-                stats.pmkids_found += 1;
-                stats.pmkid_ft_psk += 1;
-                stats.pmkid_ft_action += 1;
+                }) {
+                    stats.pmkids_found += 1;
+                    stats.pmkid_ft_psk += 1;
+                    stats.pmkid_ft_action += 1;
+                }
             }
         }
         return;
@@ -197,7 +198,7 @@ pub fn process_action(
                         &pmkid_bytes,
                     );
                 }
-                pmkid_store.add(PmkidEntry {
+                if pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,
                     ap: mac_hdr.ap,
                     sta: mac_hdr.sta,
@@ -205,10 +206,11 @@ pub fn process_action(
                     source,
                     akm: AkmType::Unknown,
                     ft: None,
-                });
-                stats.pmkids_found += 1;
-                stats.pmkid_wpa2_psk += 1;
-                stats.pmkid_mesh += 1;
+                }) {
+                    stats.pmkids_found += 1;
+                    stats.pmkid_wpa2_psk += 1;
+                    stats.pmkid_mesh += 1;
+                }
                 break; // Only one AMPE element per frame.
             }
         }
@@ -375,7 +377,7 @@ mod tests {
     // S11 -- FT Action Request (cat=6, action=1) extracts FtActionRequest.
     #[test]
     fn t13_10f_ft_action_request_pmkid_extracted() {
-        let pmkid = [0x11u8; 16];
+        let pmkid = [0x11, 0x00, 0x33, 0x22, 0x55, 0x44, 0x77, 0x66, 0x99, 0x88, 0xBB, 0xAA, 0xDD, 0xCC, 0xFF, 0xEE];
         let sta = [0xAAu8; 6];
         let target_ap = [0xBBu8; 6];
         let mut body = Vec::new();
@@ -420,7 +422,7 @@ mod tests {
     // S12 -- FT Action Response (cat=6, action=2) with Status Code.
     #[test]
     fn t13_10g_ft_action_response_pmkid_extracted() {
-        let pmkid = [0x12u8; 16];
+        let pmkid = [0x12, 0x03, 0x30, 0x21, 0x56, 0x47, 0x74, 0x65, 0x9A, 0x8B, 0xB8, 0xA9, 0xDE, 0xCF, 0xFC, 0xED];
         let sta = [0xCCu8; 6];
         let target_ap = [0xDDu8; 6];
         let mut body = Vec::new();
@@ -462,7 +464,7 @@ mod tests {
     // S13 -- FT Action Confirm (cat=6, action=3).
     #[test]
     fn t13_10h_ft_action_confirm_pmkid_extracted() {
-        let pmkid = [0x13u8; 16];
+        let pmkid = [0x13, 0x02, 0x31, 0x20, 0x57, 0x46, 0x75, 0x64, 0x9B, 0x8A, 0xB9, 0xA8, 0xDF, 0xCE, 0xFD, 0xEC];
         let sta = [0xEEu8; 6];
         let target_ap = [0xFFu8; 6];
         let mut body = Vec::new();
@@ -501,7 +503,8 @@ mod tests {
     // S18 -- Mesh Peering Open (cat=15, action=1) with AMPE element.
     #[test]
     fn t13_10n_mesh_peering_open_pmkid_extracted() {
-        let chosen_pmk = [0x18u8; 16];
+        let chosen_pmk =
+            [0x18, 0x09, 0x3A, 0x2B, 0x5C, 0x4D, 0x7E, 0x6F, 0x90, 0x81, 0xB2, 0xA3, 0xD4, 0xC5, 0xF6, 0xE7];
         let ampe_val: Vec<u8> = [0xDEu8, 0xAD, 0xBE, 0xEF].iter().copied().chain(chosen_pmk).collect();
         let mut body = vec![15u8, 1u8];
         body.push(IE_AMPE);
@@ -542,7 +545,8 @@ mod tests {
     // S19 -- Mesh Peering Confirm (cat=15, action=2).
     #[test]
     fn t13_10o_mesh_peering_confirm_pmkid_extracted() {
-        let chosen_pmk = [0x19u8; 16];
+        let chosen_pmk =
+            [0x19, 0x08, 0x3B, 0x2A, 0x5D, 0x4C, 0x7F, 0x6E, 0x91, 0x80, 0xB3, 0xA2, 0xD5, 0xC4, 0xF7, 0xE6];
         let ampe_val: Vec<u8> = [0xABu8, 0xCD].iter().copied().chain(chosen_pmk).collect();
         let mut body = vec![15u8, 2u8];
         body.push(IE_AMPE);
@@ -582,7 +586,7 @@ mod tests {
     // used internally for PMKID storage.
     #[test]
     fn ft_action_request_mac_addresses_not_in_wordlist() {
-        let pmkid = [0x44u8; 16];
+        let pmkid = [0x44, 0x55, 0x66, 0x77, 0x00, 0x11, 0x22, 0x33, 0xCC, 0xDD, 0xEE, 0xFF, 0x88, 0x99, 0xAA, 0xBB];
         let sta = [0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC];
         let target_ap = [0xDEu8, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE];
         let mut body = Vec::new();
@@ -626,7 +630,7 @@ mod tests {
     // PMKID extraction still happens.
     #[test]
     fn ft_action_request_no_wordlist_when_flag_off() {
-        let pmkid = [0x55u8; 16];
+        let pmkid = [0x55, 0x44, 0x77, 0x66, 0x11, 0x00, 0x33, 0x22, 0xDD, 0xCC, 0xFF, 0xEE, 0x99, 0x88, 0xBB, 0xAA];
         let mut body = Vec::new();
         body.push(6);
         body.push(1);

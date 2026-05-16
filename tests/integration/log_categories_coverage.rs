@@ -314,7 +314,9 @@ fn category_essid_not_found_summary_fires_on_orphan_pmkid() {
     let mut rsn_value = rsn_ie_with_akm(2);
     rsn_value.extend_from_slice(&[0x00, 0x00]); // RSN Capabilities
     rsn_value.extend_from_slice(&1u16.to_le_bytes()); // PMKID count
-    rsn_value.extend_from_slice(&[0xAB; 16]); // The PMKID itself
+    rsn_value.extend_from_slice(&[
+        0xAB, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+    ]); // Non-repeating PMKID
     let tagged = ie_tlv(48, &rsn_value);
     let frame = build_assoc_req(ap, sta, &tagged);
 

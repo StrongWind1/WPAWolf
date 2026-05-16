@@ -53,10 +53,11 @@ pub fn process_auth_ft(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
-        pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft });
-        stats.pmkids_found += 1;
-        stats.pmkid_ft_psk += 1;
-        stats.pmkid_ft_auth += 1;
+        if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft }) {
+            stats.pmkids_found += 1;
+            stats.pmkid_ft_psk += 1;
+            stats.pmkid_ft_auth += 1;
+        }
     }
 }
 
@@ -94,14 +95,15 @@ pub fn process_auth_fils(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
-        pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None });
-        stats.pmkids_found += 1;
-        if akm.is_ft() {
-            stats.pmkid_ft_psk += 1;
-        } else {
-            stats.pmkid_wpa2_psk += 1;
+        if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {
+            stats.pmkids_found += 1;
+            if akm.is_ft() {
+                stats.pmkid_ft_psk += 1;
+            } else {
+                stats.pmkid_wpa2_psk += 1;
+            }
+            stats.pmkid_fils_auth += 1;
         }
-        stats.pmkid_fils_auth += 1;
     }
 }
 
@@ -138,14 +140,15 @@ pub fn process_auth_pasn(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
-        pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None });
-        stats.pmkids_found += 1;
-        if akm.is_ft() {
-            stats.pmkid_ft_psk += 1;
-        } else {
-            stats.pmkid_wpa2_psk += 1;
+        if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {
+            stats.pmkids_found += 1;
+            if akm.is_ft() {
+                stats.pmkid_ft_psk += 1;
+            } else {
+                stats.pmkid_wpa2_psk += 1;
+            }
+            stats.pmkid_pasn_auth += 1;
         }
-        stats.pmkid_pasn_auth += 1;
     }
 }
 
@@ -223,7 +226,7 @@ mod tests {
     // S5 -- FT Auth seq=1 (STA->AP) with RSN PMKID, MDE, FTE.
     #[test]
     fn t13_10a_ft_auth_seq1_pmkid_extracted() {
-        let pmkid = [0xABu8; 16];
+        let pmkid = [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54];
         let ap = [0x11u8; 6];
         let sta = [0x22u8; 6];
         let mac_hdr = dummy_mac_hdr(ap, sta);
@@ -247,7 +250,7 @@ mod tests {
     // S6 -- FT Auth seq=2 (AP->STA) extracts FtAuthApToSta.
     #[test]
     fn t13_10b_ft_auth_seq2_source_ap_to_sta() {
-        let pmkid = [0xCDu8; 16];
+        let pmkid = [0xCD, 0xDC, 0xEF, 0xFE, 0x89, 0x98, 0xAB, 0xBA, 0x45, 0x54, 0x67, 0x76, 0x01, 0x10, 0x23, 0x32];
         let mac_hdr = dummy_mac_hdr([0x11; 6], [0x22; 6]);
         let body = ft_auth_body(2, pmkid);
         let mut store = PmkidStore::new();
@@ -273,8 +276,12 @@ mod tests {
         rsn.extend_from_slice(&[0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02]); // AKM PSK
         rsn.extend_from_slice(&[0x00, 0x00]); // RSN capabilities
         rsn.extend_from_slice(&[0x02, 0x00]); // PMKID count=2
-        rsn.extend_from_slice(&[0x01u8; 16]);
-        rsn.extend_from_slice(&[0x02u8; 16]);
+        rsn.extend_from_slice(&[
+            0x01, 0x10, 0x23, 0x32, 0x45, 0x54, 0x67, 0x76, 0x89, 0x98, 0xAB, 0xBA, 0xCD, 0xDC, 0xEF, 0xFE,
+        ]);
+        rsn.extend_from_slice(&[
+            0x02, 0x13, 0x20, 0x31, 0x46, 0x57, 0x64, 0x75, 0x8A, 0x9B, 0xA8, 0xB9, 0xCE, 0xDF, 0xEC, 0xFD,
+        ]);
         let mut body = Vec::new();
         body.extend_from_slice(&4u16.to_le_bytes()); // algo=4 FILS
         body.extend_from_slice(&1u16.to_le_bytes()); // seq=1
@@ -299,7 +306,7 @@ mod tests {
     // S8 -- FILS Auth seq=2 gives FilsAuthApToSta.
     #[test]
     fn t13_10d_fils_auth_seq2_source_ap_to_sta() {
-        let pmkid = [0x05u8; 16];
+        let pmkid = [0x05, 0x14, 0x27, 0x36, 0x41, 0x50, 0x63, 0x72, 0x8D, 0x9C, 0xAF, 0xBE, 0xC9, 0xD8, 0xEB, 0xFA];
         let mut body = Vec::new();
         body.extend_from_slice(&5u16.to_le_bytes()); // algo=5 FILS+PFS
         body.extend_from_slice(&2u16.to_le_bytes()); // seq=2
@@ -321,7 +328,7 @@ mod tests {
     // S9 -- PASN Auth seq=1 extracts PasnAuthStaToAp.
     #[test]
     fn t13_10e_pasn_auth_seq1_pmkid_extracted() {
-        let pmkid = [0x09u8; 16];
+        let pmkid = [0x09, 0x18, 0x2B, 0x3A, 0x4D, 0x5C, 0x6F, 0x7E, 0x81, 0x90, 0xA3, 0xB2, 0xC5, 0xD4, 0xE7, 0xF6];
         let mut body = Vec::new();
         body.extend_from_slice(&255u16.to_le_bytes()); // algo=255 (unknown/PASN)
         body.extend_from_slice(&1u16.to_le_bytes()); // seq=1
