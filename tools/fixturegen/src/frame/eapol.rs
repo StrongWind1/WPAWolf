@@ -236,17 +236,15 @@ pub fn amsdu_data_frame(ap: [u8; 6], sta: [u8; 6], direction: Direction, eapol_b
 
 fn build_amsdu_subframe(da: [u8; 6], sa: [u8; 6], payload_after_llc: &[u8]) -> Vec<u8> {
     // Each subframe carries its own LLC/SNAP + EtherType (EAPOL = 0x888E)
-    // followed by the inner payload. Padding aligns the *inner payload* to
-    // the next 4-byte boundary (via `(4 - len & 3) & 3`) -- this matches
-    // wpawolf's `AmsduIter` advance step in `src/ieee80211/amsdu.rs`. A
-    // previous version padded the whole subframe (header + payload) which
-    // diverged from the iterator's offset calculation and caused subframe
-    // 2 to be skipped.
+    // followed by the inner payload. Per [IEEE 802.11-2024] §9.3.2.2.2,
+    // padding aligns the *entire subframe* (14-byte header + payload) to a
+    // 4-byte boundary. Confirmed by Wireshark (WS_ROUNDUP_4(14+msdu_length))
+    // and Linux kernel (padding = (4 - (sizeof(ethhdr) + len)) & 0x3).
     let mut inner = Vec::with_capacity(LLC_SNAP_EAPOL.len() + payload_after_llc.len());
     inner.extend_from_slice(&LLC_SNAP_EAPOL);
     inner.extend_from_slice(payload_after_llc);
     let length = u16::try_from(inner.len()).unwrap_or(u16::MAX);
-    let pad = (4 - (inner.len() & 3)) & 3;
+    let pad = (4 - ((14 + inner.len()) & 3)) & 3;
     let mut sub = Vec::with_capacity(14 + inner.len() + pad);
     sub.extend_from_slice(&da);
     sub.extend_from_slice(&sa);

@@ -80,12 +80,13 @@ impl<'a> Iterator for AmsduIter<'a> {
             return None;
         }
         let payload = self.rest.get(14..total_with_payload)?;
-        // Skip padding to the next 4-byte boundary. No padding is added after
-        // the *last* subframe; if the remainder is shorter than the padding,
-        // exhaust the rest and the next call returns None naturally. The outer
-        // `& 3` collapses the aligned case (where `4 - 0 = 4`) back to 0 so a
-        // length that is already a multiple of 4 contributes no padding.
-        let pad = (4usize - (payload_len & 3)) & 3;
+        // Skip padding to the next 4-byte boundary. Per [IEEE 802.11-2024]
+        // §9.3.2.2.2, the *entire subframe* (14-byte header + payload) is padded
+        // to a multiple of 4 octets. Wireshark (packet-ieee80211.c:41807) and
+        // Linux kernel (net/wireless/util.c) confirm: WS_ROUNDUP_4(14+msdu_length).
+        // No padding after the last subframe; if the remainder is shorter than
+        // the padding, exhaust the rest and the next call returns None naturally.
+        let pad = (4 - ((14 + payload_len) & 3)) & 3;
         let next_offset = total_with_payload.saturating_add(pad).min(self.rest.len());
         self.rest = self.rest.get(next_offset..).unwrap_or(&[]);
         Some(payload)
@@ -108,6 +109,7 @@ mod tests {
     use super::*;
 
     /// Builds one A-MSDU subframe: DA(6) + SA(6) + Length(2 BE) + payload + padding.
+    /// Padding aligns the total subframe (14 + payload) to 4 bytes per §9.3.2.2.2.
     fn build_subframe(da: [u8; 6], sa: [u8; 6], payload: &[u8], with_padding: bool) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(&da);
@@ -115,7 +117,7 @@ mod tests {
         v.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
         v.extend_from_slice(payload);
         if with_padding {
-            let pad = (4 - (payload.len() & 3)) & 3;
+            let pad = (4 - ((14 + payload.len()) & 3)) & 3;
             v.extend(std::iter::repeat_n(0u8, pad));
         }
         v
@@ -193,11 +195,12 @@ mod tests {
         // Spec-rare but possible: declared Length=0 means an "empty payload"
         // subframe. Our iterator yields the empty slice and continues; the
         // EAPOL parser will discard the 0-byte body harmlessly.
+        // Total subframe = 14 + 0 = 14 bytes; pad = (4 - (14 & 3)) & 3 = 2.
         let mut body = Vec::new();
         body.extend_from_slice(&[0; 6]);
         body.extend_from_slice(&[0; 6]);
         body.extend_from_slice(&0u16.to_be_bytes());
-        // Padding for a 0-byte payload: (4 - 0) & 3 = 0, no pad added.
+        body.extend_from_slice(&[0u8; 2]); // 2 bytes padding to align 14 to 16
         // Then a real subframe.
         body.extend_from_slice(&build_subframe([1; 6], [2; 6], b"data", false));
         let mut it = AmsduIter::new(&body);
