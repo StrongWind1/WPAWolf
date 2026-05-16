@@ -930,6 +930,8 @@ impl Stats {
         }
 
         println!("---");
+        println!("wpawolf {} ({})", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"));
+        println!("---");
 
         // ======================================================================
         // Phase 1 -- Ingest: file metadata + raw packet/byte ingestion
