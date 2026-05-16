@@ -4,6 +4,13 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ## Releases
 
+### v0.3.9 -- 2026-05-16
+
+A-MSDU subframe padding corrected per IEEE 802.11-2024 §9.3.2.2.2. No change to the hashcat-line output format for non-A-MSDU traffic; captures where EAPOL frames live in A-MSDU subframe 2+ may now produce additional hash lines that v0.3.8 and earlier silently missed due to the misaligned subframe walk.
+
+- **A-MSDU subframe padding corrected to align the total subframe length.** The iterator in `src/ieee80211/amsdu.rs` previously computed inter-subframe padding as `(4 - (payload_len % 4)) % 4`, aligning only the payload to a 4-byte boundary. Per [IEEE 802.11-2024] §9.3.2.2.2 ("each A-MSDU subframe (except the last) is padded so that **its length** is a multiple of 4 octets"), the correct formula aligns the *entire* subframe (14-byte header + payload): `(4 - ((14 + payload_len) % 4)) % 4`. The two formulas always diverge by exactly 2 bytes (since `14 % 4 = 2`), causing the iterator to read subsequent subframe headers at the wrong offset in every multi-subframe A-MSDU. Confirmed against Wireshark (`packet-ieee80211.c:41807`: `WS_ROUNDUP_4(14+msdu_length)`) and the Linux kernel (`net/wireless/util.c`: `padding = (4 - (sizeof(struct ethhdr) + len)) & 0x3`). The test fixture (`tools/fixturegen`) previously used the same incorrect formula so tests passed despite the bug; both are now corrected and the fixture regenerated.
+- 848 tests; `make check-all` passes clean.
+
 ### v0.3.8 -- 2026-05-15
 
 OOM prevention, full diagnostic mode, stdout migration, and per-failure-reason EAPOL rejection logging. No change to the hashcat-line output format; 22000 / 37100 / taxonomy lines are byte-identical to v0.3.7 for any handshake that previously produced output.
