@@ -56,31 +56,52 @@ pub fn parse_mde(value: &[u8]) -> Option<MdeInfo> {
 
 /// Parses a Fast Transition IE value (Element ID 55).
 ///
-/// `value` is `ie.value`. Minimum 82 bytes: MIC Control (2) + MIC (16) + `ANonce` (32) +
-/// `SNonce` (32). The MIC itself is not stored -- it is not needed for hash construction.
-/// Subelements after offset 82 are parsed for R1KH-ID and R0KH-ID. Returns `None` if
-/// the value is shorter than 82 bytes. [IEEE 802.11-2024] §9.4.2.46.
+/// `value` is `ie.value`. The MIC field is variable-length: 16 bytes for SHA-256
+/// AKMs (4, 3-6, 8, 9, 11), 24 bytes for SHA-384 AKMs (12, 13, 19, 20), 32 bytes
+/// for SHA-512 (AKM 25 with MIC Length subfield = 2). The MIC length is determined
+/// from the MIC Control field's MIC Length subfield (bits B1-B3) per Table 9-220:
+/// 0->16, 1->24, 2->32. For AKMs other than 25 the subfield is "reserved" but
+/// well-behaved firmware sets it correctly; we validate against the IE body length
+/// and fall back to 16 if the decoded length is inconsistent.
+/// [IEEE 802.11-2024] §9.4.2.46, Figure 9-436, Table 9-220, Table 12-11.
 #[must_use]
 pub fn parse_fte(value: &[u8]) -> Option<FteInfo> {
-    // Minimum fixed-field layout:
-    //   MIC Control: 2 bytes (offset 0)
-    //   MIC:        16 bytes (offset 2)
-    //   ANonce:     32 bytes (offset 18)
-    //   SNonce:     32 bytes (offset 50)
-    //   Total:      82 bytes
-    if value.len() < 82 {
+    // MIC Control: 2 bytes (offset 0). Bits B1-B3 = MIC Length subfield.
+    // [IEEE 802.11-2024] Figure 9-437, Table 9-220
+    if value.len() < 2 {
         return None;
     }
-    // MIC Control (offset 0, 2 bytes) and MIC (offset 2, 16 bytes) are not needed for
-    // hash output -- skip directly to ANonce.
-    let anonce: [u8; 32] = value.get(18..50).and_then(|s| s.try_into().ok())?;
-    let snonce: [u8; 32] = value.get(50..82).and_then(|s| s.try_into().ok())?;
+    let mic_ctrl_lo = *value.first()?;
+    let mic_len_code = (mic_ctrl_lo >> 1) & 0x07;
+    let mic_len: usize = match mic_len_code {
+        1 => 24,
+        2 => 32,
+        _ => 16, // 0 or reserved values default to 16
+    };
+
+    // Layout: MIC Control (2) + MIC (mic_len) + ANonce (32) + SNonce (32).
+    let anonce_off = 2 + mic_len;
+    let body_required = anonce_off + 64; // 32 ANonce + 32 SNonce
+
+    // If the decoded mic_len makes the FTE too short, fall back to 16.
+    let anonce_off = if body_required > value.len() {
+        let fallback = 2 + 16; // 16-byte MIC default
+        if fallback + 64 > value.len() {
+            return None;
+        }
+        fallback
+    } else {
+        anonce_off
+    };
+
+    let anonce: [u8; 32] = value.get(anonce_off..anonce_off + 32).and_then(|s| s.try_into().ok())?;
+    let snonce: [u8; 32] = value.get(anonce_off + 32..anonce_off + 64).and_then(|s| s.try_into().ok())?;
 
     let mut r1khid: Option<[u8; 6]> = None;
     let mut r0khid: Option<Vec<u8>> = None;
 
     // Parse subelements: each is type(1) + length(1) + value(length).
-    let mut pos = 82usize;
+    let mut pos = anonce_off + 64;
     while pos + 2 <= value.len() {
         let Some(&sub_type) = value.get(pos) else { break };
         let sub_len = match value.get(pos + 1) {
@@ -165,12 +186,25 @@ mod tests {
 
     use super::*;
 
-    // Builds a minimal 82-byte FTE value with given ANonce and SNonce.
+    // Builds a minimal FTE value with 16-byte MIC (MIC Length subfield = 0).
     fn make_fte_value(anonce: [u8; 32], snonce: [u8; 32]) -> Vec<u8> {
-        let mut v = vec![0u8; 82];
-        // MIC Control (2 bytes, offset 0) and MIC (16 bytes, offset 2) are zeroed.
+        // MIC Control: 0x0000 (MIC Length = 0 -> 16 bytes).
+        let mut v = vec![0u8; 82]; // 2 + 16 + 32 + 32 = 82
         v[18..50].copy_from_slice(&anonce);
         v[50..82].copy_from_slice(&snonce);
+        v
+    }
+
+    // Builds an FTE value with 24-byte MIC (MIC Length subfield = 1, for SHA-384 AKMs).
+    fn make_fte_value_24mic(anonce: [u8; 32], snonce: [u8; 32]) -> Vec<u8> {
+        // MIC Control byte 0: MIC Length subfield (bits B1-B3) = 1 -> 24-byte MIC.
+        // Encoding: bit B0 = RSNXE Used = 0, bits B1-B3 = 001 -> byte = 0x02.
+        let mut v = vec![0u8; 90]; // 2 + 24 + 32 + 32 = 90
+        v[0] = 0x02; // MIC Length = 1
+        // ANonce at offset 2 + 24 = 26
+        v[26..58].copy_from_slice(&anonce);
+        // SNonce at offset 26 + 32 = 58
+        v[58..90].copy_from_slice(&snonce);
         v
     }
 
@@ -278,6 +312,55 @@ mod tests {
         tagged.extend_from_slice(&[0x12, 0x34, 0x00]);
 
         assert!(extract_ft_fields(&tagged).is_none());
+    }
+
+    #[test]
+    fn parse_fte_24byte_mic() {
+        // SHA-384 AKMs (e.g., AKM 12/13) use 24-byte MIC. [IEEE 802.11-2024] Table 9-220
+        let anonce = [0xAAu8; 32];
+        let snonce = [0xBBu8; 32];
+        let value = make_fte_value_24mic(anonce, snonce);
+        assert_eq!(value.len(), 90); // 2 + 24 + 32 + 32
+        let info = parse_fte(&value).unwrap();
+        assert_eq!(info.anonce, anonce);
+        assert_eq!(info.snonce, snonce);
+        assert!(info.r1khid.is_none());
+        assert!(info.r0khid.is_none());
+    }
+
+    #[test]
+    fn parse_fte_32byte_mic() {
+        // SHA-512 AKM 25 uses 32-byte MIC (MIC Length subfield = 2). [IEEE 802.11-2024] Table 9-220
+        let anonce = [0xCCu8; 32];
+        let snonce = [0xDDu8; 32];
+        // MIC Control byte 0: bits B1-B3 = 2 -> byte = 0x04.
+        let mut v = vec![0u8; 98]; // 2 + 32 + 32 + 32 = 98
+        v[0] = 0x04; // MIC Length = 2
+        // ANonce at offset 2 + 32 = 34
+        v[34..66].copy_from_slice(&anonce);
+        // SNonce at offset 34 + 32 = 66
+        v[66..98].copy_from_slice(&snonce);
+
+        let info = parse_fte(&v).unwrap();
+        assert_eq!(info.anonce, anonce);
+        assert_eq!(info.snonce, snonce);
+    }
+
+    #[test]
+    fn parse_fte_mic_length_fallback() {
+        // If MIC Control claims 24-byte MIC but body is only 82 bytes (fits 16, not 24),
+        // the parser falls back to 16.
+        let anonce = [0xEEu8; 32];
+        let snonce = [0xFFu8; 32];
+        let mut v = vec![0u8; 82]; // Only fits 16-byte MIC layout
+        v[0] = 0x02; // Claims MIC Length = 1 (24 bytes) but body too short
+        // With fallback to 16: ANonce at offset 18, SNonce at 50
+        v[18..50].copy_from_slice(&anonce);
+        v[50..82].copy_from_slice(&snonce);
+
+        let info = parse_fte(&v).unwrap();
+        assert_eq!(info.anonce, anonce);
+        assert_eq!(info.snonce, snonce);
     }
 
     #[test]
