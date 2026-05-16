@@ -187,6 +187,9 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         | PmkidSource::ProbeRespRsnIe => {
             if is_ft {
                 0x10
+            } else if entry.akm.is_psk_sha256() {
+                // hcx: PMKID_AP | PMKID_APPSK256 = 0x03
+                0x03
             } else {
                 0x01
             }

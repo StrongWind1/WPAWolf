@@ -176,6 +176,12 @@ impl AkmType {
     pub const fn is_ft(self) -> bool {
         matches!(self, Self::FtPsk | Self::FtPskSha384)
     }
+
+    /// Returns `true` for `PskSha256` (AKM 6, `00:0F:AC:06`).
+    #[must_use]
+    pub const fn is_psk_sha256(self) -> bool {
+        matches!(self, Self::PskSha256)
+    }
 }
 
 // --- Hash type (11-type classification) ---

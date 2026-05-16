@@ -293,7 +293,7 @@ impl<R: Read> PcapngReader<R> {
 
         if block_total_len < MIN_BLOCK_BYTES {
             println!(
-                "wpawolf: pcapng block type 0x{block_type:08X} has block_total_length {block_total_len} < {MIN_BLOCK_BYTES}, skipping"
+                "wpawolf: pcapng block type 0x{block_type:08X} has block_total_length {block_total_len} < {MIN_BLOCK_BYTES}, skipping (stream desynchronized -- remaining blocks in this section may fail)"
             );
             return Ok(BlockOutcome::Skip);
         }

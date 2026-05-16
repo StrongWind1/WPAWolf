@@ -85,17 +85,12 @@ impl ProgressReporter {
         if !self.enabled {
             return;
         }
-        // Fast path: packet delta below threshold and time delta below threshold.
+        // Hybrid cadence: emit when EITHER threshold fires first.
         // The packet check is a u64 subtract -- effectively free. The wall-clock
-        // check is a syscall on most platforms, so guard it with the packet
-        // delta first to amortise the cost.
+        // check is a syscall on most platforms, so only consult it when the
+        // packet delta is below threshold (avoids the syscall on the hot path).
         let packet_delta = total_packets.saturating_sub(self.last_print_packets);
-        if packet_delta < PACKETS_THRESHOLD {
-            // Only consult the wall clock once per ~2M packets.
-            return;
-        }
-        let elapsed_since_last = self.last_print.elapsed();
-        if packet_delta < PACKETS_THRESHOLD && elapsed_since_last.as_secs() < ELAPSED_SECS_THRESHOLD {
+        if packet_delta < PACKETS_THRESHOLD && self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD {
             return;
         }
         self.emit(total_packets, files, eapol, pmkids);
@@ -133,26 +128,27 @@ impl ProgressReporter {
 /// Returns the current process's resident set size in MiB, or `None` when the
 /// platform does not expose a cheap probe.
 ///
-/// Linux: read `/proc/self/statm`, take field 2 (resident pages), multiply by
-/// 4096 (the kernel-level page size on every supported architecture). Other
-/// platforms return `None` so the caller omits the `rss=` field rather than
-/// printing a wrong value.
+/// Linux: reads `VmRSS:` from `/proc/self/status` which reports in KiB
+/// regardless of the kernel's page size (correct on both 4 KiB `x86_64` and
+/// 64 KiB `aarch64` pages). Other platforms return `None` so the caller omits
+/// the `rss=` field rather than printing a wrong value.
 #[must_use]
 pub fn current_rss_mib() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        // /proc/self/statm format per `man proc`:
-        //   size resident shared text lib data dt
-        // All in pages.
+        // /proc/self/status contains `VmRSS:  <N> kB` -- already in KiB,
+        // page-size-independent. Divide by 1024 for MiB.
         let mut buf = String::new();
-        let mut f = std::fs::File::open("/proc/self/statm").ok()?;
+        let mut f = std::fs::File::open("/proc/self/status").ok()?;
         f.read_to_string(&mut buf).ok()?;
-        let mut parts = buf.split_ascii_whitespace();
-        let _size = parts.next()?;
-        let resident_pages: u64 = parts.next()?.parse().ok()?;
-        // Page size is 4 KiB on every Linux arch wpawolf currently builds for.
-        // 4096 / (1024 * 1024) = 1/256, so divide pages by 256 for MiB.
-        Some(resident_pages / 256)
+        for line in buf.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kib: u64 =
+                    rest.trim().strip_suffix("kB").or_else(|| rest.trim().strip_suffix("KB"))?.trim().parse().ok()?;
+                return Some(kib / 1024);
+            }
+        }
+        None
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -196,6 +192,19 @@ mod tests {
         r.tick(1_000_000, 1, 0, 0);
         r.tick(1_999_999, 1, 0, 0);
         assert_eq!(r.last_print_packets, snap_packets, "no print -> bookkeeping unchanged");
+    }
+
+    #[test]
+    fn time_fallback_emits_when_packet_delta_below_threshold() {
+        // Simulate a slow stream: packet delta stays below 2M but wall clock
+        // exceeds 5 s. The reporter must emit (the bug CR-23 fixed).
+        let mut r = ProgressReporter::new(true);
+        // Backdate `last_print` by 6 seconds to simulate elapsed time.
+        r.last_print = Instant::now().checked_sub(std::time::Duration::from_secs(6)).unwrap();
+        let snap_packets = r.last_print_packets;
+        r.tick(1000, 1, 0, 0); // packet_delta=1000 < 2M, but elapsed > 5s
+        assert_ne!(r.last_print_packets, snap_packets, "time fallback should have triggered emit");
+        assert_eq!(r.last_print_packets, 1000);
     }
 
     #[test]

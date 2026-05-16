@@ -314,6 +314,39 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Reject duplicate output paths -- two sinks writing the same file causes silent data loss.
+    {
+        let paths: Vec<&std::path::Path> = [
+            cli.out_22000.as_deref(),
+            cli.out_37100.as_deref(),
+            cli.out_combined.as_deref(),
+            cli.out_wpa1.as_deref(),
+            cli.out_wpa2.as_deref(),
+            cli.out_psk_sha256.as_deref(),
+            cli.out_ft.as_deref(),
+            cli.out_psk_sha384.as_deref(),
+            cli.out_ft_psk_sha384.as_deref(),
+            cli.essid_output.as_deref(),
+            cli.probe_output.as_deref(),
+            cli.wordlist_output.as_deref(),
+            cli.identity_output.as_deref(),
+            cli.username_output.as_deref(),
+            cli.device_output.as_deref(),
+            cli.wordlist_scan.as_deref(),
+            cli.log.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut seen = std::collections::HashSet::with_capacity(paths.len());
+        for p in &paths {
+            if !seen.insert(*p) {
+                println!("error: duplicate output path: {}", p.display());
+                std::process::exit(1);
+            }
+        }
+    }
+
     if let Err(e) = run(&cli) {
         println!("error: {e}");
         std::process::exit(1);
