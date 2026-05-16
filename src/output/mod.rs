@@ -1,7 +1,7 @@
 //! Phase 4 -- Emit: output coordination (PMKID pipeline + EAPOL pair pipeline run independently). See ARCHITECTURE.md §3.4 + §7.
 //!
 //! Opens every configured hash sink (legacy `--22000-out` / `--37100-out` plus the
-//! 11-type taxonomy sinks `--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`,
+//! 11-type per-AKM sinks `--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`,
 //! `--psk-sha384-out`, `--ft-psk-sha384-out`, and the combined `-o`) and the auxiliary
 //! wordlists. Every emitted hash is fanned out to *every* configured sink whose
 //! accept-set contains the classified `HashType`, with the appropriate per-sink line
@@ -77,7 +77,7 @@ pub struct OutputPaths {
     pub out_22000: Option<PathBuf>,
     /// `--37100-out` -- legacy hashcat mode 37100 (every FT hash, `WPA*03*`/`WPA*04*`).
     pub out_37100: Option<PathBuf>,
-    /// `-o`/`--out` -- combined 11-type taxonomy file (every emitted hash).
+    /// `-o`/`--out` -- combined 11-type per-AKM file (every emitted hash).
     pub out_combined: Option<PathBuf>,
     /// `--wpa1-out` -- type 1 only.
     pub out_wpa1: Option<PathBuf>,
@@ -167,7 +167,7 @@ pub struct OutputStats {
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
-    /// Hash lines written, keyed by `HashType` (the 11-row taxonomy in
+    /// Hash lines written, keyed by `HashType` (the 11-type classification in
     /// `ARCHITECTURE.md §2`). Counted once per logical hash regardless of how many
     /// sinks it was fanned out to. Merged into `Stats::hash_type_emitted` after
     /// `run_output` returns.
@@ -269,8 +269,8 @@ impl HashSinks {
     }
 }
 
-/// Returns the per-AKM-family taxonomy sink that accepts a given `HashType`, if any.
-const fn taxonomy_sink_for(ht: HashType) -> SinkId {
+/// Returns the per-AKM extended sink that accepts a given `HashType`, if any.
+const fn extended_sink_for(ht: HashType) -> SinkId {
     match ht {
         HashType::Wpa1Eapol => SinkId::OutWpa1,
         HashType::Wpa2PskPmkid | HashType::Wpa2PskEapol => SinkId::OutWpa2,
@@ -291,7 +291,7 @@ const fn taxonomy_sink_for(ht: HashType) -> SinkId {
 /// (`[hashcat module_22000.c:check_token]`), and mode 37100 only ships a
 /// SHA-256 FT key-hierarchy kernel -- so writing those lines into the legacy
 /// sinks generates `Token length exception` parse errors at hashcat startup
-/// and pollutes the input file. The dedicated taxonomy sinks
+/// and pollutes the input file. The dedicated per-AKM sinks
 /// (`--psk-sha384-out` / `--ft-psk-sha384-out`) and the combined `-o` sink
 /// continue to receive these lines under their `WPA*08*..*11*` prefixes,
 /// where downstream tooling can recognise the wider MIC width.
@@ -335,12 +335,12 @@ enum FanItem<'a> {
 /// Builds the line text for a given `(item, sink, ht)` triple.
 ///
 /// Legacy sinks use `ht.legacy_prefix()` plus -- for FT lines -- the FT-extra-field
-/// formatter. Taxonomy sinks use `ht.taxonomy_prefix()`. PMKID rows of FT types route
+/// formatter. Taxonomy sinks use `ht.extended_prefix()`. PMKID rows of FT types route
 /// through the FT formatter to keep MDID+R0KH+R1KH appended. Non-FT rows route through
 /// the plain PMKID/EAPOL formatter.
 fn build_line(item: &FanItem<'_>, sink: SinkId, ht: HashType) -> String {
     let prefix: &[u8] =
-        if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.taxonomy_prefix() };
+        if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() };
     match *item {
         FanItem::Pmkid { entry, ft, essid } => ft.map_or_else(
             || format_pmkid_line(prefix, entry, essid),
@@ -365,7 +365,7 @@ fn fan_out(
     item: FanItem<'_>,
 ) -> Result<bool> {
     // Each candidate sink: legacy (skipped for SHA-384) + per-AKM-family + combined.
-    let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(taxonomy_sink_for(ht)), Some(SinkId::OutCombined)];
+    let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
     let mut any_written = false;
     for sink in candidates.into_iter().flatten() {
         let idx = sink.as_index();
@@ -885,9 +885,9 @@ mod tests {
     }
 
     #[test]
-    fn taxonomy_sink_routes_match_hash_type_family() {
+    fn extended_sink_routes_match_hash_type_family() {
         for ht in HashType::all() {
-            let sink = taxonomy_sink_for(ht);
+            let sink = extended_sink_for(ht);
             let expected = match ht.type_code() {
                 1 => SinkId::OutWpa1,
                 2 | 3 => SinkId::OutWpa2,

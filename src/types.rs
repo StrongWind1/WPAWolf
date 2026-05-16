@@ -1,4 +1,4 @@
-//! Shared -- types and primitives. `HashType` encodes the 11-type taxonomy in ARCHITECTURE.md §2.
+//! Shared -- types and primitives. `HashType` encodes the 11-type classification in ARCHITECTURE.md §2.
 //!
 //! This module sits at the bottom of the dependency DAG -- it imports only from `std`.
 //! All public types implement `Send + Sync` (enforced by `Copy` / `#[derive]`) so the
@@ -132,7 +132,7 @@ impl std::fmt::Display for MsgType {
 /// determines both the PMKID derivation algorithm and the hashcat output mode
 /// (22000 vs 37100).
 ///
-/// Each variant maps to one row of the 11-type taxonomy in `ARCHITECTURE.md §2`
+/// Each variant maps to one row of the 11-type classification in `ARCHITECTURE.md §2`
 /// via `HashType::from_akm_and_attack`. Splitting `Psk` into `Wpa1` (legacy WPA1
 /// PSK) and `Wpa2Psk` (WPA2 AKM 2), and splitting the SHA-256 / SHA-384 variants
 /// (`FtPsk` vs `FtPskSha384`, `PskSha256` vs `PskSha384`) keeps each row pinned
@@ -178,7 +178,7 @@ impl AkmType {
     }
 }
 
-// --- Hash type (11-type taxonomy) ---
+// --- Hash type (11-type classification) ---
 
 /// One of the eleven distinct PSK-crackable hash types per `ARCHITECTURE.md §2`.
 ///
@@ -337,11 +337,11 @@ impl HashType {
         }
     }
 
-    /// New 11-type taxonomy line prefix: `b"WPA*<type-code>*"` with the type-code as
+    /// New 11-type classification line prefix: `b"WPA*<type-code>*"` with the type-code as
     /// 2-digit decimal. Used by every per-AKM sink (`--wpa1-out`, `--wpa2-out`, ...)
     /// and the combined `-o` sink. See `ARCHITECTURE.md §2`.
     #[must_use]
-    pub const fn taxonomy_prefix(self) -> &'static [u8] {
+    pub const fn extended_prefix(self) -> &'static [u8] {
         match self {
             Self::Wpa1Eapol => b"WPA*01*",
             Self::Wpa2PskPmkid => b"WPA*02*",
@@ -1338,11 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn hash_type_taxonomy_prefix_matches_type_code() {
-        // The taxonomy prefix encodes the 1-11 type code as 2-digit decimal.
+    fn hash_type_extended_prefix_matches_type_code() {
+        // The extended prefix encodes the 1-11 type code as 2-digit decimal.
         for ht in HashType::all() {
             let expected = format!("WPA*{:02}*", ht.type_code());
-            assert_eq!(ht.taxonomy_prefix(), expected.as_bytes(), "{}", ht.name());
+            assert_eq!(ht.extended_prefix(), expected.as_bytes(), "{}", ht.name());
         }
     }
 

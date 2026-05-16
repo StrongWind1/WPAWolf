@@ -167,7 +167,7 @@ pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
                 // Vendor IE -- check for WPA1 IE (OUI 00:50:F2, type 1). The legacy WPA1
                 // vendor IE reuses the RSN inner format including the AKM-2 selector for
                 // its PSK suite, but the IE container itself signals WPA1: KDV 1
-                // HMAC-MD5 MIC, PRF-SHA1 PTK, no PMKID field. Per the 11-type taxonomy
+                // HMAC-MD5 MIC, PRF-SHA1 PTK, no PMKID field. Per the 11-type extended format
                 // (ARCHITECTURE.md §2) this is type 1 (WPA1-PSK-EAPOL), distinct from
                 // type 3 (WPA2-PSK-EAPOL) which the AKM 2 selector would otherwise imply.
                 // Map the inner WPA2-PSK to the dedicated AkmType::Wpa1 variant.
@@ -365,7 +365,7 @@ pub struct AssocAkmFlags {
     /// Legacy WPA1 vendor IE (OUI `00:50:F2`, type 1) detected on the frame.
     /// WPA1 predates RSN and uses a vendor IE for its security suite; the inner
     /// AKM-2 selector is reused but the container signals WPA1-PSK-EAPOL (type 1
-    /// in the 11-type taxonomy, ARCHITECTURE.md §2). Mutually exclusive with
+    /// in the 11-type extended format, ARCHITECTURE.md §2). Mutually exclusive with
     /// `psk` in well-formed Beacons but not enforced here.
     pub wpa1: bool,
 }

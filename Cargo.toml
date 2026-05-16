@@ -9,7 +9,7 @@ resolver = "3"
 
 [package]
 name = "wpawolf"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2024"
 rust-version = "1.85"
 description = "WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100)"
@@ -43,16 +43,16 @@ name = "anqp_parse"
 path = "tests/integration/anqp_parse.rs"
 
 [[test]]
-name = "taxonomy_outputs_per_akm"
-path = "tests/integration/taxonomy_outputs_per_akm.rs"
+name = "extended_outputs_per_akm"
+path = "tests/integration/extended_outputs_per_akm.rs"
 
 [[test]]
-name = "taxonomy_combined_o"
-path = "tests/integration/taxonomy_combined_o.rs"
+name = "extended_combined_o"
+path = "tests/integration/extended_combined_o.rs"
 
 [[test]]
-name = "taxonomy_dedup_per_sink"
-path = "tests/integration/taxonomy_dedup_per_sink.rs"
+name = "extended_dedup_per_sink"
+path = "tests/integration/extended_dedup_per_sink.rs"
 
 [[test]]
 name = "log_categories_coverage"

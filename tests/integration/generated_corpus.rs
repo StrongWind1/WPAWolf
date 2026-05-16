@@ -36,7 +36,7 @@ fn binary_path() -> PathBuf {
     PathBuf::from(target).join("target").join("release").join("wpawolf")
 }
 
-/// Run wpawolf with the combined `-o` sink so every taxonomy type
+/// Run wpawolf with the combined `-o` sink so every extended type
 /// (including PSK-SHA256, FT, and SHA-384 families that bypass `--22000-out`)
 /// is captured.
 fn run_wpawolf(input: &Path) -> String {

@@ -1,4 +1,4 @@
-//! Cryptographic primitives for the 11-type WPA/WPA2/WPA3-FT-PSK taxonomy.
+//! Cryptographic primitives for the 11-type WPA/WPA2/WPA3-FT-PSK per-AKM.
 //!
 //! Each function corresponds to a specific clause in `[IEEE 802.11-2024]`:
 //!

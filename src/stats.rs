@@ -212,7 +212,7 @@ pub struct Stats {
     /// Catches reserved / future / vendor-divergent suite numbers so they never drop silently.
     pub assoc_req_akm_unknown: u64,
     /// Association Requests carrying the legacy WPA1 vendor IE (OUI `00:50:F2`, type 1).
-    /// WPA1-PSK-EAPOL is type 1 in the 11-type taxonomy (ARCHITECTURE.md §2).
+    /// WPA1-PSK-EAPOL is type 1 in the 11-type classification (ARCHITECTURE.md §2).
     pub assoc_req_wpa1: u64,
     /// Reassociation Requests with AKM 2 (WPA2-PSK; hashcat mode 22000).
     pub reassoc_req_wpa2_psk: u64,
@@ -245,7 +245,7 @@ pub struct Stats {
     /// Reassociation Requests with an `00:0F:AC` AKM suite type outside Table 9-190.
     pub reassoc_req_akm_unknown: u64,
     /// Reassociation Requests carrying the legacy WPA1 vendor IE (OUI `00:50:F2`, type 1).
-    /// WPA1-PSK-EAPOL is type 1 in the 11-type taxonomy (ARCHITECTURE.md §2).
+    /// WPA1-PSK-EAPOL is type 1 in the 11-type classification (ARCHITECTURE.md §2).
     pub reassoc_req_wpa1: u64,
 
     // --- Per-band packet counts (from radiotap Channel field) ---
@@ -668,7 +668,7 @@ pub struct Stats {
     pub lines_22000: u64,
     /// `--37100-out` lines written.
     pub lines_37100: u64,
-    /// `-o`/`--out` (combined taxonomy) lines written.
+    /// `-o`/`--out` (combined per-AKM) lines written.
     pub lines_combined: u64,
     /// `--wpa1-out` lines written.
     pub lines_wpa1: u64,
@@ -707,7 +707,7 @@ pub struct Stats {
     pub path_22000: String,
     /// Path for `--37100-out`, or empty when not configured.
     pub path_37100: String,
-    /// Path for `-o`/`--out` combined taxonomy, or empty when not configured.
+    /// Path for `-o`/`--out` combined per-AKM, or empty when not configured.
     pub path_combined: String,
     /// Path for `--wpa1-out`, or empty when not configured.
     pub path_wpa1: String,
@@ -734,7 +734,7 @@ pub struct Stats {
     /// Path for device info output, or empty when -D was not given.
     pub device_info_path: String,
 
-    // --- Per-hash-type breakdown (the 11-row taxonomy) ---
+    // --- Per-hash-type breakdown (the 11-row per-AKM) ---
     // Counts the number of hash lines emitted for each row of the table in
     // `ARCHITECTURE.md §2`. Populated by `record_hash_emitted()` from the
     // output writer, after dedup and FT-context filtering. Lets the summary
@@ -1246,7 +1246,7 @@ impl Stats {
         section!(4, "Emit");
 
         // Per-hash-type breakdown -- one row per `HashType` variant from the
-        // 11-type taxonomy in ARCHITECTURE.md §2. Anchors every emitted hash
+        // 11-type classification in ARCHITECTURE.md §2. Anchors every emitted hash
         // line to a single (AKM, attack surface) so the operator can read off
         // exactly what hashcat will see, type code by type code.
         if self.hash_type_emitted.values().any(|&n| n > 0) {
@@ -1291,11 +1291,11 @@ impl Stats {
         // the line / dedup-dropped counters; unconfigured sinks show "not configured"
         // and skip the counter rows. The legacy 22000 / 37100 sinks remain hashcat-
         // compatible via the 4-prefix scheme; the per-AKM-family and combined sinks
-        // emit the 11-type taxonomy prefixes from `ARCHITECTURE.md §2`.
+        // emit the 11-type classification prefixes from `ARCHITECTURE.md §2`.
         let sinks: [(&str, &str, u64, u64); 9] = [
             ("--22000-out (legacy mode 22000)", &self.path_22000, self.lines_22000, self.dropped_22000),
             ("--37100-out (legacy mode 37100)", &self.path_37100, self.lines_37100, self.dropped_37100),
-            ("-o / --out (combined taxonomy)", &self.path_combined, self.lines_combined, self.dropped_combined),
+            ("-o / --out (combined per-AKM)", &self.path_combined, self.lines_combined, self.dropped_combined),
             ("--wpa1-out (type 1)", &self.path_wpa1, self.lines_wpa1, self.dropped_wpa1),
             ("--wpa2-out (types 2+3)", &self.path_wpa2, self.lines_wpa2, self.dropped_wpa2),
             ("--psk-sha256-out (types 4+5)", &self.path_psk_sha256, self.lines_psk_sha256, self.dropped_psk_sha256),

@@ -75,7 +75,7 @@ Requires a stable Rust toolchain (see `rust-toolchain.toml`). See [`CONTRIBUTING
 # Legacy 22000 + 37100 (what hashcat cracks today).
 wpawolf --22000-out hashes.22000 --37100-out hashes.37100 *.pcap
 
-# Combined output: every hash in the eleven-category taxonomy format.
+# Combined output: every hash in the extended 11-type format.
 wpawolf -o all-hashes.out *.pcap
 
 # Per-AKM split for triage.
@@ -125,7 +125,7 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 |---|---|---|
 | `--22000-out FILE` | every non-FT hash (`WPA*01*`/`WPA*02*`) | yes -- mode 22000 |
 | `--37100-out FILE` | every FT hash (`WPA*03*`/`WPA*04*`) | yes -- mode 37100 |
-| `-o`, `--out FILE` | every emitted hash (`WPA*01*..*11*` taxonomy) | no -- needs proposed mode 22002/22003 |
+| `-o`, `--out FILE` | every emitted hash (`WPA*01*..*11*`, per-AKM format) | no -- needs proposed mode 22002/22003 |
 | `--wpa1-out FILE` | category 1 | no |
 | `--wpa2-out FILE` | categories 2 + 3 | no |
 | `--psk-sha256-out FILE` | categories 4 + 5 | no |
@@ -133,7 +133,7 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 | `--psk-sha384-out FILE` | categories 8 + 9 | no |
 | `--ft-psk-sha384-out FILE` | categories 10 + 11 | no |
 
-The taxonomy sinks (`-o` and per-family flags) use an eleven-prefix format described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). No current hashcat mode reads it; proposed modes 22002/22003 are sketched in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
+The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix format described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). No current hashcat mode reads it; proposed modes 22002/22003 are sketched in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
 
 ### Auxiliary outputs
 
@@ -191,7 +191,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow, parity or
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, stats catalogue, FR-* contracts |
 | [CHANGELOG.md](CHANGELOG.md) | per-release summary of what shipped |
 | [HASHCAT-CURRENT-FORMATS.md](HASHCAT-CURRENT-FORMATS.md) | modes 22000 + 37100 as they exist in hashcat today |
-| [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | the 11-type taxonomy: per-category cracker math, line layout, message-pair byte |
+| [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | the 11 hash types: per-AKM cracker math, line layout, message-pair byte |
 | [HASHCAT-PROPOSED-CHANGES.md](HASHCAT-PROPOSED-CHANGES.md) | proposed modes 22002 / 22003 (design, not implemented) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | dev workflow, parity oracle, commit conventions |
 

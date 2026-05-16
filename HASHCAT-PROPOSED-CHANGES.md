@@ -1,10 +1,10 @@
 # Hashcat Proposed Changes: Two New WPA-PSK Modes
 
-> **Status: design proposal, not implemented.** Nothing in this file ships in upstream hashcat today. The wpawolf side already emits the taxonomy described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md); this document is the half of the story that lives outside this repository and would require a hashcat module patch to land.
+> **Status: design proposal, not implemented.** Nothing in this file ships in upstream hashcat today. The wpawolf side already emits the per-AKM format described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md); this document is the half of the story that lives outside this repository and would require a hashcat module patch to land.
 
-A design sketch for two new hashcat modules that consume the 11-type taxonomy from [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) in a single pass: one passphrase-input mode and one PMK-direct mode, covering every PSK family the spec defines.
+A design sketch for two new hashcat modules that consume the 11-type classification from [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) in a single pass: one passphrase-input mode and one PMK-direct mode, covering every PSK family the spec defines.
 
-This is a greenfield design. The new modules accept ONLY the new `WPA*01*..*11*` taxonomy prefixes -- no legacy line acceptance, no `keyver` peek, no HCCAPX import. The existing modes 22000, 22001, and 37100 remain in the codebase exactly as they are today and continue to read the legacy `WPA*01*..*04*` prefixes; this proposal does not touch them. Operators with existing legacy hash files convert them to the new format with the `wpawolf-convert` companion tool (§8); operators re-extracting from pcaps run `wpawolf -o` to write the new format directly.
+This is a greenfield design. The new modules accept ONLY the new `WPA*01*..*11*` per-AKM prefixes -- no legacy line acceptance, no `keyver` peek, no HCCAPX import. The existing modes 22000, 22001, and 37100 remain in the codebase exactly as they are today and continue to read the legacy `WPA*01*..*04*` prefixes; this proposal does not touch them. Operators with existing legacy hash files convert them to the new format with the `wpawolf-convert` companion tool (§8); operators re-extracting from pcaps run `wpawolf -o` to write the new format directly.
 
 The proposal is staged in two phases:
 
@@ -20,7 +20,7 @@ Phase 1 is shippable without any hashcat-core patch. Phase 2 unlocks the maximum
 1. **One module per input semantic.** Mode 22002 takes a passphrase and runs PBKDF2; mode 22003 takes a 64-hex PMK and skips PBKDF2. The on-disk hash format and the post-PMK math are identical between them. This mirrors the relationship between today's 22000 and 22001.
 2. **Type-driven dispatch.** The 2-digit prefix code after `WPA*` is the SOLE routing axis. The loader reads the type, picks the kernel, sets the MIC width, and decides whether to expect FT extras. No `keyver` byte inspection, no AKM inference, no pair-of-fields correlation.
 3. **PBKDF2 reuse across all 11 types per ESSID.** A hash file containing every PSK family the operator's capture produced runs PBKDF2 *once per (ESSID, work-item)* and dispatches per-type post-PMK math from the cached PMK in `tmps[].out`. PBKDF2 is the dominant cost (4096 SHA-1 iterations); the per-type math is ~0.1% of that on mode 22002.
-4. **Single-pass cracking of mixed-type files.** The natural input is a `wpawolf -o` taxonomy file containing every hash extracted from one capture. One `hashcat -m 22002 all.taxo wordlist.txt` cracks every variant. No per-type hash-file splitting, no per-mode re-runs.
+4. **Single-pass cracking of mixed-type files.** The natural input is a `wpawolf -o` per-AKM file containing every hash extracted from one capture. One `hashcat -m 22002 all.taxo wordlist.txt` cracks every variant. No per-type hash-file splitting, no per-mode re-runs.
 5. **Greenfield format consumption.** New format only. The new modules never see a legacy line. This eliminates entire categories of loader complexity (the `keyver` peek, the AKM-from-`WPA*01*` guessing problem, the HCCAPX binary path).
 6. **Two-phase implementation.** Phase 1 is a self-contained ship target requiring no hashcat-core changes. Phase 2 is an independently reviewable hashcat-core patch plus a kernel-layout refactor. Operators see no CLI or hash-format change between phases.
 
@@ -39,9 +39,9 @@ Two new modules, parallel structure:
 
 **Why two modules and not one.** Mirrors the existing 22000 / 22001 pattern. The PMK-direct path is faster (skips 4096 SHA-1 iterations) and useful for known-PMK testing, rainbow-table workflows, and PMK-recovery validation. Both modules read the same hash file; only the input-side semantic differs (passphrase vs hex-encoded PMK).
 
-**What they cover.** Every row of the 11-type taxonomy, including the SHA-384 rows (types 8 -- 11) that have no working hashcat kernel today, and the PSK-SHA256 PMKID row (type 4) that current mode 22000 silently misroutes through the HMAC-SHA1 PMKID kernel.
+**What they cover.** Every row of the 11-type classification, including the SHA-384 rows (types 8 -- 11) that have no working hashcat kernel today, and the PSK-SHA256 PMKID row (type 4) that current mode 22000 silently misroutes through the HMAC-SHA1 PMKID kernel.
 
-**What stays separate.** Modes 22000, 22001, and 37100 are unchanged. Operators with existing legacy hash files keep using them; operators adopting the 11-type taxonomy use 22002 / 22003.
+**What stays separate.** Modes 22000, 22001, and 37100 are unchanged. Operators with existing legacy hash files keep using them; operators adopting the 11-type classification use 22002 / 22003.
 
 ---
 
@@ -82,7 +82,7 @@ typedef struct wpa_universal
   u32  mac_ap[2];       // 6 B AP MAC
   u32  mac_sta[2];      // 6 B STA MAC
 
-  u32  type;            // 1 .. 11 (taxonomy code -- the only dispatch axis)
+  u32  type;            // 1 .. 11 (type code -- the only dispatch axis)
 
   // PMKID specific (used iff type is even: 2, 4, 6, 8, 10).
   u32  pmkid[4];        // 16 B PMKID (always Truncate-128 of the underlying HMAC)
@@ -355,7 +355,7 @@ Net hash-rate change for the whole run depends on the type mix in the hash file.
 | Pure WPA2-PSK (only types 2, 3)            | ~1.00x (no change) | ~1.05 -- 1.10x     |
 | Mixed AKM 2 + AKM 6 (types 2, 3, 4, 5)     | ~1.01 -- 1.02x     | ~1.20 -- 1.30x     |
 | Heavy SHA-384 (types 8 -- 11)              | ~1.02 -- 1.05x     | ~1.50 -- 2.00x     |
-| Realistic taxonomy `-o` file (mixed)       | ~1.01 -- 1.03x     | ~1.20 -- 1.40x     |
+| Realistic per-AKM format `-o` file (mixed)       | ~1.01 -- 1.03x     | ~1.20 -- 1.40x     |
 
 Phase 2 also reduces register pressure per kernel (each kernel only loads the SHA primitives it needs), which can lift overall device occupancy by 10 -- 20% on register-constrained GPUs (older Polaris, Pascal). This effect compounds with the divergence reduction.
 
@@ -407,7 +407,7 @@ The build sequence below ships incremental usable subsets. Each step is independ
 
 ### `wpawolf-convert`: legacy file migration
 
-For operators with existing legacy hash files (extracted by `hcxpcapngtool` or by older `wpawolf` builds writing only `--22000-out` / `--37100-out`), a small companion utility `wpawolf-convert` reads `WPA*01*..*04*` lines and emits `WPA*01*..*11*` lines in the new taxonomy format. It does no pcap parsing; it works on already-extracted hash files.
+For operators with existing legacy hash files (extracted by `hcxpcapngtool` or by older `wpawolf` builds writing only `--22000-out` / `--37100-out`), a small companion utility `wpawolf-convert` reads `WPA*01*..*04*` lines and emits `WPA*01*..*11*` lines in the new per-AKM format. It does no pcap parsing; it works on already-extracted hash files.
 
 Conversion notes (the tool documents these in its own help text; listed here for context):
 
@@ -440,9 +440,9 @@ A fourth, softer point: operators who depend on the existing modes keep them unc
 
 These are deliberately not part of the proposal:
 
-- **Inner-EAP cracking.** EAP-MD5, LEAP, MSCHAPv2, etc. live in their own hashcat modes; they have nothing to do with the WPA PSK taxonomy. `wpawolf` extracts EAP identities (`-I`) and inner usernames (`-U`); cracking them belongs to other modules.
+- **Inner-EAP cracking.** EAP-MD5, LEAP, MSCHAPv2, etc. live in their own hashcat modes; they have nothing to do with the WPA PSK per-AKM format. `wpawolf` extracts EAP identities (`-I`) and inner usernames (`-U`); cracking them belongs to other modules.
 - **SAE / OWE.** WPA3-SAE and OWE use Dragonfly key exchange, not PBKDF2-PSK; they need a fundamentally different cracker (and hashcat does support some SAE variants today via mode 22301). `wpawolf` parses and counts SAE / OWE management frames but does not emit a hash line for them.
-- **Quantum-resistant successors.** Any future PSK family that is not PBKDF2-derived needs a new module entirely. The 11-type taxonomy structurally accommodates new codes (type 12 and beyond could append) but the post-PMK arithmetic would be unrelated.
+- **Quantum-resistant successors.** Any future PSK family that is not PBKDF2-derived needs a new module entirely. The 11-type classification structurally accommodates new codes (type 12 and beyond could append) but the post-PMK arithmetic would be unrelated.
 - **WEP, hccap, hccapx.** Legacy hashcat formats (modes 2500, etc.) remain available; the new modules do not absorb them.
 - **Concrete OpenCL kernel code.** This document sketches the design. The actual `m22002-pure.cl` and `m22003-pure.cl` files are written by referring to the existing `m22000-pure.cl`, `m22001-pure.cl`, and `m37100-pure.cl` for reusable pieces and composing them per the kernel inventory in §3.
 - **Changes to legacy modes 22000 / 22001 / 37100.** Out of scope. They keep working as today.
@@ -452,7 +452,7 @@ These are deliberately not part of the proposal:
 ## §11  References
 
 - [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) -- the current modes 22000 / 22001 / 37100, their limitations, and what each kernel does today
-- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type taxonomy itself, hash-line layout, message-pair byte spec
+- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type classification itself, hash-line layout, message-pair byte spec
 - `hashcat/src/modules/module_22000.c` -- structural reference for the proposed 22002 module's loader and dispatch
 - `hashcat/src/modules/module_22001.c` -- structural reference for the proposed 22003 PMK-direct module
 - `hashcat/src/modules/module_37100.c` -- reference for FT chain parsing
@@ -464,5 +464,5 @@ These are deliberately not part of the proposal:
 - `[IEEE 802.11-2024]` §12.6.1.3 -- PMKID derivation
 - `[IEEE 802.11-2024]` §12.7.1.3 -- PTK length per AKM (24 B KCK for SHA-384)
 - `[IEEE 802.11-2024]` §13.4 -- §13.8 -- FT key hierarchy
-- [`README.md`](README.md) -- how `wpawolf` produces lines for the new modules to consume natively (the `-o` taxonomy file)
+- [`README.md`](README.md) -- how `wpawolf` produces lines for the new modules to consume natively (the `-o` per-AKM file)
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) -- `wpawolf` design decisions

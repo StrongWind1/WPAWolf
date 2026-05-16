@@ -4,11 +4,11 @@
 //! (built by `common::multi_handshake_wpa2_psk_pcap`) and asserts:
 //!
 //! * The legacy sink contains only `WPA*01*`/`WPA*02*` prefixes.
-//! * The taxonomy sink contains only `WPA*02*`/`WPA*03*` prefixes (per
+//! * The extended sink contains only `WPA*02*`/`WPA*03*` prefixes (per
 //!   `ARCHITECTURE.md §2`).
 //! * Every line within each sink is unique (per-sink dedup is in effect).
 //! * The same logical hash count is observed in both sinks: every WPA2-PSK EAPOL
-//!   line in legacy (WPA*02*) corresponds to a WPA*03* line in the taxonomy sink.
+//!   line in legacy (WPA*02*) corresponds to a WPA*03* line in the extended sink.
 
 #![allow(
     clippy::unwrap_used,
@@ -35,9 +35,9 @@ fn count_with_prefix(lines: &[String], prefix: &str) -> usize {
 
 #[test]
 fn same_logical_hash_in_two_sinks_with_per_sink_dedup() {
-    let pcap_path = common::write_temp_pcap("taxonomy_dedup.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
-    let legacy = "/tmp/wpawolf_taxonomy_dedup_legacy.22000";
-    let wpa2 = "/tmp/wpawolf_taxonomy_dedup_wpa2.taxo";
+    let pcap_path = common::write_temp_pcap("extended_dedup.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
+    let legacy = "/tmp/wpawolf_extended_dedup_legacy.22000";
+    let wpa2 = "/tmp/wpawolf_extended_dedup_wpa2.taxo";
     let _ = fs::remove_file(legacy);
     let _ = fs::remove_file(wpa2);
 
@@ -52,17 +52,17 @@ fn same_logical_hash_in_two_sinks_with_per_sink_dedup() {
     let wpa2_lines = read_lines(Path::new(wpa2));
 
     assert!(!legacy_lines.is_empty(), "legacy sink empty for {pcap_path:?}");
-    assert!(!wpa2_lines.is_empty(), "taxonomy sink empty for {pcap_path:?}");
+    assert!(!wpa2_lines.is_empty(), "extended sink empty for {pcap_path:?}");
 
     // Per-sink dedup: no internal duplicates.
     let legacy_set: HashSet<&str> = legacy_lines.iter().map(String::as_str).collect();
     assert_eq!(legacy_lines.len(), legacy_set.len(), "legacy sink contains duplicate lines");
     let wpa2_set: HashSet<&str> = wpa2_lines.iter().map(String::as_str).collect();
-    assert_eq!(wpa2_lines.len(), wpa2_set.len(), "taxonomy sink contains duplicate lines");
+    assert_eq!(wpa2_lines.len(), wpa2_set.len(), "extended sink contains duplicate lines");
 
     // Same logical hashes: WPA2-PSK EAPOL lines (legacy WPA*02*) correspond 1:1 with
-    // taxonomy WPA*03* lines, and PMKID lines (legacy WPA*01*) correspond 1:1 with
-    // taxonomy WPA*02* lines.
+    // extended WPA*03* lines, and PMKID lines (legacy WPA*01*) correspond 1:1 with
+    // extended WPA*02* lines.
     let legacy_pmkid = count_with_prefix(&legacy_lines, "WPA*01*");
     let legacy_eapol = count_with_prefix(&legacy_lines, "WPA*02*");
     let taxo_pmkid = count_with_prefix(&wpa2_lines, "WPA*02*");
@@ -70,11 +70,11 @@ fn same_logical_hash_in_two_sinks_with_per_sink_dedup() {
 
     assert_eq!(
         legacy_pmkid, taxo_pmkid,
-        "PMKID count diverges: legacy WPA*01*={legacy_pmkid}, taxonomy WPA*02*={taxo_pmkid}"
+        "PMKID count diverges: legacy WPA*01*={legacy_pmkid}, extended WPA*02*={taxo_pmkid}"
     );
     assert_eq!(
         legacy_eapol, taxo_eapol,
-        "EAPOL count diverges: legacy WPA*02*={legacy_eapol}, taxonomy WPA*03*={taxo_eapol}"
+        "EAPOL count diverges: legacy WPA*02*={legacy_eapol}, extended WPA*03*={taxo_eapol}"
     );
     assert!(legacy_pmkid + legacy_eapol > 0, "no hashes emitted from {pcap_path:?}");
 }

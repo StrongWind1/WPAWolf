@@ -101,7 +101,7 @@ pub enum SinkId {
     Out22000,
     /// `--37100-out` (legacy hashcat mode 37100, WPA*03*/WPA*04* prefixes).
     Out37100,
-    /// `-o`/`--out` (combined 11-type taxonomy, every emitted hash).
+    /// `-o`/`--out` (combined 11-type extended, every emitted hash).
     OutCombined,
     /// `--wpa1-out` (type 1).
     OutWpa1,

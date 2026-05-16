@@ -4,7 +4,7 @@
 
 A self-contained reference for every WPA-PSK hash-line format the current hashcat release accepts, exactly as the modules parse them. This document covers state of the world; it does not propose changes.
 
-If you need the new 11-type taxonomy that supersedes this scheme, read [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). If you want to know how a future hashcat module could unify everything, read [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
+If you need the new 11-type per-AKM format that supersedes this scheme, read [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). If you want to know how a future hashcat module could unify everything, read [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
 
 References for every claim in this document:
 
@@ -212,7 +212,7 @@ PMKID lines reuse the `<mp>` slot for a different field. The byte records which 
 | Bit / value | Constant                 | Meaning                                                                  |
 |-------------|--------------------------|--------------------------------------------------------------------------|
 | `0x01`      | `PMKID_AP`               | PMKID observed on the AP-to-STA path (M1 KDE, AP-sent FT Auth seq=2, Beacon, Probe Response) |
-| `0x02`      | `PMKID_APPSK256`         | PSK-SHA256 hint -- ORed onto `PMKID_AP` when the AP advertised AKM 6 (the legacy AKM disambiguator the new taxonomy makes redundant) |
+| `0x02`      | `PMKID_APPSK256`         | PSK-SHA256 hint -- ORed onto `PMKID_AP` when the AP advertised AKM 6 (the legacy AKM disambiguator the new per-AKM format makes redundant) |
 | `0x04`      | `PMKID_CLIENT`           | PMKID observed on the STA-to-AP path (M2 RSN IE, STA-sent FT Auth seq=1, Association / Reassociation Request, Probe Request) |
 | `0x10`      | `PMKID_AP_FTPSK`         | FT-PSK AP-side variant (legacy `WPA*03*` only)                           |
 | `0x20`      | `PMKID_CLIENT_FTPSK`     | FT-PSK client-side variant (legacy `WPA*03*` only)                       |
@@ -232,7 +232,7 @@ Hashcat's mode-22000 PMKID parser does not consume this byte (it reads the `***`
 
 ## §7  How the 11 wpawolf hash types map onto the four legacy prefixes
 
-`wpawolf` classifies every PSK-crackable hash into one of eleven types (see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the full taxonomy). When the legacy sinks (`--22000-out`, `--37100-out`) are configured, each row is rewritten with a legacy prefix; this table shows what comes out and how hashcat handles it.
+`wpawolf` classifies every PSK-crackable hash into one of eleven types (see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the full classification). When the legacy sinks (`--22000-out`, `--37100-out`) are configured, each row is rewritten with a legacy prefix; this table shows what comes out and how hashcat handles it.
 
 | 11-type row             | Legacy prefix      | Legacy sink     | Hashcat reads via | Cracks today?      |
 |-------------------------|--------------------|-----------------|-------------------|--------------------|
@@ -276,7 +276,7 @@ Walking the corpus end-to-end:
 |-------------------|--------------------:|-----------------:|-------------------:|----------------------------------------------------|
 | `--22000-out`     |                 108 |               73 |                  5 | All 5 are PSK-SHA-256 PMKID (type 4)               |
 | `--37100-out`     |                  15 |                9 |                  2 | Both are APLESS FT-PSK EAPOL (type 7, N2E3 / N4E3) |
-| `-o` combined     |                 147 |       n/a (taxonomy sink, not fed to hashcat)              |
+| `-o` combined     |                 147 |       n/a (per-AKM format sink, not fed to hashcat)              |
 
 Six of eleven 11-type rows are wire-cleanly cracked end-to-end. One row is partially crackable -- type 7 cracks for the M2-anchored combos but not the M3-anchored APLESS variants (§8.1). One row routes silently to a wrong-primitive kernel (type 4: SHA-256 PMKID checked against an HMAC-SHA-1 candidate). Four rows are deliberately not written to the legacy sinks because no compatible kernel exists.
 
@@ -333,6 +333,6 @@ The new 11-type prefix scheme (one prefix per row) is the response to limitation
 - `[IEEE 802.11-2024]` §12.7.2 -- Key Information field, `keyver` bits 0 -- 2
 - `[IEEE 802.11-2024]` §12.7.6 -- 4-Way Handshake / EAPOL-Key frames
 - `[IEEE 802.11-2024]` §13.4 -- §13.8 -- FT key hierarchy
-- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type taxonomy
+- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type per-AKM format
 - [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) -- proposed unified module
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) -- `wpawolf` design decisions

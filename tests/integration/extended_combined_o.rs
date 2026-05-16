@@ -1,4 +1,4 @@
-//! Integration test: combined `-o` taxonomy output sink.
+//! Integration test: combined `-o` extended output sink.
 //!
 //! Drives `wpawolf -o <FILE>` against an in-memory WPA2-PSK pcap (built by
 //! `common::multi_handshake_wpa2_psk_pcap`) and asserts:
@@ -23,9 +23,9 @@ use std::fs;
 use std::process::Command;
 
 #[test]
-fn combined_o_emits_only_eleven_taxonomy_prefixes() {
-    let pcap_path = common::write_temp_pcap("taxonomy_combined.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
-    let combined = "/tmp/wpawolf_taxonomy_combined.taxo";
+fn combined_o_emits_only_eleven_extended_prefixes() {
+    let pcap_path = common::write_temp_pcap("extended_combined.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
+    let combined = "/tmp/wpawolf_extended_combined.taxo";
     let _ = fs::remove_file(combined);
 
     let status = Command::new(common::binary_path())
@@ -52,7 +52,7 @@ fn combined_o_emits_only_eleven_taxonomy_prefixes() {
         assert!(parts.len() >= 2, "malformed line: {line}");
         assert_eq!(parts[0], "WPA", "non-WPA prefix in line: {line}");
         let code = parts[1];
-        assert!(valid_codes.contains(code), "unknown taxonomy code WPA*{code}* in line: {line}");
+        assert!(valid_codes.contains(code), "unknown extended code WPA*{code}* in line: {line}");
 
         let expected = if ft_codes.contains(code) { 12 } else { 9 };
         assert_eq!(parts.len(), expected, "WPA*{code}* line has {} fields, expected {expected}: {line}", parts.len());

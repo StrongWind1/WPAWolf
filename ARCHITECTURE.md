@@ -25,7 +25,7 @@ Capture-side tools (hcxdumptool, airodump-ng, Kismet) and cracker-side tools (ha
 
 ---
 
-## §2  The 11-Type Hash Taxonomy (summary)
+## §2  The 11-Type Hash Classification (summary)
 
 wpawolf classifies every PSK-crackable hash by a unique type code 1-11. The type code is self-contained: it determines the PMKID hash primitive, the PTK KDF, the KCK length, the MIC algorithm, and the MIC field width. Two encoding rules cover the whole table:
 
@@ -494,7 +494,7 @@ When KDV = 0, the MIC algorithm is implicit from the negotiated AKM:
 | 22, 23 (802.1X-SHA384) | HMAC-SHA-384, **24 B** |
 | 24, 25 (SAE H2E) | AES-128-CMAC, 16 B |
 
-AKMs 19 and 20 produce a 24-byte MIC. Existing hashcat mode 22000 expects a 16-byte MIC; emitting a truncated 24-byte MIC would be the same silent wrong-answer trap as the AKM-6 PMKID SHA1/SHA256 mismatch. These AKMs are counted in stats and routed to the taxonomy-only sinks `--psk-sha384-out` (types 8/9) and `--ft-psk-sha384-out` (types 10/11); the legacy `--22000-out` and `--37100-out` sinks deliberately skip them.
+AKMs 19 and 20 produce a 24-byte MIC. Existing hashcat mode 22000 expects a 16-byte MIC; emitting a truncated 24-byte MIC would be the same silent wrong-answer trap as the AKM-6 PMKID SHA1/SHA256 mismatch. These AKMs are counted in stats and routed to the per-AKM format-only sinks `--psk-sha384-out` (types 8/9) and `--ft-psk-sha384-out` (types 10/11); the legacy `--22000-out` and `--37100-out` sinks deliberately skip them.
 
 ### §5.5  What the cracker verifies
 
@@ -866,21 +866,21 @@ hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-
 
 The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MAC / ESSID encoding) live in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §5. How the 11 types currently route through hashcat modes 22000 / 37100 lives in [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md). The complete operator-facing CLI / sink reference (every `--*-out` flag, routing rules, stats output) lives in [`README.md`](README.md). This section captures only the architecture-level decisions behind the output stage.
 
-**Per-sink fan-out with per-sink dedup.** A single classified hash is written to up to three sinks per emission: the legacy `--22000-out` *or* `--37100-out` (chosen by `is_ft`), the per-AKM-family taxonomy sink for the hash's row (`--wpa1-out` ... `--ft-psk-sha384-out`), and the combined `-o` taxonomy sink. Each sink keeps its own dedup `HashSet<u64>` so a logical hash that fans out to N sinks lands once per sink without one suppressing another. The same SipHash-1-3 fingerprint scheme is used across all sinks (kind byte + PMKID/MIC + AP + STA + nonce/eapol + ESSID + message-pair) -- see §4 invariant 5.
+**Per-sink fan-out with per-sink dedup.** A single classified hash is written to up to three sinks per emission: the legacy `--22000-out` *or* `--37100-out` (chosen by `is_ft`), the per-AKM-family per-AKM sink for the hash's row (`--wpa1-out` ... `--ft-psk-sha384-out`), and the combined `-o` per-AKM sink. Each sink keeps its own dedup `HashSet<u64>` so a logical hash that fans out to N sinks lands once per sink without one suppressing another. The same SipHash-1-3 fingerprint scheme is used across all sinks (kind byte + PMKID/MIC + AP + STA + nonce/eapol + ESSID + message-pair) -- see §4 invariant 5.
 
 **Logical-vs-line counting.** `hashes emitted (total)` in the Phase 5 report counts logical hashes (one per `HashType` row, regardless of fan-out). The Phase 4 `lines written` per-sink counters count physical lines on disk, so they do not sum to the logical total when multiple sinks are configured. This is the right semantics for both audit ("how many distinct hashes did this capture yield?") and operations ("how big will my hash file be?").
 
-**Legacy vs taxonomy prefix selection.** `HashType::legacy_prefix()` and `HashType::taxonomy_prefix()` are the two sources of truth (in `src/types.rs`). Legacy sinks call the legacy prefix, taxonomy sinks call the taxonomy prefix; nothing else in the output pipeline knows the difference. Adding a new sink is one match-arm change.
+**Legacy vs extended prefix selection.** `HashType::legacy_prefix()` and `HashType::per-AKM format_prefix()` are the two sources of truth (in `src/types.rs`). Legacy sinks call the legacy prefix, per-AKM sinks call the extended prefix; nothing else in the output pipeline knows the difference. Adding a new sink is one match-arm change.
 
 **PMKID and EAPOL pipelines run as separate passes** (Invariant OUT-1 in §4 invariant 6). A single `(AP, STA)` session can yield up to four distinct hash lines: 1 PMKID plus up to 3 equivalence-class EAPOL pairs (FR-PAIR-5). This is correct and expected; downstream tools that expect one line per session are wrong.
 
-**FT context required for FT lines.** `wpawolf` only emits FT lines (legacy `WPA*03*` / `WPA*04*` and taxonomy `WPA*06*` / `WPA*07*` / `WPA*10*` / `WPA*11*`) when MDID, R0KH-ID, and R1KH-ID are all present in the captured handshake. FT-PSK PMKIDs / EAPOL pairs without an FTE in the same handshake are dropped at emission time -- hashcat 37100 cannot crack them without the chain.
+**FT context required for FT lines.** `wpawolf` only emits FT lines (legacy `WPA*03*` / `WPA*04*` and per-AKM format `WPA*06*` / `WPA*07*` / `WPA*10*` / `WPA*11*`) when MDID, R0KH-ID, and R1KH-ID are all present in the captured handshake. FT-PSK PMKIDs / EAPOL pairs without an FTE in the same handshake are dropped at emission time -- hashcat 37100 cannot crack them without the chain.
 
-**SHA-384 deliberately bypasses legacy sinks.** PSK-SHA384 and FT-PSK-SHA384 hashes (types 8 -- 11) are *not* written to the legacy `--22000-out` / `--37100-out` sinks. `legacy_sink_for` in `src/output/mod.rs` returns `None` for these hash types. The reason is hashcat's mode 22000 strict-checks the MIC field at exactly 16 bytes (`module_22000.c::check_token`) and rejects any line with a wider MIC at parser startup with a `Token length exception`; mode 37100 only ships a SHA-256 FT key-hierarchy kernel and rejects the SHA-384 chain the same way. Routing the 24-byte HMAC-SHA384-192 MIC through those sinks would therefore poison the input file with unparseable lines. The dedicated taxonomy sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` sink continue to receive these lines under the `WPA*08*..*11*` taxonomy prefix, where downstream tooling can recognise the wider MIC width.
+**SHA-384 deliberately bypasses legacy sinks.** PSK-SHA384 and FT-PSK-SHA384 hashes (types 8 -- 11) are *not* written to the legacy `--22000-out` / `--37100-out` sinks. `legacy_sink_for` in `src/output/mod.rs` returns `None` for these hash types. The reason is hashcat's mode 22000 strict-checks the MIC field at exactly 16 bytes (`module_22000.c::check_token`) and rejects any line with a wider MIC at parser startup with a `Token length exception`; mode 37100 only ships a SHA-256 FT key-hierarchy kernel and rejects the SHA-384 chain the same way. Routing the 24-byte HMAC-SHA384-192 MIC through those sinks would therefore poison the input file with unparseable lines. The dedicated per-AKM sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` sink continue to receive these lines under the `WPA*08*..*11*` extended prefix, where downstream tooling can recognise the wider MIC width.
 
 ### Hashcat compatibility matrix
 
-| Type | Hash family            | Legacy sink         | Taxonomy sink           | hashcat support today |
+| Type | Hash family            | Legacy sink         | Per-AKM sink           | hashcat support today |
 | ---- | ---------------------- | ------------------- | ----------------------- | --------------------- |
 | 1    | WPA1-PSK EAPOL         | `--22000-out` (`WPA*02*`) | `--wpa1-out` (`WPA*01*`) | mode 22000, KDV=1 (HMAC-MD5 MIC) |
 | 2    | WPA2-PSK PMKID         | `--22000-out` (`WPA*01*`) | `--wpa2-out` (`WPA*02*`) | mode 22000 |
@@ -889,12 +889,12 @@ The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MA
 | 5    | PSK-SHA-256 EAPOL      | `--22000-out` (`WPA*02*`) | `--psk-sha256-out` (`WPA*05*`) | mode 22000, KDV=3 (AES-128-CMAC MIC); cracks |
 | 6    | FT-PSK PMKID           | `--37100-out` (`WPA*03*`) | `--ft-out` (`WPA*06*`) | mode 37100 (SHA-256 FT chain) |
 | 7    | FT-PSK EAPOL           | `--37100-out` (`WPA*04*`) | `--ft-out` (`WPA*07*`) | mode 37100 (SHA-256 FT chain) |
-| 8    | PSK-SHA-384 PMKID      | *(skipped)*         | `--psk-sha384-out` (`WPA*08*`) | no kernel; taxonomy sink only |
-| 9    | PSK-SHA-384 EAPOL      | *(skipped)*         | `--psk-sha384-out` (`WPA*09*`) | no kernel (24 B MIC); taxonomy sink only |
-| 10   | FT-PSK-SHA-384 PMKID   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*10*`) | no kernel; taxonomy sink only |
-| 11   | FT-PSK-SHA-384 EAPOL   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*11*`) | no kernel (24 B MIC + SHA-384 FT chain); taxonomy sink only |
+| 8    | PSK-SHA-384 PMKID      | *(skipped)*         | `--psk-sha384-out` (`WPA*08*`) | no kernel; per-AKM sink only |
+| 9    | PSK-SHA-384 EAPOL      | *(skipped)*         | `--psk-sha384-out` (`WPA*09*`) | no kernel (24 B MIC); per-AKM sink only |
+| 10   | FT-PSK-SHA-384 PMKID   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*10*`) | no kernel; per-AKM sink only |
+| 11   | FT-PSK-SHA-384 EAPOL   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*11*`) | no kernel (24 B MIC + SHA-384 FT chain); per-AKM sink only |
 
-The combined `-o` sink receives every emitted hash regardless of the above; types 8-11 are visible there for downstream tooling that can read the 11-prefix taxonomy directly. Update both `legacy_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
+The combined `-o` sink receives every emitted hash regardless of the above; types 8-11 are visible there for downstream tooling that can read the 11-prefix per-AKM format directly. Update both `legacy_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
 
 ---
 
@@ -1259,13 +1259,13 @@ Output flags:
 |------|------|-------------|
 | -          | `--22000-out FILE`        | hashcat mode 22000 (legacy `WPA*01*`/`WPA*02*`; every non-FT hash) |
 | -          | `--37100-out FILE`        | hashcat mode 37100 (legacy `WPA*03*`/`WPA*04*`; every FT hash) |
-| `-o FILE`  | `--out FILE`              | combined 11-type taxonomy file (every emitted hash, prefixes `WPA*01*..*11*`) |
-| -          | `--wpa1-out FILE`         | type 1 only (taxonomy `WPA*01*`) |
-| -          | `--wpa2-out FILE`         | types 2 + 3 (taxonomy `WPA*02*`/`WPA*03*`) |
-| -          | `--psk-sha256-out FILE`   | types 4 + 5 (taxonomy `WPA*04*`/`WPA*05*`) |
-| -          | `--ft-out FILE`           | types 6 + 7 (taxonomy `WPA*06*`/`WPA*07*`, FT extras) |
-| -          | `--psk-sha384-out FILE`   | types 8 + 9 (taxonomy `WPA*08*`/`WPA*09*`, no kernel yet) |
-| -          | `--ft-psk-sha384-out FILE`| types 10 + 11 (taxonomy `WPA*10*`/`WPA*11*`, FT extras, no kernel yet) |
+| `-o FILE`  | `--out FILE`              | combined 11-type classification file (every emitted hash, prefixes `WPA*01*..*11*`) |
+| -          | `--wpa1-out FILE`         | type 1 only (per-AKM format `WPA*01*`) |
+| -          | `--wpa2-out FILE`         | types 2 + 3 (per-AKM format `WPA*02*`/`WPA*03*`) |
+| -          | `--psk-sha256-out FILE`   | types 4 + 5 (per-AKM format `WPA*04*`/`WPA*05*`) |
+| -          | `--ft-out FILE`           | types 6 + 7 (per-AKM format `WPA*06*`/`WPA*07*`, FT extras) |
+| -          | `--psk-sha384-out FILE`   | types 8 + 9 (per-AKM format `WPA*08*`/`WPA*09*`, no kernel yet) |
+| -          | `--ft-psk-sha384-out FILE`| types 10 + 11 (per-AKM format `WPA*10*`/`WPA*11*`, FT extras, no kernel yet) |
 | `-E FILE` | `--essid-output`    | unique ESSIDs from AP-side frames (autohex) |
 | `-R FILE` | `--probe-output`    | unique ESSIDs from client-side frames (Probe Requests, Action MR) |
 | `-W FILE` | `--wordlist-output` | comprehensive leaked-text wordlist (superset of -E and -R, plus WPS strings, EAP identities, country codes, etc.) |
@@ -1498,7 +1498,7 @@ Out of scope: DPP / Wi-Fi Easy Connect (§1), pure SAE / OWE authentication fram
 - Per N#E# combo counts (six counters: N1E2, N1E4, N3E2, N2E3, N4E3, N3E4) - individually before dedup, plus equivalence-class survivor counts after `--dedup-hash-combos` collapse.
 - RSN PMKID emission: total, useful, useless, faulty, best, PSK, FT-PSK, rogue, from-zeroed-PMK, from-zeroed-PSK, written-to-22000, written-to-37100.
 - Per-AKM hash-emission decisions: counts by AKM selector (`00-0F-AC:x`) of hashes emitted vs suppressed vs counted-only, with the Table number cross-referenced to §6 in the line label.
-- Per-type-code line counts: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11 (the 11-type taxonomy of §2). One counter per output sink: `--22000-out`, `--37100-out`, `-o`, `--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`, `--psk-sha384-out`, `--ft-psk-sha384-out`.
+- Per-type-code line counts: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11 (the 11-type classification of §2). One counter per output sink: `--22000-out`, `--37100-out`, `-o`, `--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`, `--psk-sha384-out`, `--ft-psk-sha384-out`.
 - FT specifics: R0KH-ID / R1KH-ID / MDID observed counts.
 - Dedup stats: fingerprint collisions per line-kind byte, unique lines written per output file, duplicates suppressed.
 
@@ -1620,7 +1620,7 @@ pub struct DedupSet { seen: HashSet<u64> }
 - Unit tests colocated with modules (`#[cfg(test)] mod tests`).
 - Integration tests in `tests/integration/*.rs`:
   - `superset_test.rs` runs both `hcxpcapngtool` and `wpawolf` on the same capture and asserts `wpawolf_output >= hcxpcapngtool_output` line by line. The "never miss a hash" regression oracle.
-  - `taxonomy_outputs_per_akm.rs`, `taxonomy_combined_o.rs`, `taxonomy_dedup_per_sink.rs` -- per-sink fan-out and dedup checks for the 11-type taxonomy outputs.
+  - `per-AKM format_outputs_per_akm.rs`, `per-AKM format_combined_o.rs`, `per-AKM format_dedup_per_sink.rs` -- per-sink fan-out and dedup checks for the 11-type classification outputs.
   - `pmkid_coverage.rs` -- crafted in-memory pcap exercising the 20 spec-defined PMKID extraction sites; asserts no-dup, WPA*01* field count = 9, WPA*03* field count = 12.
   - `cross_file_pairing.rs` -- M1 in file A, M2/3/4 in file B; asserts the shared `MessageStore` reassembles the handshake.
   - `fragment_reassembly.rs` -- 802.11 MSDU fragment reassembly per `(SA, RA, SeqNum)` for FT-PSK M2 frames split by the radio MTU.

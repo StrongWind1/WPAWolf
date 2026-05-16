@@ -390,7 +390,7 @@ fn mesh_peering_open_emits_ampe_pmkid_when_beacon_is_psk() {
         "stats banner missing Mesh Peering AMPE PMKID source line; full log:\n{log}"
     );
     // The AMPE PMKID must reach a hashcat line. The hashcat 22000 PMKID prefix
-    // is the literal `WPA*01*`; the taxonomy type (2 for WPA2-PSK) only shows
+    // is the literal `WPA*01*`; the extended type (2 for WPA2-PSK) only shows
     // up in the per-type sinks (--wpa2-out etc.). The 16 chosen-PMK bytes
     // appear lowercase-hex right after the prefix.
     let pmkid_hex: String = pmkid.iter().fold(String::with_capacity(32), |mut s, b| {

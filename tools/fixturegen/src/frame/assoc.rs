@@ -3,7 +3,7 @@
 //! `[IEEE 802.11-2024]` §9.3.3.6 / §9.3.3.8. Reassociation adds a 6-byte
 //! `Current AP Address` field after the listen interval. Both frames carry
 //! the RSN IE that is the canonical S3 / S4 PMKID source, plus -- for the FT
-//! taxonomy -- the MDE (`tag 54`) and FTE (`tag 55`).
+//! per-AKM -- the MDE (`tag 54`) and FTE (`tag 55`).
 
 use crate::frame::{ie, mac};
 

@@ -63,7 +63,7 @@ fn build_pcap(global_hdr: &[u8; 24], records: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Runs wpawolf with `-o <out>` on `input_path` and returns the number of
-/// emitted hash lines (line count of the taxonomy output file).
+/// emitted hash lines (line count of the extended output file).
 fn run_and_count_hashes(input_path: &Path, out_path: &str) -> usize {
     let _ = fs::remove_file(out_path);
     let status = Command::new(common::binary_path())

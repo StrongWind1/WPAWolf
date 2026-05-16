@@ -1,8 +1,8 @@
 # The 11 New WPA-PSK Hash Formats: How and Why
 
-> **Status: specification.** Defines the 11-type taxonomy that wpawolf emits today on its taxonomy sinks (`-o`, `--wpa1-out`, `--wpa2-out`, ...). The hashcat side of consuming these is sketched separately in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) and is not yet implemented in upstream hashcat.
+> **Status: specification.** Defines the 11-type classification that wpawolf emits today on its per-AKM sinks (`-o`, `--wpa1-out`, `--wpa2-out`, ...). The hashcat side of consuming these is sketched separately in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) and is not yet implemented in upstream hashcat.
 
-A complete reference for the 11-type WPA-PSK hash taxonomy that `wpawolf` emits and that a future hashcat module will consume. Every PSK-crackable hash defined by `[IEEE 802.11-2024]` gets exactly one type code, one line prefix, and one self-contained format. This document covers the format itself -- per-row line layout, cracker math, and the design rationale for each choice. It does not cover implementation in hashcat (see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md)) and it does not cover what current hashcat understands today (see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md)).
+A complete reference for the 11-type WPA-PSK hash classification that `wpawolf` emits and that a future hashcat module will consume. Every PSK-crackable hash defined by `[IEEE 802.11-2024]` gets exactly one type code, one line prefix, and one self-contained format. This document covers the format itself -- per-row line layout, cracker math, and the design rationale for each choice. It does not cover implementation in hashcat (see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md)) and it does not cover what current hashcat understands today (see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md)).
 
 ---
 
@@ -16,7 +16,7 @@ The legacy hashcat scheme uses four prefixes (`WPA*01*..*04*`) and demuxes the A
 
 The new scheme makes the type code self-contained: it alone determines the PMKID hash primitive, the PTK KDF, the KCK length, the MIC algorithm, and the MIC field width. A parser inspects the 2-digit type byte after `WPA*` and knows everything else.
 
-The cracking math is unchanged. The taxonomy reorganises what the line declares to the cracker; the underlying cryptographic operations are the same ones the spec already defined.
+The cracking math is unchanged. The classification reorganises what the line declares to the cracker; the underlying cryptographic operations are the same ones the spec already defined.
 
 ---
 
@@ -282,15 +282,15 @@ A parser tokenises on `*`, reads the 2-digit type code, and from the type code l
 
 ## §6  N#E# notation -- the six pair combos
 
-Every EAPOL line ends with a 1-byte `<mp>` field that encodes which two messages of the 4-way handshake formed the pair, plus three diagnostic flag bits. The byte format and bit values are identical between the new taxonomy and the legacy scheme -- the new scheme only changes which prefix the line carries, not what the trailing byte means -- so a future hashcat module can reuse the existing parsing logic verbatim.
+Every EAPOL line ends with a 1-byte `<mp>` field that encodes which two messages of the 4-way handshake formed the pair, plus three diagnostic flag bits. The byte format and bit values are identical between the new classification and the legacy scheme -- the new scheme only changes which prefix the line carries, not what the trailing byte means -- so a future hashcat module can reuse the existing parsing logic verbatim.
 
 ### Notation
 
-`wpawolf` and the new taxonomy use **N#E#** notation: **N**once from message **#**, **E**APOL frame from message **#**. So `N1E2` = ANonce sourced from M1, EAPOL/MIC sourced from M2.
+`wpawolf` and the new classification use **N#E#** notation: **N**once from message **#**, **E**APOL frame from message **#**. So `N1E2` = ANonce sourced from M1, EAPOL/MIC sourced from M2.
 
 `hcxpcapngtool` uses the older **M#E#** notation -- written in full as `M{nonce}{eapol}E{eapol}` so `M12E2` packs both message IDs around the `E`. The two notations describe the same six combos.
 
-| wpawolf / taxonomy | hcxpcapngtool | Nonce source | EAPOL source | Hash-line `<nonce>` field | RC relationship       | `<mp>` low nibble |
+| wpawolf / extended format | hcxpcapngtool | Nonce source | EAPOL source | Hash-line `<nonce>` field | RC relationship       | `<mp>` low nibble |
 |--------------------|---------------|--------------|--------------|---------------------------|-----------------------|------------------:|
 | **N1E2**           | M12E2         | M1 (ANonce)  | M2           | M1 ANonce                 | `RC(M2) == RC(M1)`    | `0x00`            |
 | **N1E4**           | M14E4         | M1 (ANonce)  | M4           | M1 ANonce                 | `RC(M4) == RC(M1)+1`  | `0x01`            |
@@ -332,7 +332,7 @@ By default emitters write all 6 (resilient against retransmissions where one com
 
 ## §7  Message-pair byte (`<mp>`) -- complete bit spec
 
-The most underdocumented part of the legacy hashcat format. The byte is **identical** between the legacy and new taxonomy schemes -- a future hashcat kernel can use the same parsing logic for both.
+The most underdocumented part of the legacy hashcat format. The byte is **identical** between the legacy and new classification schemes -- a future hashcat kernel can use the same parsing logic for both.
 
 ### EAPOL lines (codes 1, 3, 5, 7, 9, 11)
 
@@ -373,16 +373,16 @@ PMKID lines reuse the `<mp>` byte slot for a different purpose: it records which
 | Bit / value | Constant            | Meaning |
 |-------------|---------------------|---------|
 | `0x01`      | `PMKID_AP`          | PMKID observed on the AP-to-STA path (M1 KDE, AP-sent FT Auth seq=2, Beacon, Probe Response) |
-| `0x02`      | `PMKID_APPSK256`    | PSK-SHA256 hint -- ORed onto `PMKID_AP` when the AP advertised AKM 6 (legacy disambiguator the new taxonomy makes redundant) |
+| `0x02`      | `PMKID_APPSK256`    | PSK-SHA256 hint -- ORed onto `PMKID_AP` when the AP advertised AKM 6 (legacy disambiguator the new classification makes redundant) |
 | `0x04`      | `PMKID_CLIENT`      | PMKID observed on the STA-to-AP path (M2 RSN IE, STA-sent FT Auth seq=1, Association Request, Probe Request) |
 | `0x10`      | `PMKID_AP_FTPSK`    | FT-PSK AP-side variant (legacy `WPA*03*` only) |
 | `0x20`      | `PMKID_CLIENT_FTPSK`| FT-PSK client-side variant (legacy `WPA*03*` only) |
 
-For the new taxonomy, the AKM is already encoded in the type code (`WPA*02*` is always WPA2-PSK, `WPA*04*` is always PSK-SHA256, etc.) -- the `PMKID_APPSK256` hint becomes redundant. The AP-vs-client distinction (`PMKID_AP` vs `PMKID_CLIENT`) remains useful as a diagnostic but does not affect verification math.
+For the new classification, the AKM is already encoded in the type code (`WPA*02*` is always WPA2-PSK, `WPA*04*` is always PSK-SHA256, etc.) -- the `PMKID_APPSK256` hint becomes redundant. The AP-vs-client distinction (`PMKID_AP` vs `PMKID_CLIENT`) remains useful as a diagnostic but does not affect verification math.
 
 ### Why the byte stays compatible
 
-Keeping the `<mp>` byte format unchanged across the two schemes is a deliberate design choice: it lets a hashcat module that handles both legacy and taxonomy lines share one parser branch for the message-pair logic, and it lets `wpawolf` (and any other emitter) write the byte once without per-prefix branching. The trailing byte is the only field whose semantics are independent of the line prefix.
+Keeping the `<mp>` byte format unchanged across the two schemes is a deliberate design choice: it lets a hashcat module that handles both legacy and per-AKM format lines share one parser branch for the message-pair logic, and it lets `wpawolf` (and any other emitter) write the byte once without per-prefix branching. The trailing byte is the only field whose semantics are independent of the line prefix.
 
 ---
 
@@ -441,6 +441,6 @@ Note that types 09 and 11 are the only rows with a 48-hex (24 B) `<hash>` field.
   - Table 9-190 AKM suite type codes
   - Table 12-9 integrity algorithm per AKM
 - [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) -- current hashcat formats (modes 22000 + 37100), `keyver` trick, limitations
-- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) -- proposed unified hashcat module that consumes this taxonomy
+- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) -- proposed unified hashcat module that consumes this extended format
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) -- `wpawolf` architecture decisions
 - [`README.md`](README.md) -- using `wpawolf` in practice

@@ -1,12 +1,12 @@
-//! Integration test: per-AKM taxonomy output flags emit only the expected prefixes.
+//! Integration test: per-AKM extended output flags emit only the expected prefixes.
 //!
 //! Drives `wpawolf` against an in-memory WPA2-PSK pcap (built by
 //! `common::multi_handshake_wpa2_psk_pcap`) and asserts that:
 //!
 //! * `--22000-out` (legacy hashcat mode 22000) produces only `WPA*01*` (PMKID) and
 //!   `WPA*02*` (EAPOL) prefixes -- the legacy 4-prefix scheme.
-//! * `--wpa2-out` (taxonomy types 2 + 3) produces only `WPA*02*` (PMKID) and
-//!   `WPA*03*` (EAPOL) prefixes from the 11-type taxonomy in `ARCHITECTURE.md §2`.
+//! * `--wpa2-out` (extended types 2 + 3) produces only `WPA*02*` (PMKID) and
+//!   `WPA*03*` (EAPOL) prefixes from the 11-type extended in `ARCHITECTURE.md §2`.
 
 #![allow(
     clippy::unwrap_used,
@@ -41,9 +41,9 @@ fn prefix_codes(path: &Path) -> BTreeSet<String> {
 #[test]
 fn per_akm_flags_emit_expected_prefixes_only() {
     // Generate a 3-handshake WPA2-PSK pcap in /tmp; no checked-in binary needed.
-    let pcap_path = common::write_temp_pcap("taxonomy_per_akm.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
-    let legacy_out = "/tmp/wpawolf_taxonomy_legacy.22000";
-    let wpa2_out = "/tmp/wpawolf_taxonomy_wpa2.taxo";
+    let pcap_path = common::write_temp_pcap("extended_per_akm.pcap", &common::multi_handshake_wpa2_psk_pcap(3));
+    let legacy_out = "/tmp/wpawolf_extended_legacy.22000";
+    let wpa2_out = "/tmp/wpawolf_extended_wpa2.taxo";
     let _ = fs::remove_file(legacy_out);
     let _ = fs::remove_file(wpa2_out);
 

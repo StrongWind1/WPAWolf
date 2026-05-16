@@ -71,7 +71,7 @@ pub fn format_pmkid_37100(entry: &PmkidEntry, ft: &FtFields, essid: &[u8]) -> St
 
 /// Same as `format_pmkid_37100` but with a caller-supplied line prefix.
 ///
-/// Used by the new 11-type taxonomy sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
+/// Used by the new 11-type extended sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
 /// which write `WPA*06*` / `WPA*10*` instead of the legacy `WPA*03*`.
 #[must_use]
 pub fn format_pmkid_ft_line(prefix: &[u8], entry: &PmkidEntry, ft: &FtFields, essid: &[u8]) -> String {
@@ -117,7 +117,7 @@ pub fn format_eapol_37100(pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> Str
 
 /// Same as `format_eapol_37100` but with a caller-supplied line prefix.
 ///
-/// Used by the new 11-type taxonomy sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
+/// Used by the new 11-type extended sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
 /// which write `WPA*07*` / `WPA*11*` instead of the legacy `WPA*04*`.
 #[must_use]
 pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> String {
@@ -215,7 +215,7 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
 
 /// Builds a PMKID hash line with the given prefix byte string.
 ///
-/// Shared by `format_pmkid_22000`, `format_pmkid_37100`, and the new 11-type taxonomy
+/// Shared by `format_pmkid_22000`, `format_pmkid_37100`, and the new 11-type extended
 /// sinks (`--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--psk-sha384-out`, `-o` for
 /// non-FT rows). The prefix selects the hashcat-line type; all other fields are
 /// identical. Uses `encode_hex` to write directly into the output buffer so no
@@ -247,7 +247,7 @@ pub fn format_pmkid_line(prefix: &[u8], entry: &PmkidEntry, essid: &[u8]) -> Str
 /// Builds an EAPOL hash line with the given prefix byte string.
 ///
 /// Shared by `format_eapol_22000`, `format_eapol_37100`, and the new 11-type
-/// taxonomy sinks (non-FT rows). The EAPOL frame is copied and the MIC bytes zeroed
+/// extended sinks (non-FT rows). The EAPOL frame is copied and the MIC bytes zeroed
 /// before hex-encoding; the original `PairedHash` is not modified. `message_pair`
 /// is encoded as exactly two hex characters.
 #[must_use]

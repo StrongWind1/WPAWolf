@@ -2,7 +2,7 @@
 //!
 //! Builds an in-memory pcap (DLT 105 = raw IEEE 802.11) for each of the 11 hash
 //! types in `ARCHITECTURE.md §2`, runs wpawolf against the fixture, and asserts
-//! the expected `WPA*NN*` line appears in the corresponding taxonomy sink with
+//! the expected `WPA*NN*` line appears in the corresponding extended sink with
 //! the correct prefix, MIC width, and ESSID round-trip. The PMKID and MIC
 //! values are deterministic non-zero patterns -- wpawolf is a parser, not a
 //! verifier, so cryptographic validity is not required to exercise the

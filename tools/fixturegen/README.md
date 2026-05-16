@@ -56,7 +56,7 @@ cargo run --release -p wpawolf-fixturegen -- all --out tests/fixtures/generated/
 # 2. Build the wpawolf binary.
 cargo build --release --bin wpawolf
 
-# 3. Run wpawolf over the whole corpus, splitting the legacy + taxonomy sinks.
+# 3. Run wpawolf over the whole corpus, splitting the legacy + per-AKM sinks.
 mkdir -p /tmp/wpawolf-verify
 ./target/release/wpawolf \
     --22000-out         /tmp/wpawolf-verify/all.22000 \
@@ -87,7 +87,7 @@ hashcat -m 22000 -D 1 \
 #     longer routes FT-PSK-SHA-384 lines into the legacy `WPA*04*` sink --
 #     `legacy_sink_for` in `src/output/mod.rs` skips types 10/11. The
 #     dedicated `--ft-psk-sha384-out` sink still receives them under the
-#     `WPA*11*` taxonomy prefix for downstream tooling.
+#     `WPA*11*` per-AKM prefix for downstream tooling.
 hashcat -m 37100 -D 1 \
     /tmp/wpawolf-verify/all.37100 \
     /tmp/wpawolf-verify/wordlist.txt \
@@ -120,7 +120,7 @@ End-to-end corpus walk numbers (PSK = `hashcat!`):
 | ----------------- | ------------------: | ---------------: | -----------------: | -------------------------------------------------- |
 | `--22000-out`     |                 108 |               73 |                  5 | Type 4 PSK-SHA-256 PMKID (kernel limitation)       |
 | `--37100-out`     |                  15 |                9 |                  2 | Type 7 APLESS combos N2E3 / N4E3 (kernel limitation) |
-| `-o` combined     |                 147 |        n/a -- taxonomy sink, not fed to hashcat                       |
+| `-o` combined     |                 147 |        n/a -- per-AKM sink, not fed to hashcat                       |
 
 Net: of 123 lines routed into hashcat-compatible sinks, **117 cracked**
 (95.1 %). The 7 that did not are all attributable to documented
@@ -128,7 +128,7 @@ hashcat-7.1.2 kernel limitations.
 
 `n/a` -- wpawolf's `legacy_sink_for` in `src/output/mod.rs` deliberately
 omits these hash types from `--22000-out` / `--37100-out` because no
-compatible hashcat kernel exists. The taxonomy sinks
+compatible hashcat kernel exists. The per-AKM sinks
 (`--psk-sha384-out` / `--ft-psk-sha384-out`) and combined `-o` sink still
 receive them.
 
@@ -164,7 +164,7 @@ by any current hashcat kernel:
 | `WPA*11*`  | FT-PSK-SHA-384 EAPOL       |     8 | same two fixtures (one M1-PMK-R1Name + three N#E# combos × two fixtures)        |
 
 These lines are still emitted to the combined `-o` sink and to the dedicated
-taxonomy sinks (`--psk-sha384-out` / `--ft-psk-sha384-out`) so downstream
+per-AKM sinks (`--psk-sha384-out` / `--ft-psk-sha384-out`) so downstream
 tooling can consume them; they are deliberately suppressed from the legacy
 `--22000-out` and `--37100-out` sinks because feeding them to those hashcat
 modes would just waste GPU cycles. Example shape per prefix:
@@ -183,12 +183,12 @@ Why emit them at all?
   output. A regression that silently drops SHA-384 emission trips this test.
 - The 24 lines flow through the same classifier and emitter paths as the
   crackable ones; verifying the fields stay well-formed protects the
-  taxonomy sinks if hashcat ships SHA-384 kernels later.
+  per-AKM sinks if hashcat ships SHA-384 kernels later.
 
 ### What gets verified
 
 - **wpawolf side**: `tests/integration/generated_corpus.rs::manifest_expected_hashes_present_per_fixture`
-  walks every fixture, runs wpawolf, and asserts each declared taxonomy
+  walks every fixture, runs wpawolf, and asserts each declared per-AKM
   prefix appears in the combined-sink output. A wpawolf-side classifier
   regression that drops a type prefix trips this test immediately.
 - **Cross-variant invariant**: `link_layer_fixtures_emit_consistent_output`

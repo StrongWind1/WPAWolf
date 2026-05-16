@@ -167,7 +167,7 @@ pub fn all() -> Result<Vec<Fixture>> {
     Ok(out)
 }
 
-/// One taxonomy entry in the cases table.
+/// One per-AKM entry in the cases table.
 struct TypeCase {
     n: u8,
     name: &'static str,
@@ -179,7 +179,7 @@ struct TypeCase {
     descr: &'static str,
 }
 
-/// Build a per-`HashType` fixture for each of the 11 taxonomy entries.
+/// Build a per-`HashType` fixture for each of the 11 per-AKM entries.
 fn types_section() -> Result<Vec<Fixture>> {
     let cases: &[TypeCase] = &[
         TypeCase {
@@ -508,7 +508,7 @@ fn s_site_pmkid(s: u8, ap: [u8; 6], sta: [u8; 6], synthetic: &[u8; 16]) -> Resul
 /// We add a single PSK-SHA-256 (AKM 6) variant for each of these three.
 /// hashcat 22000 cracks PSK-SHA-256 EAPOL but not its PMKID (kernel uses
 /// HMAC-SHA1 only); the manifest expected_hashes therefore checks for the
-/// taxonomy prefix `WPA*04*` (PSK-SHA-256 PMKID) on the combined sink,
+/// per-AKM prefix `WPA*04*` (PSK-SHA-256 PMKID) on the combined sink,
 /// which proves the AKM was resolved correctly even if the legacy 22000
 /// sink can't crack the line. Per-fixture AP / STA MAC pairs come from
 /// `IDX_AKM_VARIANTS + i` so they cannot pollinate the existing AKM=2
@@ -574,10 +574,10 @@ fn pmkid_akm_variants_section() -> Result<Vec<Fixture>> {
             link_type: LinkType::Radiotap,
             description: (*descr).to_owned(),
             packets: wrap_with_radiotap(&frames),
-            // The PSK-SHA-256 PMKID emits as taxonomy `WPA*04*`; that's the
+            // The PSK-SHA-256 PMKID emits as per-AKM `WPA*04*`; that's the
             // existence proof that the AKM resolver mapped AKM 6 correctly.
             // hashcat 22000 cannot crack this line (HMAC-SHA1 kernel only);
-            // the `--psk-sha256-out` taxonomy sink keeps it crackable for
+            // the `--psk-sha256-out` per-AKM sink keeps it crackable for
             // future tooling.
             expected_hashes: vec!["WPA*04*".to_owned()],
             forbidden_hashes: vec!["WPA*02*".to_owned()],
