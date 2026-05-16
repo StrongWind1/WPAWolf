@@ -59,10 +59,6 @@ pub enum FrameDirection {
 /// Produced by [`parse`]. Contains enough information to route a frame to the
 /// correct EAPOL or management handler and to look up the (AP, STA) grouping key.
 #[derive(Debug)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each bool encodes a distinct, independent flag from the 802.11 frame header"
-)]
 pub struct MacHeader {
     /// AP MAC address (BSSID role), derived from ToDS/FromDS per Table 9-60.
     pub ap: MacAddr,

@@ -23,11 +23,6 @@ use super::common::{ASSOC_REQ_FIXED, REASSOC_REQ_FIXED, SUBTYPE_ASSOC_REQ, inser
 /// Increments frame/AKM counters, extracts SSIDs and PMKIDs from RSN and OSEN IEs.
 /// Fixed-field offsets: `AssocReq` = 4 bytes, `ReassocReq` = 10 bytes.
 /// [IEEE 802.11-2024] §9.3.3.6 (`AssocReq`), §9.3.3.8 (`ReassocReq`).
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "assoc handler mirrors process_probe_req pattern; large per-AKM counter switch is unavoidable"
-)]
 pub fn process_assoc_or_reassoc_req(
     mac_hdr: &frame::MacHeader,
     body: &[u8],
