@@ -866,6 +866,36 @@ pub fn format_autohex(bytes: &[u8]) -> String {
     }
 }
 
+// --- Display helpers ---
+
+/// Formats a byte count as a human-readable string (B / KiB / MiB / GiB) with
+/// one decimal place, using integer-only arithmetic (no float cast).
+#[must_use]
+pub fn human_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        let tenths = bytes / (GIB / 10);
+        format!("{}.{} GiB", tenths / 10, tenths % 10)
+    } else if bytes >= MIB {
+        let tenths = bytes / (MIB / 10);
+        format!("{}.{} MiB", tenths / 10, tenths % 10)
+    } else if bytes >= KIB {
+        let tenths = bytes / (KIB / 10);
+        format!("{}.{} KiB", tenths / 10, tenths % 10)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Formats an integer percentage with one decimal place using integer-only
+/// arithmetic. `pct_tenths` is the percentage times 10 (e.g. 852 = 85.2%).
+#[must_use]
+pub fn format_pct_tenths(pct_tenths: u64) -> String {
+    format!("{}.{}", pct_tenths / 10, pct_tenths % 10)
+}
+
 // --- Fingerprint helper ---
 
 /// Hashes a sequence of byte slices into a single `u64` fingerprint.

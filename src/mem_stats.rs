@@ -65,30 +65,9 @@ pub fn collect(
 }
 
 /// Formats `bytes` as a human-readable size (B / KiB / MiB / GiB) with one
-/// decimal place. Avoids a third-party dep; the formatter is cheap and
-/// deterministic.
+/// decimal place using integer-only arithmetic.
 fn format_bytes(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = KIB * 1024;
-    const GIB: usize = MIB * 1024;
-    if bytes >= GIB {
-        // u128 cast: bytes <= usize::MAX so the multiply cannot overflow on
-        // any platform wpawolf supports (usize >= u32 ; bytes/GIB fits u32 by
-        // construction). Float cast accepts the small precision loss.
-        #[allow(clippy::cast_precision_loss, reason = "MiB-precision display value")]
-        let v = bytes as f64 / GIB as f64;
-        format!("{v:.1} GiB")
-    } else if bytes >= MIB {
-        #[allow(clippy::cast_precision_loss, reason = "MiB-precision display value")]
-        let v = bytes as f64 / MIB as f64;
-        format!("{v:.1} MiB")
-    } else if bytes >= KIB {
-        #[allow(clippy::cast_precision_loss, reason = "KiB-precision display value")]
-        let v = bytes as f64 / KIB as f64;
-        format!("{v:.1} KiB")
-    } else {
-        format!("{bytes} B")
-    }
+    crate::types::human_bytes(bytes as u64)
 }
 
 /// Prints a stderr block of per-store byte counts, sorted by descending size.

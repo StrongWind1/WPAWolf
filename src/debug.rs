@@ -35,7 +35,7 @@ use crate::types::{MacAddr, MacPair, MsgType};
 
 /// Fraction of total RAM (0-100) above which `memory_check` always prints, even
 /// without `--debug`. Matches the threshold described in the `--debug` help text.
-const MEM_WARN_PCT: f64 = 80.0;
+const MEM_WARN_PCT_TENTHS: u64 = 800; // 80.0% expressed as tenths
 
 /// Groups above this cost get full per-group logging and a `[HEAVY]` flag in the survey.
 /// Lighter groups are tallied but not individually logged.
@@ -318,27 +318,25 @@ impl DebugPrinter {
     /// In Phase 4, this is called only for HEAVY groups (not every group) to avoid
     /// flooding the output with 280k memory readings.
     #[must_use]
-    pub fn memory_check(&self, context: &str) -> Option<f64> {
+    pub fn memory_check(&self, context: &str) -> Option<u64> {
         let (total_kb, avail_kb) = ram_info()?;
         let used_kb = total_kb.saturating_sub(avail_kb);
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "coarse % display; precision loss above multi-TB RAM is irrelevant"
-        )]
-        let pct = used_kb as f64 / total_kb as f64 * 100.0;
+        let pct_tenths = (used_kb * 1000).checked_div(total_kb).unwrap_or(0);
+        let pct_str = crate::types::format_pct_tenths(pct_tenths);
         let used_mib = used_kb / 1024;
         let total_mib = total_kb / 1024;
 
-        if pct >= MEM_WARN_PCT {
+        if pct_tenths >= MEM_WARN_PCT_TENTHS {
             let t = self.elapsed();
             let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "[MEMORY WARNING {t:.3}s] {used_mib} MiB / {total_mib} MiB ({pct:.1}%) -- {context}");
+            let _ =
+                writeln!(out, "[MEMORY WARNING {t:.3}s] {used_mib} MiB / {total_mib} MiB ({pct_str}%) -- {context}");
             let _ = out.flush();
         } else if self.enabled {
-            self.emit(&format!("mem  {used_mib} MiB / {total_mib} MiB ({pct:.1}%)  -- {context}"));
+            self.emit(&format!("mem  {used_mib} MiB / {total_mib} MiB ({pct_str}%)  -- {context}"));
         }
 
-        Some(pct)
+        Some(pct_tenths)
     }
 }
 
@@ -417,17 +415,8 @@ fn rss_tag() -> String {
     crate::progress::current_rss_mib().map_or_else(String::new, |r| format!("  rss={r}MiB"))
 }
 
-#[allow(clippy::cast_precision_loss, reason = "coarse display; precision loss above 4 PiB is irrelevant")]
 fn human_bytes(bytes: u64) -> String {
-    if bytes >= 1 << 30 {
-        format!("{:.1}GiB", bytes as f64 / (1u64 << 30) as f64)
-    } else if bytes >= 1 << 20 {
-        format!("{:.1}MiB", bytes as f64 / (1u64 << 20) as f64)
-    } else if bytes >= 1 << 10 {
-        format!("{:.1}KiB", bytes as f64 / (1u64 << 10) as f64)
-    } else {
-        format!("{bytes}B")
-    }
+    crate::types::human_bytes(bytes)
 }
 
 /// Returns the Phase 4 progress-ticker interval (groups between ticker lines).
