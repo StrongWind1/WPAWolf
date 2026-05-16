@@ -300,6 +300,15 @@ impl<R: Read> PcapngReader<R> {
 
         let body_len = (block_total_len - MIN_BLOCK_BYTES) as usize;
 
+        if body_len > super::MAX_PACKET_BYTES {
+            // Block exceeds the safety cap. Skip it by consuming body_len bytes
+            // plus the 4-byte trailing block_total_length field.
+            std::io::copy(&mut (&mut self.reader).take(body_len as u64), &mut std::io::sink())?;
+            let mut trail = [0u8; 4];
+            self.reader.read_exact(&mut trail)?;
+            return Ok(BlockOutcome::Skip);
+        }
+
         // Grow the reusable body buffer if necessary, then fill the exact prefix.
         if self.block_buf.len() < body_len {
             self.block_buf.resize(body_len, 0);

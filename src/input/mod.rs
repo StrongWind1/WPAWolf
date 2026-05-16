@@ -11,6 +11,17 @@ pub mod pcapng;
 
 use crate::types::Result;
 
+// --- Allocation safety cap ---
+
+/// Maximum packet data size we will allocate for a single capture record (1 MiB).
+///
+/// The largest legitimate 802.11 frame is ~7991 bytes (max A-MSDU in an MPDU).
+/// With radiotap headers, FCS, and generous margin, nothing real exceeds 64 KiB.
+/// 1 MiB is the paranoid backstop: large enough to never reject a real capture,
+/// small enough that a malicious file claiming `incl_len = u32::MAX` cannot OOM
+/// the process. Records exceeding this cap are skipped with a counter increment.
+pub(crate) const MAX_PACKET_BYTES: usize = 1_048_576;
+
 // --- Shared packet type ---
 
 /// A single captured packet yielded by any reader type.

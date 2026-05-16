@@ -260,6 +260,12 @@ impl<R: Read> PacketReader for PcapReader<R> {
 
         // --- Read packet data ---
         let caplen = incl_len as usize;
+        if caplen > super::MAX_PACKET_BYTES {
+            // Skip this record: consume caplen bytes from the stream so the next
+            // record header is at the correct offset, then recurse to the next packet.
+            std::io::copy(&mut (&mut self.reader).take(incl_len.into()), &mut std::io::sink())?;
+            return self.next_packet();
+        }
         let mut data = vec![0u8; caplen];
         self.reader.read_exact(&mut data).map_err(|e| {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
