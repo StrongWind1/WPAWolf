@@ -88,7 +88,6 @@ enum IxiaVariant {
 /// one frame per call until EOF. In classic pcap there is a single interface (id 0)
 /// with the DLT from the global header; `link_type(0)` returns that DLT.
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools, reason = "independent magic-derived format flags, not a state machine")]
 pub struct PcapReader<R: Read> {
     reader: BufReader<R>,
     byte_order: ByteOrder,

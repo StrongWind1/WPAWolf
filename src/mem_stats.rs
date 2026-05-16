@@ -31,7 +31,6 @@ use crate::store::{AkmMap, MldStore};
 /// `entries` value is the store's domain-meaningful "row count" -- pairs for
 /// `MessageStore`, MAC keys for `AkmMap` (sum of both inner maps), distinct
 /// strings for the auxiliary sets, etc.
-#[allow(clippy::too_many_arguments, reason = "report aggregator: one parameter per long-lived store")]
 #[must_use]
 pub fn collect(
     message_store: &MessageStore,

@@ -54,7 +54,6 @@ use wpawolf::{
     long_about = None,
     arg_required_else_help = true,
 )]
-#[allow(clippy::struct_excessive_bools, reason = "independent CLI flags, not a state machine")]
 struct Cli {
     /// Input capture file(s) and/or director(ies)
     ///

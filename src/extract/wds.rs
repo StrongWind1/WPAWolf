@@ -22,7 +22,6 @@ use super::common::{extract_ack_flag, store_eapol_key};
 ///
 /// When Tier 1b or Tier 2 reveals that the RA (not the TA) is the AP, the AP/STA
 /// assignment from `frame::parse` is swapped for correct `message_store` grouping.
-#[allow(clippy::too_many_arguments, reason = "Phase 1.5 deferred-WDS resolver mirrors process_data sinks plus log")]
 pub fn resolve_wds_eapol(
     pending: &[PendingEapol],
     essid_map: &EssidMap,

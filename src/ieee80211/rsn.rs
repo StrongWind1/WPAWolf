@@ -252,7 +252,6 @@ pub const IE_RSN_EXTENSION: u8 = 244;
 /// Diagnostic flags only -- these do not influence PSK/FT-PSK hash emission. Used by
 /// the stats summary to report WPA3 / 11az / 11ax feature advertisements observed in
 /// the capture. [IEEE 802.11-2024] §9.4.2.241, Figure 9-711.
-#[allow(clippy::struct_excessive_bools, reason = "one flag per capability bit; not a state machine")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RsnxeInfo {
     /// Bit 5 of byte 0: SAE Hash-to-Element required (WPA3-H2E). [§9.4.2.241]
@@ -307,7 +306,6 @@ pub fn extract_rsnxe(tagged_params: &[u8]) -> Option<RsnxeInfo> {
 /// Used to bucket assoc/reassoc frames into per-AKM stats counters. Covers crackable
 /// and non-crackable AKMs so the operator can see the full security-mode distribution
 /// of clients in the capture. Per [IEEE 802.11-2024] §9.4.2.24.3, Table 9-190.
-#[allow(clippy::struct_excessive_bools, reason = "one flag per AKM category; not a state machine")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AssocAkmFlags {
     /// AKM 2: WPA2-PSK (HMAC-SHA1 PMKID, PRF-SHA1 PTK).

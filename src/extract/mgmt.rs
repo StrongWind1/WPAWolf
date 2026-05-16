@@ -60,7 +60,6 @@ fn scan_ies_for_wordlist(ies: &[u8], scan_ies_store: &mut WordlistScanIesStore, 
 /// Action Neighbor Report Requests, WPS device metadata, country codes, and SSID
 /// List entries. Unhandled subtypes increment counters for visibility.
 /// See `ARCHITECTURE.md §8 FR-MGMT-*`.
-#[allow(clippy::too_many_arguments, reason = "dispatcher aggregates all management-frame sinks")]
 pub fn process_mgmt(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

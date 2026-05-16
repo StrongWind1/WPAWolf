@@ -24,7 +24,6 @@ use super::{ComboType, FLAG_APLESS, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 /// `--dedup-hash-combos`). Keeping them in a single struct simplifies passing
 /// through `generate` and `try_pair` without a long argument list.
 #[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools, reason = "these are independent CLI flags, not a state machine")]
 pub struct PairConfig {
     /// Maximum time gap between paired messages in microseconds.
     /// Only used when `time_check_enabled` is true. Default: `600_000_000` (10 minutes).

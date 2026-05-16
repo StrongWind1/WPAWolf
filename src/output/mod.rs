@@ -410,7 +410,6 @@ fn fan_out(
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-#[allow(clippy::too_many_lines, reason = "linear pipeline orchestrator")]
 #[allow(clippy::too_many_arguments, reason = "Phase 4 entry point owns every store + the structured logger")]
 pub fn run_output(
     message_store: &MessageStore,
@@ -538,7 +537,6 @@ impl OutputContext {
     /// # Errors
     ///
     /// Returns `Err` on I/O failure during fan-out.
-    #[allow(clippy::too_many_arguments, reason = "Phase 4 emit pass: every store + tunable is needed once")]
     pub fn emit(
         &mut self,
         message_store: &MessageStore,
@@ -564,7 +562,6 @@ impl OutputContext {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines, reason = "linear pipeline -- splitting hides intent")]
     fn emit_inner(
         &mut self,
         message_store: &MessageStore,
@@ -744,7 +741,6 @@ impl OutputContext {
     /// # Errors
     ///
     /// Returns `Err` on I/O failure during flush or aux output writes.
-    #[allow(clippy::too_many_arguments, reason = "auxiliary output: one writer per configured -E/-R/-W/-I/-U/-D path")]
     pub fn finalize(
         mut self,
         paths: &OutputPaths,

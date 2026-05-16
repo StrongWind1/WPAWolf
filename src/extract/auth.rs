@@ -16,7 +16,6 @@ use crate::types::{AkmType, PmkidSource};
 /// MDE (tag 54), and FTE (tag 55). FT-PSK PMKIDs with FT context are stored with
 /// `AkmType::FtPsk`; direction is determined by the sequence number.
 /// Per [IEEE 802.11-2024] §13.8.3, §9.4.2.45 (MDE), §9.4.2.46 (FTE).
-#[allow(clippy::too_many_arguments, reason = "auth handler aggregates pmkid sinks plus structured log")]
 pub fn process_auth_ft(
     mac_hdr: &frame::MacHeader,
     seq: u16,
@@ -66,7 +65,6 @@ pub fn process_auth_ft(
 /// Called for Authentication frames where `algo` is 4, 5, or 6 (FILS variants).
 /// Parses the IE list for RSN IE PMKID List. FILS PMKIDs are not PSK-crackable
 /// but are captured for completeness. Per [IEEE 802.11-2024] §12.11.2.3.2-3.4.
-#[allow(clippy::too_many_arguments, reason = "auth handler aggregates pmkid sinks plus structured log")]
 pub fn process_auth_fils(
     mac_hdr: &frame::MacHeader,
     seq: u16,
@@ -111,7 +109,6 @@ pub fn process_auth_fils(
 ///
 /// Called for Authentication frames with algorithm values not matching any known
 /// type. All such values may be PASN base-AKMP values. Per [IEEE 802.11-2024] §12.13.1-2.
-#[allow(clippy::too_many_arguments, reason = "auth handler aggregates pmkid sinks plus structured log")]
 pub fn process_auth_pasn(
     mac_hdr: &frame::MacHeader,
     seq: u16,

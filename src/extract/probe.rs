@@ -24,7 +24,6 @@ use super::common::{BROADCAST_MAC, insert_essid};
 /// PMKIDs from any RSN IE PMKID List. IEs start at `body[0]` (no fixed fields).
 /// Directed probe requests (non-broadcast DA) update the ESSID map; broadcast probes
 /// only update the global ESSID set. See `ARCHITECTURE.md §8 FR-MGMT-*`.
-#[allow(clippy::too_many_arguments, reason = "probe-req handler mirrors process_beacon_or_probe_resp pattern")]
 pub fn process_probe_req(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

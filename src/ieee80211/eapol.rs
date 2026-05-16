@@ -359,7 +359,6 @@ fn extract_pmkid_kde(key_data: &[u8]) -> Option<[u8; 16]> {
 ///   ACK=0, MIC=1, Secure=0, body!=95 -> M2
 ///
 /// \[hcxpcapngtool include/ieee80211.c:4 `getkeyinfo()`\]
-#[allow(clippy::fn_params_excessive_bools, reason = "mirrors Key Information bit field layout")]
 const fn classify_by_flags(ack: bool, install: bool, mic: bool, secure: bool, body_len: usize) -> Option<MsgType> {
     match (ack, install) {
         (true, true) => Some(MsgType::M3),

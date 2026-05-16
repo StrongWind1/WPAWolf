@@ -26,7 +26,6 @@ pub use wds::resolve_wds_eapol;
 /// into a struct so the extract module does not depend on the binary's `Cli`
 /// type (which lives in `src/main.rs`).
 #[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools, reason = "independent CLI extraction flags, not a state machine")]
 pub struct ExtractConfig {
     /// `-W` requested: populate `WordlistStore` from every available source.
     pub populate_wordlist: bool,

@@ -22,7 +22,6 @@ use super::common::{is_eapol_key_packet, is_eapol_llc, is_preauth_llc, mesh_cont
 /// defers EAPOL classification to Phase 1.5 by storing in `pending_eapol`.
 /// Falls back to EAP parsing for identity/username extraction when the corresponding
 /// output flags are set. See `ARCHITECTURE.md §8 FR-DATA-*`.
-#[allow(clippy::too_many_arguments, reason = "pipeline function passes through all Phase 1 stores")]
 pub fn process_data(
     mac_hdr: &frame::MacHeader,
     body: &[u8],
@@ -226,7 +225,6 @@ pub fn process_data(
 /// for A-MSDU aggregated frames. The `(ap, sta)` keying always uses the outer
 /// frame's MAC header so a multi-subframe session lands in one `MessageStore`
 /// group.
-#[allow(clippy::too_many_arguments, reason = "shared per-MSDU pipeline; mirrors process_data parameter set")]
 fn process_msdu_payload(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

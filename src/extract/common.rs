@@ -199,7 +199,6 @@ pub fn extract_ack_flag(body: &[u8]) -> Option<bool> {
 /// Shared by the immediate classification path (Phase 1) and deferred WDS resolution
 /// (Phase 1.5). Handles M1 PMKID KDE extraction, M2 RSN IE PMKID extraction,
 /// per-message-type counters, and auth-length tracking.
-#[allow(clippy::too_many_arguments, reason = "shared EAPOL pipeline; mirrors process_data parameter set")]
 pub fn store_eapol_key(
     key: eapol::EapolKey,
     ap: MacAddr,

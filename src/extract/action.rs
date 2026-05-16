@@ -88,7 +88,6 @@ pub const IE_AMPE: u8 = 139;
 ///   PMKID from AMPE element "Chosen PMK" field. [IEEE 802.11-2024] §9.6.15.2-3, §14.3.5
 ///
 /// Other categories are counted but not extracted from.
-#[allow(clippy::too_many_arguments, reason = "action dispatcher aggregates SSID/PMKID/wordlist sinks")]
 pub fn process_action(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

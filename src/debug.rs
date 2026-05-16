@@ -159,7 +159,6 @@ impl DebugPrinter {
     /// Covers: per-type EAPOL totals, cost-tier group counts, saturation drops, and
     /// the top-`n` groups by pairing cost (from `top_groups`). Shows the exact load
     /// Phase 4 is about to process so OOM culprits are visible before the crash.
-    #[allow(clippy::too_many_arguments, reason = "store summary: every field is a distinct diagnostic dimension")]
     pub fn pre_phase4_store_summary(
         &self,
         m1_total: u64,
