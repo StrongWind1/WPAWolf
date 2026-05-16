@@ -202,7 +202,7 @@ pub fn pair_all_groups(
             let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
             debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
             if cost >= HEAVY_GROUP_COST {
-                debug.memory_check(&format!(
+                let _ = debug.memory_check(&format!(
                     "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
                     mac_pair.ap, mac_pair.sta
                 ));
@@ -258,7 +258,7 @@ pub fn pair_all_groups(
                         let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
                         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
                         if cost >= HEAVY_GROUP_COST {
-                            debug.memory_check(&format!(
+                            let _ = debug.memory_check(&format!(
                                 "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
                                 mac_pair.ap, mac_pair.sta
                             ));

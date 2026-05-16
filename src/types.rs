@@ -529,14 +529,33 @@ impl MicBytes {
 
     /// Builds a `MicBytes` from a 16-byte array (AKMs 1-6, 8, 9, 11).
     #[must_use]
-    #[allow(clippy::indexing_slicing, reason = "indices 0..16 are statically within both arrays in a const fn")]
     pub const fn from_16(bytes16: [u8; 16]) -> Self {
-        let mut bytes = [0u8; 24];
-        let mut i = 0;
-        while i < 16 {
-            bytes[i] = bytes16[i];
-            i += 1;
-        }
+        let bytes = [
+            bytes16[0],
+            bytes16[1],
+            bytes16[2],
+            bytes16[3],
+            bytes16[4],
+            bytes16[5],
+            bytes16[6],
+            bytes16[7],
+            bytes16[8],
+            bytes16[9],
+            bytes16[10],
+            bytes16[11],
+            bytes16[12],
+            bytes16[13],
+            bytes16[14],
+            bytes16[15],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         Self { bytes, len: 16 }
     }
 

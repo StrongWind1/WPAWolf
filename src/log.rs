@@ -371,16 +371,20 @@ const fn msg_type_label(mt: Option<crate::types::MsgType>) -> &'static str {
 /// separators). Used by every discard-category logger so an operator can grep
 /// the source capture for the exact byte sequence that triggered the drop.
 fn render_lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut hex = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        #[allow(clippy::indexing_slicing, reason = "HEX is a fixed 16-byte array; nibble indices are always 0..16")]
-        {
-            hex.push(HEX[(b >> 4) as usize] as char);
-            hex.push(HEX[(b & 0x0F) as usize] as char);
-        }
+        hex.push(nibble_to_hex(b >> 4));
+        hex.push(nibble_to_hex(b & 0x0F));
     }
     hex
+}
+
+/// Converts a 4-bit nibble (0..=15) to its lowercase hex ASCII character.
+const fn nibble_to_hex(n: u8) -> char {
+    (match n {
+        0..=9 => b'0' + n,
+        _ => b'a' + (n - 10),
+    }) as char
 }
 
 // --- Unit tests ---

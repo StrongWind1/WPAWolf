@@ -180,11 +180,6 @@ impl MessageStore {
     /// already holds `per_type_cap` messages of `msg.msg_type`. The first drop for
     /// each `(pair, type)` combo sets `is_new_saturation = true`; subsequent drops
     /// set it `false`. See `Admission` for how the call site should respond.
-    // Callers that don't need the result (e.g. test helpers) may discard it.
-    #[allow(
-        clippy::must_use_candidate,
-        reason = "discarding the admission result is intentional in tests and mutation-only callers"
-    )]
     pub fn add(&mut self, ap: MacAddr, sta: MacAddr, msg: EapolMessage) -> Admission {
         let pair = MacPair::new(ap, sta);
         let entries = self.groups.entry(pair).or_default();

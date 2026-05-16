@@ -172,12 +172,11 @@ mod tests {
 
     /// Non-repeating 16-byte PMKID seeded from a single byte. Avoids
     /// garbage-pattern rejection by XOR-ing the seed with a position offset.
-    #[allow(clippy::cast_possible_truncation, reason = "i is 0..16, always fits in u8")]
     const fn realistic_pmkid(seed: u8) -> [u8; 16] {
         let mut p = [0u8; 16];
-        let mut i = 0;
+        let mut i: u8 = 0;
         while i < 16 {
-            p[i] = seed ^ (i as u8).wrapping_mul(17);
+            p[i as usize] = seed ^ i.wrapping_mul(17);
             i += 1;
         }
         p

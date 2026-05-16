@@ -852,7 +852,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 stats.pmkids_found - pre_pmkid,
                 message_store.group_count(),
             );
-            debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
+            let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
         }
 
         // --- Per-file emit (--per-file mode only) ---
@@ -992,7 +992,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     eapol_total
                 ),
             );
-            debug.memory_check("Phase 1 complete");
+            let _ = debug.memory_check("Phase 1 complete");
 
             if debug.enabled {
                 // Build group summaries for the top-25 survey and cost-tier breakdown.

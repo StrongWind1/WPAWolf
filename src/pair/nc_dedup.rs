@@ -218,13 +218,8 @@ enum Endianness {
 }
 
 /// Reads `nonce[28..32]` as a `u32` in the given endianness.
-///
-/// Always returns a value -- nonce is `[u8; 32]` so the trailing slice is
-/// statically present. The `#[allow]` on this helper documents that the
-/// indices are checked at compile time, not at runtime.
-#[allow(clippy::indexing_slicing, reason = "nonce is [u8; 32]; indices 28..=31 are statically valid")]
-const fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
-    let bytes: [u8; 4] = [nonce[28], nonce[29], nonce[30], nonce[31]];
+fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
+    let bytes: [u8; 4] = nonce.get(28..32).and_then(|s| s.try_into().ok()).unwrap_or([0; 4]);
     match endian {
         Endianness::Le => u32::from_le_bytes(bytes),
         Endianness::Be => u32::from_be_bytes(bytes),

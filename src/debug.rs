@@ -317,10 +317,7 @@ impl DebugPrinter {
     ///
     /// In Phase 4, this is called only for HEAVY groups (not every group) to avoid
     /// flooding the output with 280k memory readings.
-    #[allow(
-        clippy::must_use_candidate,
-        reason = "callers that discard the percentage are fine -- the warning prints as a side effect"
-    )]
+    #[must_use]
     pub fn memory_check(&self, context: &str) -> Option<f64> {
         let (total_kb, avail_kb) = ram_info()?;
         let used_kb = total_kb.saturating_sub(avail_kb);
