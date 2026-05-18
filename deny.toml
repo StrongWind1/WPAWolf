@@ -1,32 +1,46 @@
 [graph]
-# Analyse the full dependency graph, not just direct deps
-all-features = false
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 3
 
 [advisories]
-# Deny all known vulnerabilities
-version = 2
 db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = []
+db-urls = [ "https://github.com/rustsec/advisory-db" ]
+ignore = [ ]
+maximum-db-staleness = "P1D"
+git-fetch-with-cli = true
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+yanked = "deny"
 
 [licenses]
-version = 2
-# Only allow OSI-approved permissive/copyleft licenses
-allow = [
-    "MIT",
-    "Apache-2.0",
-    "Unicode-3.0",
-    "Zlib",
-]
-confidence-threshold = 0.8
+allow = [ "Apache-2.0", "MIT", "Unicode-3.0" ]
+unused-allowed-license = "deny"
+confidence-threshold = 0.95
 
 [bans]
-# Deny duplicate versions of the same crate (except where explicitly allowed)
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
+
+[[bans.deny]]
+crate = "openssl"
+wrappers = [ ]
+
+[[bans.deny]]
+crate = "openssl-sys"
+wrappers = [ ]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
+allow-git = [ ]
+
+[sources.allow-org]
+github = [ ]
+gitlab = [ ]
+bitbucket = [ ]
