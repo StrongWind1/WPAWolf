@@ -339,6 +339,7 @@ impl MessageStore {
 }
 
 /// Public entry point for the session-window filter, used by `pair::thin_group`.
+#[must_use]
 pub fn session_window_filter_pub(msgs: &[EapolMessage], window_us: u64) -> Vec<EapolMessage> {
     session_window_filter(msgs, window_us)
 }
