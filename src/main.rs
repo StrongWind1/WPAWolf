@@ -15,6 +15,8 @@
 // so suppress the unused_crate_dependencies lint with the `as _` form.
 use crc32fast as _;
 use flate2 as _;
+use rayon as _;
+use sysinfo as _;
 
 use clap::Parser;
 
@@ -238,12 +240,6 @@ struct Cli {
     #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
     per_file: bool,
 
-    /// Cap stored messages per type per pair
-    ///
-    /// Limits M1/M2/M3/M4 independently per (AP, STA) group. Prevents OOM from rotating-nonce firmware. Set to 0 for unlimited.
-    #[arg(long, value_name = "N", default_value_t = 2048, help_heading = "Runtime", display_order = 33)]
-    max_eapol_per_type: usize,
-
     /// Print per-store memory footprint at end of run
     ///
     /// Approximate byte counts for every long-lived store (MessageStore, PmkidStore, EssidMap, etc.), sorted descending. For OOM triage.
@@ -427,7 +423,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let debug = DebugPrinter::new(cli.debug);
 
     // --- Initialise stores ---
-    let mut message_store = MessageStore::with_per_type_cap(cli.max_eapol_per_type);
+    let mut message_store = MessageStore::new();
     let mut pmkid_store = PmkidStore::new();
     let mut fragment_store = FragmentStore::new();
     let mut essid_map = EssidMap::new();
@@ -916,12 +912,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     cost_low,
                     cost_medium,
                     cost_heavy,
-                    stats.eapol_type_saturated_dropped,
                 );
                 debug.top_groups(&summaries, total_groups);
-                if stats.eapol_type_saturated_dropped > 0 {
-                    debug.saturated_pairs_detail(message_store.type_saturated_iter());
-                }
             }
 
             debug.phase_start(4, "Emit");

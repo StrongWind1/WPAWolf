@@ -104,6 +104,13 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 crc32fast = "1"
 # CLI argument parsing. Minimal feature set: no env, no yaml, no suggestions.
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
+# Parallel iteration for Phase 4 pairing. Replaces ~70 lines of manual
+# std::thread::scope + LPT scheduling with par_iter() and work-stealing.
+rayon = "1"
+# Cross-platform process RSS + total RAM queries. Replaces Linux-only
+# /proc/self/status and /proc/meminfo parsing with System::process(pid).memory()
+# and System::total_memory(). Works on Linux, macOS, and Windows.
+sysinfo = "0.33"
 
 # --- Lint policy ---
 [profile.dev]

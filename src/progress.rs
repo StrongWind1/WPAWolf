@@ -21,11 +21,6 @@
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-// `Read` trait is only used inside the Linux `current_rss_mib` cfg block
-// (the `/proc/self/statm` reader); on macOS / Windows the unused-imports lint
-// would otherwise reject the build. Gate the import to match the only call site.
-#[cfg(target_os = "linux")]
-use std::io::Read as _;
 use std::time::Instant;
 
 // --- Cadence thresholds ---
@@ -125,35 +120,35 @@ impl ProgressReporter {
     }
 }
 
+/// Returns the current process's resident set size in bytes, or 0 when the
+/// platform probe fails. Cross-platform via `sysinfo`.
+#[must_use]
+pub fn current_rss_bytes() -> u64 {
+    let Ok(pid) = sysinfo::get_current_pid() else { return 0 };
+    let mut sys = sysinfo::System::new();
+    let refresh = sysinfo::ProcessRefreshKind::nothing().with_memory();
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), false, refresh);
+    sys.process(pid).map_or(0, sysinfo::Process::memory)
+}
+
 /// Returns the current process's resident set size in MiB, or `None` when the
-/// platform does not expose a cheap probe.
+/// platform does not expose a working probe.
 ///
-/// Linux: reads `VmRSS:` from `/proc/self/status` which reports in KiB
-/// regardless of the kernel's page size (correct on both 4 KiB `x86_64` and
-/// 64 KiB `aarch64` pages). Other platforms return `None` so the caller omits
-/// the `rss=` field rather than printing a wrong value.
+/// Cross-platform via `sysinfo`. On Linux, macOS, and Windows the value comes
+/// from the OS process table. Returns `None` only when `sysinfo` cannot query
+/// the current process at all.
 #[must_use]
 pub fn current_rss_mib() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        // /proc/self/status contains `VmRSS:  <N> kB` -- already in KiB,
-        // page-size-independent. Divide by 1024 for MiB.
-        let mut buf = String::new();
-        let mut f = std::fs::File::open("/proc/self/status").ok()?;
-        f.read_to_string(&mut buf).ok()?;
-        for line in buf.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kib: u64 =
-                    rest.trim().strip_suffix("kB").or_else(|| rest.trim().strip_suffix("KB"))?.trim().parse().ok()?;
-                return Some(kib / 1024);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    let bytes = current_rss_bytes();
+    if bytes > 0 { Some(bytes / (1024 * 1024)) } else { None }
+}
+
+/// Returns the total physical RAM in bytes. Cross-platform via `sysinfo`.
+#[must_use]
+pub fn total_ram_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    sys.total_memory()
 }
 
 // --- Unit tests ---
@@ -208,15 +203,22 @@ mod tests {
     }
 
     #[test]
-    fn current_rss_mib_returns_a_value_on_linux() {
-        // On a Linux build host this should always return Some(>0); on other
-        // platforms it returns None and we accept that.
+    fn current_rss_mib_returns_a_value() {
+        // sysinfo is cross-platform; should return Some(>0) on Linux/macOS/Windows.
         let r = current_rss_mib();
-        if cfg!(target_os = "linux") {
-            assert!(r.is_some(), "Linux should report RSS");
-            assert!(r.unwrap() > 0, "process must have non-zero RSS");
-        } else {
-            assert!(r.is_none(), "non-Linux platforms return None");
-        }
+        assert!(r.is_some(), "sysinfo should report RSS on this platform");
+        assert!(r.unwrap() > 0, "process must have non-zero RSS");
+    }
+
+    #[test]
+    fn total_ram_bytes_returns_nonzero() {
+        let ram = total_ram_bytes();
+        assert!(ram > 0, "total_ram_bytes must report non-zero physical RAM");
+    }
+
+    #[test]
+    fn current_rss_bytes_returns_nonzero() {
+        let rss = current_rss_bytes();
+        assert!(rss > 0, "current_rss_bytes must report non-zero RSS");
     }
 }

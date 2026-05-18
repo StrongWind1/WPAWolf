@@ -287,27 +287,6 @@ impl Logger {
     /// rendering. Fires from every SSID-extract site (Beacon, Probe Request
     /// / Response, Association / Reassociation Request, Action Measurement
     /// IE, OWE Transition Mode).
-    /// Logs the first time a `(AP, STA, msg_type)` group hits the per-type EAPOL cap.
-    ///
-    /// Only called once per `(AP, STA, type)` combo (`is_new_saturation = true` from
-    /// `MessageStore::add`). Subsequent drops for the same combo only increment the
-    /// stats counter. The `cap` field is the configured `--max-eapol-per-type` value
-    /// so the operator knows what threshold was hit. `msg_type` is the string label
-    /// (`m1` / `m2` / `m3` / `m4`) matching the `[invalid_nonce]` convention.
-    pub fn log_eapol_group_saturated(
-        &mut self,
-        timestamp_us: u64,
-        ap_hex: impl std::fmt::Display,
-        sta_hex: impl std::fmt::Display,
-        msg_type: crate::types::MsgType,
-        cap: usize,
-    ) {
-        let mt = msg_type_label(Some(msg_type));
-        self.write_line(&format!(
-            "[eapol_group_saturated] {timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} cap={cap}"
-        ));
-    }
-
     /// Logs an SSID that contains at least one ASCII C0 control byte (`0x00..=0x1F`). See the field doc in `Stats`.
     pub fn log_essid_control_bytes(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, essid: &[u8]) {
         let essid_hex = render_lower_hex(essid);

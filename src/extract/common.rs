@@ -11,7 +11,7 @@ use crate::stats::Stats;
 use crate::store::{
     AkmMap,
     essid::EssidMap,
-    messages::{Admission, EapolMessage, MessageStore},
+    messages::{EapolMessage, MessageStore},
     pmkid::{PmkidEntry, PmkidStore},
 };
 use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
@@ -379,12 +379,7 @@ pub fn store_eapol_key(
     stats.record_key_descriptor_version(key.key_version);
 
     let msg = EapolMessage::from_eapol_key(key, timestamp_us, akm, ft);
-    if let Admission::TypeSaturated { is_new_saturation } = message_store.add(ap, sta, msg) {
-        stats.eapol_type_saturated_dropped += 1;
-        if is_new_saturation {
-            logger.log_eapol_group_saturated(timestamp_us, ap, sta, msg_type, message_store.per_type_cap());
-        }
-    }
+    message_store.add(ap, sta, msg);
 }
 
 // --- Unit tests ---

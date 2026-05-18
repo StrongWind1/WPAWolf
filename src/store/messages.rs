@@ -88,15 +88,6 @@ pub enum Admission {
     Stored,
     /// A byte-identical `(msg_type, akm, eapol_frame)` tuple was already present; dropped.
     Duplicate,
-    /// The per-type cap was reached before this message could be stored.
-    ///
-    /// `is_new_saturation` is `true` the first time a given `(MacPair, MsgType)` combo
-    /// hits the cap -- the call site should emit a `[eapol_group_saturated]` log line
-    /// exactly once per combo so the operator can identify the culprit AP without log spam.
-    TypeSaturated {
-        /// `true` on the first drop for this `(MacPair, MsgType)`; `false` for subsequent drops.
-        is_new_saturation: bool,
-    },
 }
 
 // --- MessageStore ---
@@ -108,46 +99,20 @@ pub enum Admission {
 /// The pairing engine (Phase 4) reads from this store after all packets are collected.
 /// See `ARCHITECTURE.md §3.3` and `§5.1`.
 ///
-/// **Per-type cap.** When `per_type_cap > 0`, each `(AP, STA)` group is limited to
-/// `per_type_cap` stored messages per EAPOL message type (M1 / M2 / M3 / M4 counted
-/// independently). Messages beyond the cap are silently discarded; the `Admission`
-/// return value from `add` identifies the first drop per `(pair, type)` so the call
-/// site can log the event and increment the stats counter. The cap prevents Phase 4's
-/// O(M1 * M2) pair-generation from crashing on captures where a single AP retransmits
-/// M1 with a fresh `ANonce` on each attempt (rotating-ANonce firmware behaviour).
+/// Memory pressure from rotating-nonce firmware is handled by adaptive thinning
+/// in the pair pipeline (session-window filtering on heavy groups when RSS exceeds
+/// `--mem-limit`), not by a hard per-type cap at ingest time.
 #[derive(Debug, Default)]
 pub struct MessageStore {
     groups: HashMap<MacPair, Vec<EapolMessage>>,
     total_count: usize,
-    /// 0 = unlimited (backward-compatible default). When > 0, each `(pair, type)` is
-    /// capped at this many stored messages.
-    per_type_cap: usize,
-    /// Tracks which `(MacPair, MsgType)` combos have already fired the first-saturation
-    /// log event, so subsequent drops for the same combo are counted silently.
-    type_saturated: HashSet<(MacPair, MsgType)>,
 }
 
 impl MessageStore {
-    /// Creates an empty `MessageStore` with no per-type cap (unlimited).
+    /// Creates an empty `MessageStore`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates an empty `MessageStore` with a per-type message cap.
-    ///
-    /// When `cap == 0`, behaves identically to `new()` (unlimited). When `cap > 0`,
-    /// each `(AP, STA)` group is limited to `cap` messages per EAPOL message type;
-    /// further inserts return `Admission::TypeSaturated` instead of storing the message.
-    #[must_use]
-    pub fn with_per_type_cap(cap: usize) -> Self {
-        Self { per_type_cap: cap, ..Self::default() }
-    }
-
-    /// Returns the configured per-type cap (0 = unlimited).
-    #[must_use]
-    pub const fn per_type_cap(&self) -> usize {
-        self.per_type_cap
     }
 
     /// Inserts an EAPOL message into the group for `(ap, sta)`.
@@ -175,23 +140,9 @@ impl MessageStore {
     /// `akm` is part of the key because the same frame bytes could in
     /// principle be tagged with a different `AkmType` if the surrounding
     /// RSN-IE context advanced between two observations.
-    ///
-    /// Returns `Admission::TypeSaturated` when `per_type_cap > 0` and the group
-    /// already holds `per_type_cap` messages of `msg.msg_type`. The first drop for
-    /// each `(pair, type)` combo sets `is_new_saturation = true`; subsequent drops
-    /// set it `false`. See `Admission` for how the call site should respond.
     pub fn add(&mut self, ap: MacAddr, sta: MacAddr, msg: EapolMessage) -> Admission {
         let pair = MacPair::new(ap, sta);
         let entries = self.groups.entry(pair).or_default();
-
-        // Per-type cap check: reject before dedup scan when the type bucket is full.
-        if self.per_type_cap > 0 {
-            let type_count = entries.iter().filter(|m| m.msg_type == msg.msg_type).count();
-            if type_count >= self.per_type_cap {
-                let is_new_saturation = self.type_saturated.insert((pair, msg.msg_type));
-                return Admission::TypeSaturated { is_new_saturation };
-            }
-        }
 
         if entries.iter().any(|m| m.msg_type == msg.msg_type && m.akm == msg.akm && m.eapol_frame == msg.eapol_frame) {
             return Admission::Duplicate;
@@ -218,14 +169,6 @@ impl MessageStore {
         self.groups.len()
     }
 
-    /// Iterates over `(MacPair, MsgType)` combos that hit the per-type cap.
-    ///
-    /// Empty when `per_type_cap == 0` (unlimited) or no group reached the cap.
-    /// Used by `--debug` to list exactly which AP/STA pairs were saturated before Phase 4.
-    pub fn type_saturated_iter(&self) -> impl Iterator<Item = (&MacPair, MsgType)> {
-        self.type_saturated.iter().map(|(pair, mt)| (pair, *mt))
-    }
-
     /// Drops every group and resets the total-message counter.
     ///
     /// Used by `--per-file` mode to reclaim store memory after each input
@@ -235,7 +178,6 @@ impl MessageStore {
     pub fn clear(&mut self) {
         self.groups.clear();
         self.total_count = 0;
-        self.type_saturated.clear();
     }
 
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
@@ -257,8 +199,7 @@ impl MessageStore {
                 msgs_bytes = msgs_bytes.saturating_add(m.eapol_frame.len() + 16);
             }
         }
-        let saturated_cap_bytes = self.type_saturated.capacity() * (size_of::<(MacPair, MsgType)>() + 8);
-        size_of::<Self>() + groups_cap_bytes + msgs_bytes + saturated_cap_bytes
+        size_of::<Self>() + groups_cap_bytes + msgs_bytes
     }
 
     /// Rewrites every group key and embedded `(ap, sta)` addresses using `canonicalize`,
@@ -370,6 +311,54 @@ impl MessageStore {
         }
         mismatches
     }
+
+    /// Retroactively thins the heaviest groups by applying a session-window filter in place.
+    ///
+    /// Sorts all groups by message count descending, then for each of the top `max_groups`
+    /// groups, applies a per-type session-window filter: within each message type, sort by
+    /// timestamp and keep only messages spaced at least `window_us` microseconds apart.
+    /// Messages within the window of an already-kept message are removed in place.
+    ///
+    /// Returns the number of messages removed across all thinned groups.
+    pub fn thin_heaviest_groups(&mut self, window_us: u64, max_groups: usize) -> u64 {
+        let mut group_sizes: Vec<(MacPair, usize)> = self.groups.iter().map(|(k, v)| (*k, v.len())).collect();
+        group_sizes.sort_unstable_by_key(|&(_, len)| std::cmp::Reverse(len));
+        group_sizes.truncate(max_groups);
+
+        let mut total_removed: u64 = 0;
+        for (pair, _) in group_sizes {
+            let Some(msgs) = self.groups.get_mut(&pair) else { continue };
+            let before = msgs.len();
+            *msgs = session_window_filter(msgs, window_us);
+            let removed = before.saturating_sub(msgs.len());
+            self.total_count = self.total_count.saturating_sub(removed);
+            total_removed += removed as u64;
+        }
+        total_removed
+    }
+}
+
+/// Applies a per-type session-window filter to a message slice.
+///
+/// For each message type independently: sorts by timestamp, walks forward keeping a
+/// message only if `timestamp >= prev_kept + window_us`. Returns the filtered set
+/// preserving the original relative order within each type.
+fn session_window_filter(msgs: &[EapolMessage], window_us: u64) -> Vec<EapolMessage> {
+    use crate::types::MsgType;
+
+    let mut result = Vec::with_capacity(msgs.len());
+    for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
+        let mut typed: Vec<&EapolMessage> = msgs.iter().filter(|m| m.msg_type == msg_type).collect();
+        typed.sort_unstable_by_key(|m| m.timestamp);
+        let mut last_kept_ts: Option<u64> = None;
+        for m in typed {
+            if last_kept_ts.is_none_or(|prev| m.timestamp >= prev + window_us) {
+                result.push(m.clone());
+                last_kept_ts = Some(m.timestamp);
+            }
+        }
+    }
+    result
 }
 
 // --- PendingEapol (deferred WDS EAPOL) ---
@@ -686,139 +675,56 @@ mod tests {
         assert_eq!(msg.akm, AkmType::FtPsk);
     }
 
-    // --- per-type cap tests ---
+    // --- thin_heaviest_groups tests ---
 
     #[test]
-    fn add_type_cap_allows_up_to_cap() {
-        // cap=2: first two M1s with distinct frames are stored, third is saturated.
-        let mut store = MessageStore::with_per_type_cap(2);
+    fn thin_heaviest_groups_removes_close_timestamps() {
+        let mut store = MessageStore::new();
         let ap = mac(0x11);
         let sta = mac(0x22);
-        let r1 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x01), 1, AkmType::Wpa2Psk, None),
-        );
-        let r2 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x02), 2, AkmType::Wpa2Psk, None),
-        );
-        let r3 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x03), 3, AkmType::Wpa2Psk, None),
-        );
-        assert_eq!(r1, Admission::Stored);
-        assert_eq!(r2, Admission::Stored);
-        assert_eq!(r3, Admission::TypeSaturated { is_new_saturation: true }, "third M1 must saturate the cap");
-        assert_eq!(store.total_count(), 2, "only the first two messages stored");
-    }
-
-    #[test]
-    fn add_type_cap_second_drop_is_not_new_saturation() {
-        // cap=1: second drop returns is_new_saturation=false (first drop already fired).
-        let mut store = MessageStore::with_per_type_cap(1);
-        let ap = mac(0x11);
-        let sta = mac(0x22);
-        store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x01), 1, AkmType::Wpa2Psk, None),
-        );
-        let r2 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x02), 2, AkmType::Wpa2Psk, None),
-        );
-        let r3 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x03), 3, AkmType::Wpa2Psk, None),
-        );
-        assert_eq!(r2, Admission::TypeSaturated { is_new_saturation: true });
-        assert_eq!(r3, Admission::TypeSaturated { is_new_saturation: false }, "third M1 drop is not the first");
-    }
-
-    #[test]
-    fn add_type_cap_independent_per_type() {
-        // cap=1 per type: M1 and M2 each get one slot; their caps are independent.
-        let mut store = MessageStore::with_per_type_cap(1);
-        let ap = mac(0x11);
-        let sta = mac(0x22);
-        store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x01), 1, AkmType::Wpa2Psk, None),
-        );
-        // M2 uses a different fixture type -- build one manually.
-        let m2_msg = EapolMessage {
-            msg_type: MsgType::M2,
-            ..EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x10), 2, AkmType::Wpa2Psk, None)
-        };
-        let r_m2 = store.add(ap, sta, m2_msg);
-        assert_eq!(r_m2, Admission::Stored, "M2 has its own cap slot, independent of M1");
-        assert_eq!(store.total_count(), 2);
-    }
-
-    #[test]
-    fn add_type_cap_zero_is_unlimited() {
-        // cap=0 means unlimited: no saturation regardless of how many messages.
-        let mut store = MessageStore::with_per_type_cap(0);
-        let ap = mac(0x11);
-        let sta = mac(0x22);
-        for disc in 1u8..=10 {
-            let r = store.add(
-                ap,
-                sta,
-                EapolMessage::from_eapol_key(
-                    minimal_eapol_key_with_discriminator(disc),
-                    u64::from(disc),
-                    AkmType::Wpa2Psk,
-                    None,
-                ),
-            );
-            assert_eq!(r, Admission::Stored, "cap=0 must never saturate");
+        for i in 0u8..10 {
+            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
+            m.timestamp = u64::from(i) * 1_000_000; // 0s, 1s, 2s, ..., 9s
+            store.add(ap, sta, m);
         }
         assert_eq!(store.total_count(), 10);
+        let removed = store.thin_heaviest_groups(30_000_000, 10); // 30s window
+        assert_eq!(removed, 9, "9 of 10 M1s within 30s window should be removed");
+        assert_eq!(store.total_count(), 1);
     }
 
     #[test]
-    fn add_type_cap_clear_resets_saturation() {
-        // After clear(), a previously-saturated (pair, type) should fire is_new_saturation=true again.
-        let mut store = MessageStore::with_per_type_cap(1);
+    fn thin_heaviest_groups_keeps_spaced_messages() {
+        let mut store = MessageStore::new();
         let ap = mac(0x11);
         let sta = mac(0x22);
-        store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x01), 1, AkmType::Wpa2Psk, None),
-        );
-        let r1 = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x02), 2, AkmType::Wpa2Psk, None),
-        );
-        assert_eq!(r1, Admission::TypeSaturated { is_new_saturation: true });
+        for i in 0u8..3 {
+            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
+            m.timestamp = u64::from(i) * 60_000_000; // 0s, 60s, 120s
+            store.add(ap, sta, m);
+        }
+        assert_eq!(store.total_count(), 3);
+        let removed = store.thin_heaviest_groups(30_000_000, 10);
+        assert_eq!(removed, 0, "all messages spaced > 30s should survive");
+        assert_eq!(store.total_count(), 3);
+    }
 
-        store.clear();
-
-        // After clear, the same pair/type should behave as if freshly created.
-        let r_after_clear = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x01), 3, AkmType::Wpa2Psk, None),
-        );
-        assert_eq!(r_after_clear, Admission::Stored, "after clear, cap is reset");
-        let r_saturate_again = store.add(
-            ap,
-            sta,
-            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x02), 4, AkmType::Wpa2Psk, None),
-        );
-        assert_eq!(
-            r_saturate_again,
-            Admission::TypeSaturated { is_new_saturation: true },
-            "is_new_saturation resets after clear"
-        );
+    #[test]
+    fn thin_heaviest_groups_respects_max_groups() {
+        let mut store = MessageStore::new();
+        for i in 0u8..10 {
+            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
+            m.timestamp = u64::from(i) * 1_000_000;
+            store.add(mac(0x11), mac(0x22), m);
+        }
+        for i in 0u8..5 {
+            let mut m = msg_with_nonce(MsgType::M1, [i + 100; 32]);
+            m.timestamp = u64::from(i) * 1_000_000;
+            store.add(mac(0x33), mac(0x44), m);
+        }
+        assert_eq!(store.total_count(), 15);
+        let removed = store.thin_heaviest_groups(30_000_000, 1);
+        assert_eq!(removed, 9, "only the heaviest group (10 msgs) thinned to 1");
+        assert_eq!(store.total_count(), 6); // 1 + 5
     }
 }
