@@ -9,7 +9,6 @@
 // clap is used only by the binary (src/main.rs). Suppress the unused_crate_dependencies
 // lint that fires on the library compilation unit because both targets share [dependencies].
 use clap as _;
-use rayon as _;
 
 pub mod debug;
 pub mod extract;
