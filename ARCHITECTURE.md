@@ -792,28 +792,38 @@ Per-location notes follow. Each maps to a `PmkidSource` enum variant. The summar
 
 ### §6.6  Complete location summary
 
-| ID | Frame type | Subtype | Direction | Container | Crackable | mp byte |
-|----|------------|---------|-----------|-----------|-----------|---------|
-| S1 | EAPOL-Key M1 | Data | AP->STA | KDE `{DD 14 00:0F:AC 04}` | yes (PSK) | 0x01 |
-| S2 | EAPOL-Key M2 | Data | STA->AP | RSN IE in Key Data | yes (PSK / FT-PSK) | 0x04 |
-| S3 | Association Request | Mgmt 0x00 | STA->AP | RSN IE tagged params | yes (PSK) | 0x01 |
-| S4 | Reassociation Request | Mgmt 0x02 | STA->AP | RSN IE tagged params | yes (PSK / FT-PSK) | 0x01 |
-| S5 | FT Auth (algo=2, seq=1) | Mgmt 0x0B | STA->AP | RSN IE + MDE + FTE | yes (FT-PSK) | 0x04 |
-| S6 | FT Auth (algo=2, seq=2) | Mgmt 0x0B | AP->STA | RSN IE + MDE + FTE | yes (FT-PSK) | 0x01 |
-| S7 | FILS Auth (algo=4/5, seq=1) | Mgmt 0x0B | STA->AP | RSN IE | conditional | 0x04 |
-| S8 | FILS Auth (algo=4/5, seq=2) | Mgmt 0x0B | AP->STA | RSN IE | conditional | 0x01 |
-| S9 | PASN Auth (seq=1) | Mgmt 0x0B | STA->AP | RSN IE | conditional | 0x04 |
-| S10 | PASN Auth (seq=2) | Mgmt 0x0B | AP->STA | RSN IE | conditional | 0x01 |
-| S11 | FT Action Request (cat=6, act=1) | Mgmt 0x0D | STA->AP | RSN IE + FTE | yes (FT-PSK) | 0x04 |
-| S12 | FT Action Response (cat=6, act=2) | Mgmt 0x0D | AP->STA | RSN IE + FTE | yes (FT-PSK) | 0x01 |
-| S13 | FT Action Confirm (cat=6, act=3) | Mgmt 0x0D | STA->AP | RSN IE + FTE | yes (FT-PSK) | 0x04 |
-| S14 | Probe Request (directed) | Mgmt 0x04 | STA->AP | RSN IE | yes (if PSK) | 0x04 |
-| S15 | Probe Request (broadcast) | Mgmt 0x04 | STA->bcast | RSN IE | yes (if PSK) | 0x04 |
-| S16 | Beacon (vendor FW bug) | Mgmt 0x08 | AP->all | RSN IE | yes (if PSK) | 0x01 |
-| S17 | Probe Response (vendor FW bug) | Mgmt 0x05 | AP->STA | RSN IE | yes (if PSK) | 0x01 |
-| S18 | Mesh Peering Open (cat=15, act=1) | Mgmt 0x0D | STA->STA | AMPE element tag 139 | no (SAE) | 0x04 |
-| S19 | Mesh Peering Confirm (cat=15, act=2) | Mgmt 0x0D | STA->STA | AMPE element tag 139 | no (SAE) | 0x04 |
-| S20 | Association Request (OSEN IE) | Mgmt 0x00 | STA->AP | Vendor IE `{50:6F:9A:12}` | no (EAP) | 0x04 |
+| ID | Frame type | Subtype | Direction | Container | Crackable | mp byte | tshark display filter |
+|----|------------|---------|-----------|-----------|-----------|---------|----------------------|
+| S1 | EAPOL-Key M1 | Data | AP->STA | KDE `{DD 14 00:0F:AC 04}` | yes (PSK) | 0x01 | `wlan_rsna_eapol.keydes.key_info.key_ack == 1 && wlan_rsna_eapol.keydes.key_info.key_mic == 0 && wlan.rsn.ie.pmkid` |
+| S2 | EAPOL-Key M2 | Data | STA->AP | RSN IE in Key Data | yes (PSK / FT-PSK) | 0x04 | `wlan_rsna_eapol.keydes.key_info.key_ack == 0 && wlan_rsna_eapol.keydes.key_info.key_mic == 1 && wlan_rsna_eapol.keydes.key_info.install == 0 && wlan.rsn.pmkid.count > 0` |
+| S3 | Association Request | Mgmt 0x00 | STA->AP | RSN IE tagged params | yes (PSK) | 0x01 | `wlan.fc.type_subtype == 0x00 && wlan.rsn.pmkid.count > 0` |
+| S4 | Reassociation Request | Mgmt 0x02 | STA->AP | RSN IE tagged params | yes (PSK / FT-PSK) | 0x01 | `wlan.fc.type_subtype == 0x02 && wlan.rsn.pmkid.count > 0` |
+| S5 | FT Auth (algo=2, seq=1) | Mgmt 0x0B | STA->AP | RSN IE + MDE + FTE | yes (FT-PSK) | 0x04 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg == 2 && wlan.fixed.auth_seq == 1 && wlan.rsn.pmkid.count > 0` |
+| S6 | FT Auth (algo=2, seq=2) | Mgmt 0x0B | AP->STA | RSN IE + MDE + FTE | yes (FT-PSK) | 0x01 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg == 2 && wlan.fixed.auth_seq == 2 && wlan.rsn.pmkid.count > 0` |
+| S7 | FILS Auth (algo=4/5, seq=1) | Mgmt 0x0B | STA->AP | RSN IE | conditional | 0x04 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg in {4 5} && wlan.fixed.auth_seq == 1 && wlan.rsn.pmkid.count > 0` |
+| S8 | FILS Auth (algo=4/5, seq=2) | Mgmt 0x0B | AP->STA | RSN IE | conditional | 0x01 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg in {4 5} && wlan.fixed.auth_seq == 2 && wlan.rsn.pmkid.count > 0` |
+| S9 | PASN Auth (seq=1) | Mgmt 0x0B | STA->AP | RSN IE | conditional | 0x04 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg == 7 && wlan.fixed.auth_seq == 1 && wlan.rsn.pmkid.count > 0` ¹ |
+| S10 | PASN Auth (seq=2) | Mgmt 0x0B | AP->STA | RSN IE | conditional | 0x01 | `wlan.fc.type_subtype == 0x0b && wlan.fixed.auth.alg == 7 && wlan.fixed.auth_seq == 2 && wlan.rsn.pmkid.count > 0` ¹ |
+| S11 | FT Action Request (cat=6, act=1) | Mgmt 0x0D | STA->AP | RSN IE + FTE | yes (FT-PSK) | 0x04 | `wlan.fc.type_subtype == 0x0d && wlan.fixed.category_code == 6 && wlan.fixed.action_code == 1 && wlan.rsn.pmkid.count > 0` |
+| S12 | FT Action Response (cat=6, act=2) | Mgmt 0x0D | AP->STA | RSN IE + FTE | yes (FT-PSK) | 0x01 | `wlan.fc.type_subtype == 0x0d && wlan.fixed.category_code == 6 && wlan.fixed.action_code == 2 && wlan.rsn.pmkid.count > 0` |
+| S13 | FT Action Confirm (cat=6, act=3) | Mgmt 0x0D | STA->AP | RSN IE + FTE | yes (FT-PSK) | 0x04 | `wlan.fc.type_subtype == 0x0d && wlan.fixed.category_code == 6 && wlan.fixed.action_code == 3 && wlan.rsn.pmkid.count > 0` |
+| S14 | Probe Request (directed) | Mgmt 0x04 | STA->AP | RSN IE | yes (if PSK) | 0x04 | `wlan.fc.type_subtype == 0x04 && wlan.rsn.pmkid.count > 0` ² |
+| S15 | Probe Request (broadcast) | Mgmt 0x04 | STA->bcast | RSN IE | yes (if PSK) | 0x04 | `wlan.fc.type_subtype == 0x04 && wlan.rsn.pmkid.count > 0` ² |
+| S16 | Beacon (vendor FW bug) | Mgmt 0x08 | AP->all | RSN IE | yes (if PSK) | 0x01 | `wlan.fc.type_subtype == 0x08 && wlan.rsn.pmkid.count > 0` |
+| S17 | Probe Response (vendor FW bug) | Mgmt 0x05 | AP->STA | RSN IE | yes (if PSK) | 0x01 | `wlan.fc.type_subtype == 0x05 && wlan.rsn.pmkid.count > 0` |
+| S18 | Mesh Peering Open (cat=15, act=1) | Mgmt 0x0D | STA->STA | AMPE element tag 139 | no (SAE) | 0x04 | `wlan.fc.type_subtype == 0x0d && wlan.fixed.category_code == 15 && wlan.fixed.selfprot_action == 1` ³ |
+| S19 | Mesh Peering Confirm (cat=15, act=2) | Mgmt 0x0D | STA->STA | AMPE element tag 139 | no (SAE) | 0x04 | `wlan.fc.type_subtype == 0x0d && wlan.fixed.category_code == 15 && wlan.fixed.selfprot_action == 2` ³ |
+| S20 | Association Request (OSEN IE) | Mgmt 0x00 | STA->AP | Vendor IE `{50:6F:9A:12}` | no (EAP) | 0x04 | `wlan.fc.type_subtype == 0x00 && wlan.osen.pmkid.count > 0` |
+
+**tshark filter notes:**
+
+¹ S9/S10: Filter uses `algo == 7` ([IEEE 802.11-2024] Table 9-43 PASN). wpawolf also processes any unrecognized algorithm value as a potential PASN base-AKMP per §12.13.1 reservation; those would require `!(wlan.fixed.auth.alg == 0 || ... || wlan.fixed.auth.alg == 128)` which is impractical as a display filter.
+
+² S14/S15: Same base filter. The directed-vs-broadcast distinction (SSID element length > 0 vs = 0) is not expressible as a tshark display filter on the `wlan.ssid` FT_BYTES field. Post-filter by inspecting the SSID tag in the packet detail tree.
+
+³ S18/S19: Frame-level match only. The PMKID (Chosen-PMK identifier, last 16 bytes of AMPE element body) is inside SAE-encrypted AMPE content; Wireshark does not dissect the PMKID as an individually filterable field. Verify AMPE tag 139 presence in the element list manually.
+
+All field names verified against the local Wireshark 4.x field registry (`tshark -G fields`). The S1 KDE filter uses `wlan.rsn.ie.pmkid` (KDE type 4 PMKID dissection); S3-S17 use `wlan.rsn.pmkid.count` (RSN IE PMKID List); S20 uses the dedicated `wlan.osen.pmkid.count` (OSEN IE PMKID dissection).
 
 ### §6.6  AKMs that wpawolf parses but does not emit
 
