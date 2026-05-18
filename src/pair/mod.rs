@@ -10,6 +10,47 @@
 pub mod collapse;
 pub mod combos;
 pub mod constraints;
+
+// --- Adaptive thinning ---
+
+/// Configuration for memory-pressure-driven group thinning.
+///
+/// Constructed from `--mem-limit` and `--eapoltimeout` CLI flags. Passed into
+/// the pair pipeline so `thin_group` can decide per-group whether to apply
+/// session-window filtering before pairing.
+#[derive(Debug, Clone)]
+pub struct ThinConfig {
+    /// RSS percentage of total RAM that triggers thinning (0-100). 0 = disabled.
+    pub mem_limit_pct: u8,
+    /// Total system RAM in bytes (from `sysinfo`).
+    pub total_ram_bytes: u64,
+    /// User's `--eapoltimeout` if set (microseconds), to avoid double-applying.
+    pub user_eapol_timeout_us: Option<u64>,
+}
+
+/// Which thinning stage was applied to a group (for stats/debug reporting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinStage {
+    /// Cost within budget; no thinning applied.
+    None,
+    /// Applied 30-second session-window filter.
+    SessionWindow30s,
+    /// Applied 5-second session-window filter.
+    SessionWindow5s,
+    /// Kept only the best-quality N per type.
+    QualitySubset,
+}
+
+/// Result of thinning a single group.
+#[derive(Debug, Clone)]
+pub struct ThinResult {
+    /// Which stage was applied.
+    pub stage: ThinStage,
+    /// Messages before thinning.
+    pub before_count: usize,
+    /// Messages after thinning.
+    pub after_count: usize,
+}
 pub mod nc_dedup;
 
 use std::sync::Arc;
@@ -103,8 +144,83 @@ use crate::debug::{DebugPrinter, HEAVY_GROUP_COST, group_progress_interval};
 use crate::pair::collapse::collapse;
 use crate::pair::combos::{PairConfig, generate};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
-use crate::store::messages::{EapolMessage, MessageStore};
+use crate::progress::current_rss_bytes;
+use crate::store::messages::{EapolMessage, MessageStore, session_window_filter_pub};
 use crate::types::{MacPair, MsgType};
+
+/// Cost threshold below which thinning is never applied (group too small to matter).
+const THIN_COST_THRESHOLD: u64 = 50_000;
+
+/// Checks whether memory pressure warrants thinning, then applies staged
+/// session-window filters to a group's messages if needed.
+///
+/// Returns the (possibly filtered) message slice and a `ThinResult` for stats.
+/// When `thin_config.mem_limit_pct == 0`, thinning is disabled entirely.
+#[must_use]
+pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> (Vec<EapolMessage>, ThinResult) {
+    let no_thin = ThinResult { stage: ThinStage::None, before_count: messages.len(), after_count: messages.len() };
+    if thin_config.mem_limit_pct == 0 {
+        return (messages.to_vec(), no_thin);
+    }
+
+    let cost = estimate_group_cost(messages);
+    if cost < THIN_COST_THRESHOLD {
+        return (messages.to_vec(), no_thin);
+    }
+
+    let rss = current_rss_bytes();
+    let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
+    if rss < threshold {
+        return (messages.to_vec(), no_thin);
+    }
+
+    let before_count = messages.len();
+
+    let already_has_timeout_le_30 = thin_config.user_eapol_timeout_us.is_some_and(|t| t <= 30_000_000);
+    if !already_has_timeout_le_30 {
+        let filtered = session_window_filter_pub(messages, 30_000_000);
+        let new_cost = estimate_group_cost(&filtered);
+        if new_cost < THIN_COST_THRESHOLD {
+            return (
+                filtered.clone(),
+                ThinResult { stage: ThinStage::SessionWindow30s, before_count, after_count: filtered.len() },
+            );
+        }
+    }
+
+    let already_has_timeout_le_5 = thin_config.user_eapol_timeout_us.is_some_and(|t| t <= 5_000_000);
+    if !already_has_timeout_le_5 {
+        let filtered = session_window_filter_pub(messages, 5_000_000);
+        let new_cost = estimate_group_cost(&filtered);
+        if new_cost < THIN_COST_THRESHOLD {
+            return (
+                filtered.clone(),
+                ThinResult { stage: ThinStage::SessionWindow5s, before_count, after_count: filtered.len() },
+            );
+        }
+    }
+
+    let mut filtered = session_window_filter_pub(messages, 5_000_000);
+    for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
+        let typed_count = filtered.iter().filter(|m| m.msg_type == msg_type).count();
+        if typed_count > 64 {
+            let mut typed_indices: Vec<usize> =
+                filtered.iter().enumerate().filter(|(_, m)| m.msg_type == msg_type).map(|(i, _)| i).collect();
+            typed_indices.sort_unstable_by_key(|&i| filtered.get(i).map_or(0, |m| m.timestamp));
+            typed_indices.truncate(64);
+            let keep_set: std::collections::HashSet<usize> = typed_indices.into_iter().collect();
+            let mut idx = 0;
+            filtered.retain(|m| {
+                let current = idx;
+                idx += 1;
+                m.msg_type != msg_type || keep_set.contains(&current)
+            });
+        }
+    }
+
+    let after_count = filtered.len();
+    (filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count })
+}
 
 /// Folds `other` into `acc` in place: `collapsed_lines` and `cluster_count`
 /// sum component-wise; `max_cluster_size` takes the larger of the two.

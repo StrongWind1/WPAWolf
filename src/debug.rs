@@ -272,6 +272,28 @@ impl DebugPrinter {
         self.emit(&format!("group ap={ap}  sta={sta}  DONE  {pairs:>8} pairs  {elapsed_us}us  [HEAVY]"));
     }
 
+    /// Logged when adaptive thinning modifies a group before pairing.
+    pub fn group_thinned(&self, ap: MacAddr, sta: MacAddr, result: &crate::pair::ThinResult) {
+        if !self.enabled && result.stage == crate::pair::ThinStage::None {
+            return;
+        }
+        if result.stage == crate::pair::ThinStage::None {
+            return;
+        }
+        self.emit(&format!(
+            "group ap={ap}  sta={sta}  THINNED stage={:?} before={} after={}",
+            result.stage, result.before_count, result.after_count
+        ));
+    }
+
+    /// Logged when Phase 1 retroactively thins the store under memory pressure.
+    pub fn phase1_thin(&self, removed: u64, rss_mib: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.emit(&format!("Phase 1 retroactive thin: {removed} messages removed, rss={rss_mib}MiB after"));
+    }
+
     /// Periodic progress line emitted every `GROUP_PROGRESS_INTERVAL` completed groups.
     /// `groups_done` is the number of groups completed so far (1-based after the last
     /// increment), `total` is the full group count, `pairs_so_far` is the running pair total.

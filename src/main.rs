@@ -240,6 +240,12 @@ struct Cli {
     #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
     per_file: bool,
 
+    /// Max percentage of system RAM before adaptive thinning activates [default: 80]
+    ///
+    /// When process RSS exceeds this percentage of total RAM, heavy groups are thinned using session-window filters before pairing. Set to 0 to disable adaptive thinning entirely.
+    #[arg(long, value_name = "PCT", default_value_t = 80, help_heading = "Runtime", display_order = 33)]
+    mem_limit: u8,
+
     /// Print per-store memory footprint at end of run
     ///
     /// Approximate byte counts for every long-lived store (MessageStore, PmkidStore, EssidMap, etc.), sorted descending. For OOM triage.
@@ -466,6 +472,13 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             "no input capture files found (check paths and extensions)",
         )));
     }
+
+    // --- Adaptive thinning config (from --mem-limit and --eapoltimeout) ---
+    let thin_config = wpawolf::pair::ThinConfig {
+        mem_limit_pct: cli.mem_limit,
+        total_ram_bytes: wpawolf::progress::total_ram_bytes(),
+        user_eapol_timeout_us: cli.eapoltimeout.map(|s| s * 1_000_000),
+    };
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
     let pair_config = PairConfig {
@@ -739,6 +752,22 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 message_store.group_count(),
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
+
+            // Phase 1 adaptive thinning: every 1000 files, check RSS and thin
+            // the heaviest groups retroactively if memory pressure is high.
+            if thin_config.mem_limit_pct > 0 && (file_idx + 1) % 1000 == 0 {
+                let rss = wpawolf::progress::current_rss_bytes();
+                let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
+                if rss > threshold {
+                    let removed = message_store.thin_heaviest_groups(30_000_000, 100);
+                    if removed > 0 {
+                        stats.phase1_retroactive_thins += 1;
+                        stats.messages_thinned += removed;
+                        let rss_mib = wpawolf::progress::current_rss_mib().unwrap_or(0);
+                        debug.phase1_thin(removed, rss_mib);
+                    }
+                }
+            }
         }
 
         // --- Per-file emit (--per-file mode only) ---

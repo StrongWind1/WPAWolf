@@ -338,11 +338,12 @@ impl MessageStore {
     }
 }
 
+/// Public entry point for the session-window filter, used by `pair::thin_group`.
+pub fn session_window_filter_pub(msgs: &[EapolMessage], window_us: u64) -> Vec<EapolMessage> {
+    session_window_filter(msgs, window_us)
+}
+
 /// Applies a per-type session-window filter to a message slice.
-///
-/// For each message type independently: sorts by timestamp, walks forward keeping a
-/// message only if `timestamp >= prev_kept + window_us`. Returns the filtered set
-/// preserving the original relative order within each type.
 fn session_window_filter(msgs: &[EapolMessage], window_us: u64) -> Vec<EapolMessage> {
     use crate::types::MsgType;
 
