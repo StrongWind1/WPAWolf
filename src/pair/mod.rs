@@ -51,6 +51,31 @@ pub struct ThinResult {
     /// Messages after thinning.
     pub after_count: usize,
 }
+/// Aggregate thinning stats across all groups in a pairing run.
+#[derive(Debug, Default, Clone)]
+pub struct ThinAggregateStats {
+    /// Groups thinned with the 30-second session-window filter.
+    pub groups_thinned_30s: u64,
+    /// Groups thinned with the 5-second session-window filter.
+    pub groups_thinned_5s: u64,
+    /// Groups thinned to a quality-subset (max 64 per type).
+    pub groups_thinned_subset: u64,
+    /// Total messages removed by adaptive thinning.
+    pub messages_thinned: u64,
+}
+
+impl ThinAggregateStats {
+    fn record(&mut self, result: &ThinResult) {
+        match result.stage {
+            ThinStage::None => {},
+            ThinStage::SessionWindow30s => self.groups_thinned_30s += 1,
+            ThinStage::SessionWindow5s => self.groups_thinned_5s += 1,
+            ThinStage::QualitySubset => self.groups_thinned_subset += 1,
+        }
+        self.messages_thinned += result.before_count.saturating_sub(result.after_count) as u64;
+    }
+}
+
 pub mod nc_dedup;
 
 use std::sync::Arc;
@@ -264,26 +289,43 @@ fn pair_one_group(
 pub fn pair_all_groups_streaming<F>(
     store: &MessageStore,
     config: &PairConfig,
+    thin_config: Option<&ThinConfig>,
     thread_count: usize,
     debug: &DebugPrinter,
     on_group: F,
-) -> NcDedupStats
+) -> (NcDedupStats, ThinAggregateStats)
 where
     F: Fn(Vec<PairedHash>) + Send + Sync,
 {
     let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
 
     if groups.is_empty() {
-        return NcDedupStats::default();
+        return (NcDedupStats::default(), ThinAggregateStats::default());
     }
 
     let total_groups = groups.len();
     let groups_done = AtomicUsize::new(0);
     let pairs_done = AtomicUsize::new(0);
     let all_nc = Mutex::new(NcDedupStats::default());
+    let all_thin = Mutex::new(ThinAggregateStats::default());
 
     let process_group = |mac_pair: &MacPair, messages: &[EapolMessage]| {
-        let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
+        let pairing_messages: Vec<EapolMessage>;
+        let msgs_ref: &[EapolMessage] = if let Some(tc) = thin_config {
+            if let Some((filtered, result)) = thin_group(messages, tc) {
+                debug.group_thinned(mac_pair.ap, mac_pair.sta, &result);
+                if let Ok(mut guard) = all_thin.lock() {
+                    guard.record(&result);
+                }
+                pairing_messages = filtered;
+                &pairing_messages
+            } else {
+                messages
+            }
+        } else {
+            messages
+        };
+        let (m1, m2, m3, m4, cost) = group_counts_and_cost(msgs_ref);
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
         if cost >= HEAVY_GROUP_COST {
             let _ = debug.memory_check(&format!(
@@ -292,7 +334,7 @@ where
             ));
         }
         let t0 = Instant::now();
-        let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+        let (pairs, nc) = pair_one_group(mac_pair, msgs_ref, config);
         let elapsed_us = t0.elapsed().as_micros();
         debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
         let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -321,7 +363,9 @@ where
         });
     }
 
-    all_nc.into_inner().unwrap_or_default()
+    let nc = all_nc.into_inner().unwrap_or_default();
+    let thin = all_thin.into_inner().unwrap_or_default();
+    (nc, thin)
 }
 
 /// Collects all pairs into a `Vec`. Prefer `pair_all_groups_streaming` when
@@ -334,7 +378,7 @@ pub fn pair_all_groups(
     debug: &DebugPrinter,
 ) -> (Vec<PairedHash>, NcDedupStats) {
     let all_pairs = Mutex::new(Vec::<PairedHash>::new());
-    let nc = pair_all_groups_streaming(store, config, thread_count, debug, |pairs| {
+    let (nc, _thin) = pair_all_groups_streaming(store, config, None, thread_count, debug, |pairs| {
         if let Ok(mut guard) = all_pairs.lock() {
             guard.extend(pairs);
         }

@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::debug::{DebugPrinter, emit_progress_interval};
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
-use crate::pair::pair_all_groups;
-use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
+use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash, ThinConfig};
 use crate::store::AkmMap;
 use crate::store::auxiliary::{
     DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
@@ -166,6 +165,16 @@ pub struct OutputStats {
     pub nc_dedup_max_cluster_size: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
+
+    // --- Adaptive thinning (from pair pipeline) ---
+    /// Groups thinned with the 30-second session-window filter.
+    pub groups_thinned_30s: u64,
+    /// Groups thinned with the 5-second session-window filter.
+    pub groups_thinned_5s: u64,
+    /// Groups thinned to a quality-subset (max 64 per type).
+    pub groups_thinned_subset: u64,
+    /// Total messages removed by adaptive thinning.
+    pub messages_thinned: u64,
 
     /// Hash lines written, keyed by `HashType` (the 11-type classification in
     /// `ARCHITECTURE.md §2`). Counted once per logical hash regardless of how many
@@ -430,7 +439,7 @@ pub fn run_output(
     debug: &DebugPrinter,
 ) -> Result<OutputStats> {
     let mut ctx = OutputContext::new(paths);
-    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter, debug)?;
+    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, None, thread_count, essid_filter, debug)?;
     ctx.finalize(
         paths,
         essid_set,
@@ -543,6 +552,7 @@ impl OutputContext {
         essid_map: &crate::store::essid::EssidMap,
         akm_map: &AkmMap,
         pair_config: &PairConfig,
+        thin_config: Option<&ThinConfig>,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
@@ -553,6 +563,7 @@ impl OutputContext {
             essid_map,
             akm_map,
             pair_config,
+            thin_config,
             thread_count,
             essid_filter,
             debug,
@@ -568,6 +579,7 @@ impl OutputContext {
         essid_map: &crate::store::essid::EssidMap,
         akm_map: &AkmMap,
         pair_config: &PairConfig,
+        thin_config: Option<&ThinConfig>,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
@@ -647,7 +659,24 @@ impl OutputContext {
         // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
         // must produce a separate hash line. Dedup fingerprints include the ESSID field,
         // so identical (pair + SSID) combinations are still deduplicated correctly.
-        let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count, debug);
+        let all_pairs_mutex = std::sync::Mutex::new(Vec::new());
+        let (nc_stats, thin_stats) = crate::pair::pair_all_groups_streaming(
+            message_store,
+            pair_config,
+            thin_config,
+            thread_count,
+            debug,
+            |pairs| {
+                if let Ok(mut guard) = all_pairs_mutex.lock() {
+                    guard.extend(pairs);
+                }
+            },
+        );
+        let all_pairs = all_pairs_mutex.into_inner().unwrap_or_default();
+        stats.groups_thinned_30s += thin_stats.groups_thinned_30s;
+        stats.groups_thinned_5s += thin_stats.groups_thinned_5s;
+        stats.groups_thinned_subset += thin_stats.groups_thinned_subset;
+        stats.messages_thinned += thin_stats.messages_thinned;
         debug.phase4_pairs_generated(all_pairs.len());
         // Accumulate across `emit` calls so `--per-file` runs report the
         // total NC-dedup yield across every file's pair_all_groups pass

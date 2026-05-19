@@ -7,9 +7,8 @@
 //!
 //! `[progress] elapsed=<s> files=<n> packets=<n> eapol=<n> pmkids=<n> rss=<n>MiB`
 //!
-//! `rss` is omitted on platforms where the RSS lookup is not implemented
-//! (currently anything other than Linux). The closing Phase 1-5 stats banner is
-//! unaffected by this reporter.
+//! `rss` is populated via `sysinfo` (cross-platform: Linux, macOS, Windows).
+//! The closing Phase 1-5 stats banner is unaffected by this reporter.
 //!
 //! Cadence is hybrid: every 5 seconds **or** every 2 000 000 packets, whichever
 //! fires first. The packet check guards against single-file runs where wall

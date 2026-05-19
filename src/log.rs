@@ -287,7 +287,6 @@ impl Logger {
     /// rendering. Fires from every SSID-extract site (Beacon, Probe Request
     /// / Response, Association / Reassociation Request, Action Measurement
     /// IE, OWE Transition Mode).
-    /// Logs an SSID that contains at least one ASCII C0 control byte (`0x00..=0x1F`). See the field doc in `Stats`.
     pub fn log_essid_control_bytes(&mut self, timestamp_us: u64, ap_hex: impl std::fmt::Display, essid: &[u8]) {
         let essid_hex = render_lower_hex(essid);
         self.write_line(&format!("[essid_control_bytes] {timestamp_us} ap={ap_hex} essid_hex={essid_hex}"));

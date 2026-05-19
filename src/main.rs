@@ -806,6 +806,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 &essid_map,
                 &akm_map,
                 &pair_config,
+                Some(&thin_config),
                 thread_count,
                 essid_filter,
                 &debug,
@@ -955,6 +956,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &essid_map,
             &akm_map,
             &pair_config,
+            Some(&thin_config),
             thread_count,
             essid_filter,
             &debug,
@@ -1028,6 +1030,11 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // line via `HashType::from_akm_and_attack`; copy the resulting tally into
         // the global stats for `print_summary`.
         stats.hash_type_emitted = output_stats.hash_type_emitted;
+
+        stats.groups_thinned_30s += output_stats.groups_thinned_30s;
+        stats.groups_thinned_5s += output_stats.groups_thinned_5s;
+        stats.groups_thinned_subset += output_stats.groups_thinned_subset;
+        stats.messages_thinned += output_stats.messages_thinned;
     }
 
     logger.flush()?;

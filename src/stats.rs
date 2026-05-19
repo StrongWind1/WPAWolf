@@ -493,7 +493,6 @@ pub struct Stats {
     /// mismatch indicates interleaved sessions, buggy AP firmware, or an injected M3.
     /// Diagnostic only -- output correctness is unaffected. [ARCHITECTURE.md §4]
     pub anonce_m1_m3_mismatch_sessions: u64,
-    /// EAPOL frames dropped because the per-type cap (`--max-eapol-per-type`) was reached for
     // WPA/WEP encrypted data frame counts.
     /// Data frames with the Protected Frame bit set (WPA/WEP encrypted payload).
     /// [IEEE 802.11-2024] §9.2.4.1.1 bit B14
