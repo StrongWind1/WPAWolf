@@ -131,12 +131,7 @@ pub fn current_rss_bytes() -> u64 {
     sys.process(pid).map_or(0, sysinfo::Process::memory)
 }
 
-/// Returns the current process's resident set size in MiB, or `None` when the
-/// platform does not expose a working probe.
-///
-/// Cross-platform via `sysinfo`. On Linux, macOS, and Windows the value comes
-/// from the OS process table. Returns `None` only when `sysinfo` cannot query
-/// the current process at all.
+/// Returns the current process's RSS in MiB, or `None` when the probe fails.
 #[must_use]
 pub fn current_rss_mib() -> Option<u64> {
     let bytes = current_rss_bytes();

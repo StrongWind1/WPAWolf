@@ -145,7 +145,7 @@ use crate::pair::collapse::collapse;
 use crate::pair::combos::{PairConfig, generate};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
 use crate::progress::current_rss_bytes;
-use crate::store::messages::{EapolMessage, MessageStore, session_window_filter_pub};
+use crate::store::messages::{EapolMessage, MessageStore, session_window_filter};
 use crate::types::{MacPair, MsgType};
 
 /// Cost threshold below which thinning is never applied (group too small to matter).
@@ -154,61 +154,55 @@ const THIN_COST_THRESHOLD: u64 = 50_000;
 /// Checks whether memory pressure warrants thinning, then applies staged
 /// session-window filters to a group's messages if needed.
 ///
-/// Returns the (possibly filtered) message slice and a `ThinResult` for stats.
-/// When `thin_config.mem_limit_pct == 0`, thinning is disabled entirely.
+/// Returns `None` when no thinning was applied (the caller should use the
+/// original slice as-is), or `Some((filtered, result))` when filtering ran.
+/// This avoids a heap clone on the common no-thinning path.
 #[must_use]
-pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> (Vec<EapolMessage>, ThinResult) {
-    let no_thin = ThinResult { stage: ThinStage::None, before_count: messages.len(), after_count: messages.len() };
+pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> Option<(Vec<EapolMessage>, ThinResult)> {
     if thin_config.mem_limit_pct == 0 {
-        return (messages.to_vec(), no_thin);
+        return None;
     }
-
     let cost = estimate_group_cost(messages);
     if cost < THIN_COST_THRESHOLD {
-        return (messages.to_vec(), no_thin);
+        return None;
     }
-
     let rss = current_rss_bytes();
     let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
     if rss < threshold {
-        return (messages.to_vec(), no_thin);
+        return None;
     }
 
     let before_count = messages.len();
 
-    let already_has_timeout_le_30 = thin_config.user_eapol_timeout_us.is_some_and(|t| t <= 30_000_000);
-    if !already_has_timeout_le_30 {
-        let filtered = session_window_filter_pub(messages, 30_000_000);
-        let new_cost = estimate_group_cost(&filtered);
-        if new_cost < THIN_COST_THRESHOLD {
-            return (
-                filtered.clone(),
-                ThinResult { stage: ThinStage::SessionWindow30s, before_count, after_count: filtered.len() },
-            );
+    if thin_config.user_eapol_timeout_us.is_none_or(|t| t > 30_000_000) {
+        let filtered = session_window_filter(messages, 30_000_000);
+        if estimate_group_cost(&filtered) < THIN_COST_THRESHOLD {
+            let after_count = filtered.len();
+            return Some((filtered, ThinResult { stage: ThinStage::SessionWindow30s, before_count, after_count }));
         }
     }
 
-    let already_has_timeout_le_5 = thin_config.user_eapol_timeout_us.is_some_and(|t| t <= 5_000_000);
-    if !already_has_timeout_le_5 {
-        let filtered = session_window_filter_pub(messages, 5_000_000);
-        let new_cost = estimate_group_cost(&filtered);
-        if new_cost < THIN_COST_THRESHOLD {
-            return (
-                filtered.clone(),
-                ThinResult { stage: ThinStage::SessionWindow5s, before_count, after_count: filtered.len() },
-            );
-        }
+    let filtered_5s = session_window_filter(messages, 5_000_000);
+    if thin_config.user_eapol_timeout_us.is_none_or(|t| t > 5_000_000)
+        && estimate_group_cost(&filtered_5s) < THIN_COST_THRESHOLD
+    {
+        let after_count = filtered_5s.len();
+        return Some((filtered_5s, ThinResult { stage: ThinStage::SessionWindow5s, before_count, after_count }));
     }
 
-    let mut filtered = session_window_filter_pub(messages, 5_000_000);
+    let mut filtered = filtered_5s;
     for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
         let typed_count = filtered.iter().filter(|m| m.msg_type == msg_type).count();
         if typed_count > 64 {
-            let mut typed_indices: Vec<usize> =
-                filtered.iter().enumerate().filter(|(_, m)| m.msg_type == msg_type).map(|(i, _)| i).collect();
-            typed_indices.sort_unstable_by_key(|&i| filtered.get(i).map_or(0, |m| m.timestamp));
-            typed_indices.truncate(64);
-            let keep_set: std::collections::HashSet<usize> = typed_indices.into_iter().collect();
+            let mut ts_pairs: Vec<(usize, u64)> = filtered
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.msg_type == msg_type)
+                .map(|(i, m)| (i, m.timestamp))
+                .collect();
+            ts_pairs.sort_unstable_by_key(|&(_, ts)| ts);
+            ts_pairs.truncate(64);
+            let keep_set: std::collections::HashSet<usize> = ts_pairs.into_iter().map(|(i, _)| i).collect();
             let mut idx = 0;
             filtered.retain(|m| {
                 let current = idx;
@@ -219,7 +213,7 @@ pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> (Vec<E
     }
 
     let after_count = filtered.len();
-    (filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count })
+    Some((filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count }))
 }
 
 /// Folds `other` into `acc` in place: `collapsed_lines` and `cluster_count`
@@ -237,16 +231,8 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
 /// Returns the total number of message-pair comparisons across all six N#E# combos.
 #[must_use]
 pub fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
-    let (mut m1, mut m2, mut m3, mut m4) = (0u64, 0u64, 0u64, 0u64);
-    for msg in messages {
-        match msg.msg_type {
-            MsgType::M1 => m1 += 1,
-            MsgType::M2 => m2 += 1,
-            MsgType::M3 => m3 += 1,
-            MsgType::M4 => m4 += 1,
-        }
-    }
-    m1 * m2 + m1 * m4 + m3 * m2 + m2 * m3 + m4 * m3 + m3 * m4
+    let (_, _, _, _, cost) = group_counts_and_cost(messages);
+    cost
 }
 
 /// Pairs a single group: clone, sort, generate combos, collapse, NC-dedup.
@@ -283,7 +269,7 @@ pub fn pair_all_groups_streaming<F>(
     on_group: F,
 ) -> NcDedupStats
 where
-    F: Fn(Vec<PairedHash>, NcDedupStats) + Send + Sync,
+    F: Fn(Vec<PairedHash>) + Send + Sync,
 {
     let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
 
@@ -314,7 +300,7 @@ where
         if done % group_progress_interval() == 0 || done == total_groups {
             debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
         }
-        on_group(pairs, nc);
+        on_group(pairs);
         if let Ok(mut guard) = all_nc.lock() {
             merge_nc_stats(&mut guard, nc);
         }
@@ -338,11 +324,8 @@ where
     all_nc.into_inner().unwrap_or_default()
 }
 
-/// Convenience wrapper that collects all pairs into a `Vec`.
-///
-/// Used by unit tests and the existing `output::emit_inner` call site.
-/// For memory-constrained runs, prefer `pair_all_groups_streaming` with a
-/// per-group callback that processes and drops pairs immediately.
+/// Collects all pairs into a `Vec`. Prefer `pair_all_groups_streaming` when
+/// peak memory matters -- this wrapper materializes the full pair set.
 #[must_use]
 pub fn pair_all_groups(
     store: &MessageStore,
@@ -351,7 +334,7 @@ pub fn pair_all_groups(
     debug: &DebugPrinter,
 ) -> (Vec<PairedHash>, NcDedupStats) {
     let all_pairs = Mutex::new(Vec::<PairedHash>::new());
-    let nc = pair_all_groups_streaming(store, config, thread_count, debug, |pairs, _nc| {
+    let nc = pair_all_groups_streaming(store, config, thread_count, debug, |pairs| {
         if let Ok(mut guard) = all_pairs.lock() {
             guard.extend(pairs);
         }

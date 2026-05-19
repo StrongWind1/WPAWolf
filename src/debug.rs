@@ -274,10 +274,7 @@ impl DebugPrinter {
 
     /// Logged when adaptive thinning modifies a group before pairing.
     pub fn group_thinned(&self, ap: MacAddr, sta: MacAddr, result: &crate::pair::ThinResult) {
-        if !self.enabled && result.stage == crate::pair::ThinStage::None {
-            return;
-        }
-        if result.stage == crate::pair::ThinStage::None {
+        if !self.enabled || result.stage == crate::pair::ThinStage::None {
             return;
         }
         self.emit(&format!(
