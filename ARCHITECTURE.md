@@ -130,7 +130,7 @@ wpawolf is a batch pipeline. The five phases run strictly in order; each phase r
 | §3.4 Emit    | `src/pair/` + `src/output/`   | populated stores | hashcat lines + auxiliary files | CPU + I/O |
 | §3.5 Report  | `src/stats.rs`             | counters from all earlier phases | summary on stdout | I/O |
 
-Phase 1 dominates wall time on warm caches at NVMe speeds (~50-500x phase 2). Phase 4 is parallelised via `std::thread::scope` with LPT round-robin group scheduling; `--threads=1` reproduces the serial path. Every shared structure is `Send + Sync` (see §4 invariant 9).
+Phase 1 dominates wall time on warm caches at NVMe speeds (~50-500x phase 2). Phase 4 is parallelised via rayon work-stealing (`--threads N`, default = CPU count; `--threads=1` for reproducible output). Pairs are streamed per-group through a Mutex-serialized fan-out callback so peak memory is bounded to one group's pairs at a time. Every shared structure is `Send + Sync` (see §4 invariant 9).
 
 ### Module DAG
 
@@ -279,7 +279,7 @@ These are the non-negotiable rules of the codebase. Violating any of them is a r
 
 ### 2. Collect-then-pair (no stream pairing, no eviction)
 
-All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. There is no ring buffer and no eviction. A per-type cap (`--max-eapol-per-type`, default 2048) bounds storage against degenerate rotating-ANonce firmware; the cap is high enough that no legitimate handshake is lost (corpus-validated) and can be disabled with `--max-eapol-per-type=0`.
+All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. There is no ring buffer and no eviction. Memory pressure from degenerate rotating-ANonce firmware is handled by adaptive thinning (`--mem-limit`, default 80 % of system RAM): when RSS exceeds the threshold, heavy groups are thinned via staged session-window filters (30 s, 5 s, then quality-subset to 64 per type) before pairing. Phase 1 also retroactively thins the heaviest groups every 1000 files if RSS exceeds the threshold.
 
 This is the single most important architectural difference vs upstream hcxpcapngtool. Their implementation pairs on arrival using a 64-entry shared ring (`MESSAGELIST_MAX = 64`); when the 65th message arrives without a successful pair, the oldest is silently dropped. wpawolf cannot miss a valid pair regardless of message ordering or interleaving from other AP/STA pairs because pairing never runs on a partial set.
 
@@ -374,7 +374,7 @@ No heuristic `_looks_valid()` checks. No "this byte pattern looks like an EAPOL 
 
 ### 9. Send + Sync by default; no Rc / Cell / thread-local state
 
-Phase 4 is parallelised via `std::thread::scope` with LPT round-robin group scheduling (`--threads N`, default = CPU count, `--threads=1` for reproducible output). Every shared structure is `Send + Sync`. No `Rc`, no `Cell`, no `thread_local!`. `MacAddr`, `MacPair`, `MsgType`, `AkmType` are all `Copy`. The stores hold `Vec<T>` of owned data; pairing reads via shared references.
+Phase 4 is parallelised via rayon work-stealing (`--threads N`, default = CPU count, `--threads=1` for reproducible output). Each group is paired lock-free in a rayon worker; the resulting pairs are fanned out through a `Mutex<EmitState>` that serializes dedup checks and buffered writes. Every shared structure is `Send + Sync`. No `Rc`, no `Cell`, no `thread_local!`. `MacAddr`, `MacPair`, `MsgType`, `AkmType` are all `Copy`. The stores hold `Vec<T>` of owned data; pairing reads via shared references.
 
 ### 10. Error propagation via custom enum; I/O aborts, parse errors continue
 
@@ -387,7 +387,7 @@ Error policy:
 
 ### 11. Minimal dependency budget
 
-Direct runtime dependencies: 2 crates - `flate2` (gzip, `rust_backend`-only feature) and `clap` (CLI, derive). New deps require a paragraph-long justification in the PR body. Rejected crates: `pcap-file` / `pcap-parser` (8-10 transitive deps for ~500 lines we write); `ieee80211` (9 mandatory deps for a fraction of its features); `serde`, `regex`, `tokio`, `anyhow`, `thiserror`, `hex`, `rayon`, `nom` (each replaceable inline or out of scope). Future cryptographic primitives may use RustCrypto (`sha1`, `md-5`, `aes`, `cmac`, `hmac`). `cargo deny` (`deny.toml`) gates the supply chain: OSI-permissive licenses only, no unknown registries, no git deps.
+Direct runtime dependencies: 4 crates -- `flate2` (gzip, `rust_backend`-only feature), `clap` (CLI, derive), `rayon` (parallel Phase 4 pairing via work-stealing), and `sysinfo` (cross-platform RSS + total-RAM queries for adaptive thinning). New deps require a paragraph-long justification in the PR body. Rejected crates: `pcap-file` / `pcap-parser` (8-10 transitive deps for ~500 lines we write); `ieee80211` (9 mandatory deps for a fraction of its features); `serde`, `regex`, `tokio`, `anyhow`, `thiserror`, `hex`, `nom` (each replaceable inline or out of scope). Future cryptographic primitives may use RustCrypto (`sha1`, `md-5`, `aes`, `cmac`, `hmac`). `cargo deny` (`deny.toml`) gates the supply chain: OSI-permissive licenses only, no unknown registries, no git deps.
 
 ### Memory budget (informational)
 
@@ -1125,7 +1125,7 @@ Extract ALL PMKIDs regardless of AKM type. No filtering based on hashcat support
 ### §8.5  EAPOL message storage - FR-MSG-*
 
 #### FR-MSG-1
-Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. Per-type cap (`--max-eapol-per-type`, default 2048) bounds degenerate inputs; 0 disables.
+Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. Adaptive thinning (`--mem-limit`, default 80 %) bounds degenerate inputs under memory pressure; 0 disables.
 
 #### FR-MSG-2
 Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay_counter (u64), nonce (32 B), mic (16 B), KDV (0/1/2/3), eapol_frame (heap, no upper bound), eapol_frame_len, pmkid (16 B optional), FT fields (MDID 2 B, R0KH-ID up to 48 B, R1KH-ID 6 B), AKM type from context.
@@ -1300,7 +1300,7 @@ Output-filter and runtime flags (unfiltered defaults):
 | `--strict`            | false | bundle: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --per-file --nc-dedup` |
 | `--per-file`          | false | pair + emit + clear MessageStore/PmkidStore per input file |
 | `--threads` *n*       | CPU count | Phase 4 worker thread count |
-| `--max-eapol-per-type` *n* | 2048 | per-`(AP, STA)` stored-message cap per type (M1/M2/M3/M4 capped independently); 0 = unlimited |
+| `--mem-limit` *pct* | 80 | max % of system RAM before adaptive thinning activates; 0 = disabled |
 | `--essid-collapse-min` *n* | 3 | multi-SSID collapse guard: minimum distinct SSIDs before collapse fires |
 | `--essid-collapse-ratio` *n* | 10 | multi-SSID collapse guard: top-count / second-count ratio threshold |
 | `--quiet`             | false | suppress periodic `[progress]` lines; closing banner unaffected |
@@ -1344,7 +1344,7 @@ Process pcapng input at >= 200 MB/s on a single core (bounded by I/O, not CPU). 
 Total processing time for a 100 GB file should be dominated by I/O read time, not pairing or dedup.
 
 #### FR-PERF-3
-Phase 4 (pairing) runs multi-threaded by default via `std::thread::scope` with LPT round-robin group scheduling. The `--threads N` flag selects worker count (default = available CPU cores; `--threads=1` reproduces the serial path for deterministic test output). All shared structures are `Send + Sync` (§4 invariant 9).
+Phase 4 (pairing) runs multi-threaded by default via rayon work-stealing. The `--threads N` flag selects worker count (default = available CPU cores; `--threads=1` reproduces the serial path for deterministic test output). Pairs are streamed per-group through a `Mutex<EmitState>` callback so peak memory is bounded to one group's output at a time. All shared structures are `Send + Sync` (§4 invariant 9).
 
 #### FR-MEM-1
 No artificial memory ceiling. Memory scales with EAPOL message count.
@@ -1359,7 +1359,7 @@ Estimated memory for typical captures - see §4 memory budget table.
 wpawolf does not introspect its own memory footprint; process memory is measured externally via `/usr/bin/time -v` or `perf stat`.
 
 #### FR-DEP-1
-Direct dependency count: 2 crates (`flate2` + `clap`). `flate2` pulls `miniz_oxide`; `clap` pulls its derive/builder proc-macro ecosystem.
+Direct dependency count: 4 crates (`flate2` + `clap` + `rayon` + `sysinfo`). `flate2` pulls `miniz_oxide`; `clap` pulls its derive/builder proc-macro ecosystem; `rayon` pulls `crossbeam-deque`/`crossbeam-epoch`; `sysinfo` is self-contained on Linux (adds `core-foundation-sys` on macOS).
 
 #### FR-DEP-2
 No large async / serialisation frameworks. All hex encoding, pcap / pcapng / 802.11 / EAPOL parsing is implemented inline.
@@ -1383,7 +1383,7 @@ Release binary <= 5 MiB stripped.
 Phase 1 (parsing) is I/O-bound and sequential for a single file. Multi- file ingest still runs serially in v1; pipeline parallelism (reader thread + parser thread) and parallel-file processing are deferred.
 
 #### FR-THREAD-2
-**Shipped.** Phase 4 (pairing) runs each `(AP, STA)` group in parallel via `std::thread::scope` with LPT round-robin scheduling. `--threads N` selects worker count (default = CPU cores). No `rayon` dependency.
+**Shipped.** Phase 4 (pairing) runs each `(AP, STA)` group in parallel via rayon work-stealing. `--threads N` selects worker count (default = CPU cores). Pairs stream through a per-group fan-out callback (no all-pairs Vec materialization).
 
 #### FR-THREAD-3
 **Shipped.** Per-sink output writers serialise on a single `Mutex<HashSet<u64>>` dedup set keyed by SipHash-1-3 fingerprints over the significant fields. Pairing threads compute fingerprints in parallel; only the cross-thread set membership check + line write sequence is locked.

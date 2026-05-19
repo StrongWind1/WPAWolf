@@ -4,6 +4,19 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ## Releases
 
+### v0.4.0 -- unreleased (`feat/adaptive-pipeline`)
+
+Two-phase adaptive pipeline: rayon-based parallel pairing with streaming per-group fan-out, cross-platform memory monitoring via `sysinfo`, and adaptive thinning under memory pressure. Prevents OOM on wpa-sec-scale corpora (400K+ captures, 2.5B packets). No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v0.3.10 for any capture that did not hit the old per-type cap.
+
+- **Streaming per-group fan-out eliminates the all-pairs Vec.** `emit_inner` Pipeline 2 no longer collects every `PairedHash` across all groups into a single `Vec` before iterating. Instead, `pair_all_groups_streaming()` delivers each group's pairs via a callback that locks a `Mutex<EmitState>`, fans out (ESSID resolution + hash classification + dedup check + buffered write), and releases. Peak memory drops by `sizeof(PairedHash) * total_pairs` -- roughly 540 MB on a 2.25B-pair corpus. Pairs are dropped at callback exit.
+- **Rayon work-stealing replaces manual `std::thread::scope` + LPT scheduling.** `pair_all_groups_streaming()` runs pairing across a per-run rayon thread pool (`--threads N`). Work-stealing handles load imbalance naturally (heavy groups don't block the tail). The Mutex serializes only the I/O fan-out (microseconds per group); pairing itself runs fully lock-free across cores.
+- **Cross-platform memory monitoring via `sysinfo`.** `current_rss_bytes()`, `current_rss_mib()`, `total_ram_bytes()`, and `ram_info()` replace Linux-only `/proc/self/status` and `/proc/meminfo` parsing. Works on Linux, macOS, and Windows.
+- **`--mem-limit PCT` flag (default 80).** When process RSS exceeds this percentage of total system RAM, adaptive thinning activates on heavy groups (cost >= 50K pairs). Three stages: 30-second session-window filter, 5-second session-window filter, quality-subset (earliest 64 per type). Set to 0 to disable entirely. Thinning stats appear in the closing banner when active.
+- **Phase 1 retroactive thinning.** Every 1000 files during ingestion, RSS is checked against `--mem-limit`. If over threshold, the 100 heaviest groups are thinned with a 30-second session-window filter in place. Prevents OOM during ingestion before Phase 4 pairing even starts.
+- **`--max-eapol-per-type` removed.** The hard per-type cap (default 2048) is replaced by the adaptive thinning pipeline above, which is domain-aware (session-window filtering preserves distinct handshake sessions) rather than a blind count cap.
+- **New runtime dependencies: `rayon` 1.x (173M+ downloads, parallel iteration) and `sysinfo` 0.33 (28M+ downloads, cross-platform memory queries).** Both pass `cargo deny` license checks (MIT/Apache-2.0). Dep count goes from 2 to 4.
+- 854 tests; `make check-all` passes clean.
+
 ### v0.3.10 -- 2026-05-16
 
 Documentation overhaul and CLI help-page restructure. No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v0.3.9 for any capture.

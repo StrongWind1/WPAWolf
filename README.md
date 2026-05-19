@@ -15,15 +15,15 @@
 
 ## Features
 
-- **Pure safe Rust** -- `#![forbid(unsafe_code)]`, two runtime crates (`flate2` + `clap`)
-- **Parallel pairing** -- CPU cores via `std::thread::scope` with LPT scheduling
+- **Pure safe Rust** -- `#![forbid(unsafe_code)]`, four runtime crates (`flate2` + `clap` + `rayon` + `sysinfo`)
+- **Parallel pairing** -- rayon work-stealing across CPU cores with streaming per-group fan-out
 - **Wide defaults** -- emits every valid handshake; you filter at the end
 - **Cross-file pairing** -- M1 in file A pairs with M2 in file B
 - **20 PMKID extraction sites** -- every spec-defined location wired and counted
 - **Deep frame walking** -- A-MSDU subframes, MSDU fragment reassembly, radiotap FCS strip
 - **Garbage-pattern rejection** -- nonces / MICs / PMKIDs checked against five pattern classes
 - **Fast** -- >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **853 tests**; `make check-all` zero-warning under strict clippy
+- **854 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 
@@ -105,7 +105,7 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 |---|---|---|
 | EAPOL session window | 5 seconds | unlimited; `--eapoltimeout` opts in |
 | EAPOL frame size ceiling | 512 bytes at parse | no size gate |
-| Per-(AP, STA) message buffer | one shared 64-entry circular buffer | `HashMap<(AP, STA), Vec<Message>>`, per-type cap 2048 |
+| Per-(AP, STA) message buffer | one shared 64-entry circular buffer | `HashMap<(AP, STA), Vec<Message>>`, adaptive thinning under memory pressure |
 | WDS / 4-address relay frames | skipped unless `--all` | always processed |
 | Pairing strategy | stream-pairs as frames arrive | reads everything, then pairs |
 | State across input files | reset between files | carried across files |
@@ -167,12 +167,12 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 |---|---|---|
 | `--threads N` | CPU count | Phase 4 worker count; `--threads=1` for reproducible output |
 | `--per-file` | off | pair + emit + clear per input file; bounds RSS |
-| `--max-eapol-per-type N` | 2048 | per-(AP,STA) stored-message cap per type; 0 = unlimited |
+| `--mem-limit PCT` | 80 | max % of system RAM before adaptive thinning activates; 0 = disabled |
 | `--quiet` | off | suppress progress lines |
 | `--mem-stats` | off | per-store footprint table after closing banner |
 | `--debug` | off | timestamped phase/file/group diagnostic lines |
 
-Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences them. Every run prints a Phase 1-5 stats summary unconditionally. Garbage-pattern nonces / MICs / PMKIDs are rejected at extract time; missing SSIDs drop at emit time. See [`ARCHITECTURE.md`](ARCHITECTURE.md) §4 and §9 for the full rejection and stats catalogue.
+Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences them. RSS is reported cross-platform via `sysinfo`. Every run prints a Phase 1-5 stats summary unconditionally. Garbage-pattern nonces / MICs / PMKIDs are rejected at extract time; missing SSIDs drop at emit time. See [`ARCHITECTURE.md`](ARCHITECTURE.md) §4 and §9 for the full rejection and stats catalogue.
 
 </details>
 

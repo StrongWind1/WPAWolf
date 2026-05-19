@@ -68,7 +68,7 @@ If hcxpcapngtool is missing or older than 7.0.1, the test prints a clearly-tagge
 
 ## Dependency additions
 
-Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 2 (`flate2`, `clap`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
+Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 4 (`flate2`, `clap`, `rayon`, `sysinfo`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
 
 ## Adding a capture fixture
 
