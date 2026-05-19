@@ -661,6 +661,7 @@ impl OutputContext {
         let pairs_written_before = stats.pairs_written;
         let dedup_dropped_before = stats.dedup_dropped;
 
+        #[allow(clippy::items_after_statements, reason = "EmitState must be defined after Pipeline 1 borrows are used")]
         struct EmitState<'a> {
             sinks: &'a mut HashSinks,
             dedup: &'a mut PerSinkDedup,
@@ -683,7 +684,7 @@ impl OutputContext {
                     return;
                 }
                 let batch_len = pairs.len();
-                let mut guard = emit_state.lock().unwrap_or_else(|p| p.into_inner());
+                let mut guard = emit_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if guard.first_error.is_some() {
                     return;
@@ -763,7 +764,7 @@ impl OutputContext {
         // Recover mutable state from the Mutex. The references point back into
         // `self` -- they were moved in, not copied, so the compiler needs the
         // destructure to release the borrows.
-        let es = emit_state.into_inner().unwrap_or_else(|p| p.into_inner());
+        let es = emit_state.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(e) = es.first_error {
             return Err(e);
         }
