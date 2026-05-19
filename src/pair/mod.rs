@@ -65,7 +65,7 @@ pub struct ThinAggregateStats {
 }
 
 impl ThinAggregateStats {
-    fn record(&mut self, result: &ThinResult) {
+    const fn record(&mut self, result: &ThinResult) {
         match result.stage {
             ThinStage::None => {},
             ThinStage::SessionWindow30s => self.groups_thinned_30s += 1,
@@ -311,6 +311,7 @@ where
 
     let process_group = |mac_pair: &MacPair, messages: &[EapolMessage]| {
         let pairing_messages: Vec<EapolMessage>;
+        #[allow(clippy::option_if_let_else, reason = "map_or cannot express the local-variable assignment")]
         let msgs_ref: &[EapolMessage] = if let Some(tc) = thin_config {
             if let Some((filtered, result)) = thin_group(messages, tc) {
                 debug.group_thinned(mac_pair.ap, mac_pair.sta, &result);
