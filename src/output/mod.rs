@@ -653,13 +653,25 @@ impl OutputContext {
             }
         }
 
-        // --- Pipeline 2: EAPOL pairs ---
+        // --- Pipeline 2: EAPOL pairs (streaming fan-out) ---
         //
-        // Same multi-SSID logic as Pipeline 1. The ESSID is part of the EAPOL hash line
-        // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
-        // must produce a separate hash line. Dedup fingerprints include the ESSID field,
-        // so identical (pair + SSID) combinations are still deduplicated correctly.
-        let all_pairs_mutex = std::sync::Mutex::new(Vec::new());
+        // Same multi-SSID logic as Pipeline 1. Pairs are fanned out per-group
+        // inside the streaming callback, then dropped -- peak memory is one
+        // group's pairs at a time instead of the full cross-product.
+        let pairs_written_before = stats.pairs_written;
+        let dedup_dropped_before = stats.dedup_dropped;
+
+        struct EmitState<'a> {
+            sinks: &'a mut HashSinks,
+            dedup: &'a mut PerSinkDedup,
+            stats: &'a mut OutputStats,
+            unresolved_drops: &'a mut HashMap<crate::types::MacAddr, u64>,
+            first_error: Option<crate::types::Error>,
+        }
+
+        let emit_state = std::sync::Mutex::new(EmitState { sinks, dedup, stats, unresolved_drops, first_error: None });
+        let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
+
         let (nc_stats, thin_stats) = crate::pair::pair_all_groups_streaming(
             message_store,
             pair_config,
@@ -667,97 +679,113 @@ impl OutputContext {
             thread_count,
             debug,
             |pairs| {
-                if let Ok(mut guard) = all_pairs_mutex.lock() {
-                    guard.extend(pairs);
+                if pairs.is_empty() {
+                    return;
+                }
+                let batch_len = pairs.len();
+                let mut guard = emit_state.lock().unwrap_or_else(|p| p.into_inner());
+
+                if guard.first_error.is_some() {
+                    return;
+                }
+
+                if any_sink {
+                    let EmitState { sinks: s, dedup: d, stats: st, unresolved_drops: ud, first_error } = &mut *guard;
+                    for pair in &pairs {
+                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
+                        let ssids =
+                            essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
+                        let is_ft = ht.is_ft();
+
+                        let ft_ctx: Option<&FtFields> = if is_ft {
+                            match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                                Some(ft) => Some(ft),
+                                None => continue,
+                            }
+                        } else {
+                            None
+                        };
+
+                        if ssids.is_empty() {
+                            *ud.entry(pair.ap).or_insert(0) += 1;
+                            st.essid_unresolved_emissions += 1;
+                            continue;
+                        }
+
+                        for essid in ssids {
+                            let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
+                            match fan_out(s, d, st, ht, item) {
+                                Ok(written) => {
+                                    if written {
+                                        st.pairs_written += 1;
+                                        *st.hash_type_emitted.entry(ht).or_insert(0) += 1;
+                                        match pair.combo_type {
+                                            ComboType::N1E2 => st.n1e2 += 1,
+                                            ComboType::N3E2 => st.n3e2 += 1,
+                                            ComboType::N1E4 => st.n1e4 += 1,
+                                            ComboType::N2E3 => st.n2e3 += 1,
+                                            ComboType::N4E3 => st.n4e3 += 1,
+                                            ComboType::N3E4 => st.n3e4 += 1,
+                                        }
+                                        if pair.message_pair & FLAG_NC != 0 {
+                                            st.pairs_nc += 1;
+                                        }
+                                        if pair.message_pair & FLAG_LE != 0 {
+                                            st.pairs_le += 1;
+                                        }
+                                        if pair.message_pair & FLAG_BE != 0 {
+                                            st.pairs_be += 1;
+                                        }
+                                        st.rc_gap_max = st.rc_gap_max.max(pair.rc_gap_magnitude);
+                                    } else {
+                                        st.dedup_dropped += 1;
+                                    }
+                                },
+                                Err(e) => {
+                                    *first_error = Some(e);
+                                    return;
+                                },
+                            }
+                        }
+                    }
+                }
+
+                let processed =
+                    total_pairs_processed.fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed) + batch_len;
+                if debug.enabled
+                    && processed / emit_progress_interval() != (processed - batch_len) / emit_progress_interval()
+                {
+                    debug.emit_progress(processed, 0, guard.stats.pairs_written.saturating_sub(pairs_written_before));
                 }
             },
         );
-        let all_pairs = all_pairs_mutex.into_inner().unwrap_or_default();
-        stats.groups_thinned_30s += thin_stats.groups_thinned_30s;
-        stats.groups_thinned_5s += thin_stats.groups_thinned_5s;
-        stats.groups_thinned_subset += thin_stats.groups_thinned_subset;
-        stats.messages_thinned += thin_stats.messages_thinned;
-        debug.phase4_pairs_generated(all_pairs.len());
-        // Accumulate across `emit` calls so `--per-file` runs report the
-        // total NC-dedup yield across every file's pair_all_groups pass
-        // rather than just the last file's. `collapsed_lines` and
-        // `cluster_count` are component-wise sums; `max_cluster_size`
-        // tracks the global maximum -- same merge rule as `merge_nc_stats`
-        // in `pair/mod.rs`.
-        stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
-        stats.nc_dedup_cluster_count += nc_stats.cluster_count;
-        stats.nc_dedup_max_cluster_size = stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
-        let pairs_written_before = stats.pairs_written;
-        let dedup_dropped_before = stats.dedup_dropped;
-        if any_sink {
-            for (emit_idx, pair) in all_pairs.iter().enumerate() {
-                if debug.enabled && (emit_idx + 1) % emit_progress_interval() == 0 {
-                    debug.emit_progress(emit_idx + 1, all_pairs.len(), stats.pairs_written - pairs_written_before);
-                }
 
-                let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
-                let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
-                let is_ft = ht.is_ft();
-
-                // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
-                // [hcxpcapngtool:2351] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
-                let ft_ctx: Option<&FtFields> = if is_ft {
-                    match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                        Some(ft) => Some(ft),
-                        None => continue, // FT-PSK pair without FT context -- not crackable
-                    }
-                } else {
-                    None
-                };
-
-                // See pipeline 1 comment: a missing SSID makes the line uncrackable,
-                // so we drop the emission, record the AP for end-of-run logging, and
-                // move on. No fan-out, no per-sink line counter.
-                if ssids.is_empty() {
-                    *unresolved_drops.entry(pair.ap).or_insert(0) += 1;
-                    stats.essid_unresolved_emissions += 1;
-                    continue;
-                }
-
-                for essid in ssids {
-                    let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
-                    let written = fan_out(sinks, dedup, stats, ht, item)?;
-                    if written {
-                        stats.pairs_written += 1;
-                        *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
-
-                        // Per-combo / flag counters for the stats summary, bumped once per
-                        // logical pair that survived at least one sink's dedup.
-                        match pair.combo_type {
-                            ComboType::N1E2 => stats.n1e2 += 1,
-                            ComboType::N3E2 => stats.n3e2 += 1,
-                            ComboType::N1E4 => stats.n1e4 += 1,
-                            ComboType::N2E3 => stats.n2e3 += 1,
-                            ComboType::N4E3 => stats.n4e3 += 1,
-                            ComboType::N3E4 => stats.n3e4 += 1,
-                        }
-                        if pair.message_pair & FLAG_NC != 0 {
-                            stats.pairs_nc += 1;
-                        }
-                        if pair.message_pair & FLAG_LE != 0 {
-                            stats.pairs_le += 1;
-                        }
-                        if pair.message_pair & FLAG_BE != 0 {
-                            stats.pairs_be += 1;
-                        }
-                        stats.rc_gap_max = stats.rc_gap_max.max(pair.rc_gap_magnitude);
-                    } else {
-                        stats.dedup_dropped += 1;
-                    }
-                }
-            }
+        // Recover mutable state from the Mutex. The references point back into
+        // `self` -- they were moved in, not copied, so the compiler needs the
+        // destructure to release the borrows.
+        let es = emit_state.into_inner().unwrap_or_else(|p| p.into_inner());
+        if let Some(e) = es.first_error {
+            return Err(e);
         }
+
+        // `es.stats` etc. are `&mut self.stats` etc. -- writing through them
+        // mutates `self` directly. No need to copy back.
+        es.stats.groups_thinned_30s += thin_stats.groups_thinned_30s;
+        es.stats.groups_thinned_5s += thin_stats.groups_thinned_5s;
+        es.stats.groups_thinned_subset += thin_stats.groups_thinned_subset;
+        es.stats.messages_thinned += thin_stats.messages_thinned;
+        es.stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
+        es.stats.nc_dedup_cluster_count += nc_stats.cluster_count;
+        es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+
+        let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
+        debug.phase4_pairs_generated(total_pairs);
         debug.emit_fan_out_done(
-            all_pairs.len(),
-            stats.pairs_written - pairs_written_before,
-            stats.dedup_dropped - dedup_dropped_before,
-            stats.nc_dedup_collapsed_lines,
-            stats.nc_dedup_cluster_count,
+            total_pairs,
+            es.stats.pairs_written - pairs_written_before,
+            es.stats.dedup_dropped - dedup_dropped_before,
+            es.stats.nc_dedup_collapsed_lines,
+            es.stats.nc_dedup_cluster_count,
         );
         Ok(())
     }

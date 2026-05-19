@@ -203,10 +203,14 @@ impl DebugPrinter {
             return;
         }
         let rss = rss_tag();
-        let pct = pairs_processed.checked_mul(100).map_or(100, |n| n / total_pairs.max(1));
-        self.emit(&format!(
-            "Phase4 fan-out  {pairs_processed:>8}/{total_pairs} ({pct:>3}%)  written={pairs_written:>8}{rss}"
-        ));
+        if total_pairs > 0 {
+            let pct = pairs_processed.checked_mul(100).map_or(100, |n| n / total_pairs.max(1));
+            self.emit(&format!(
+                "Phase4 fan-out  {pairs_processed:>8}/{total_pairs} ({pct:>3}%)  written={pairs_written:>8}{rss}"
+            ));
+        } else {
+            self.emit(&format!("Phase4 fan-out  {pairs_processed:>8} (streaming)  written={pairs_written:>8}{rss}"));
+        }
     }
 
     /// Called once after the EAPOL fan-out loop completes. Shows final pair counts,
