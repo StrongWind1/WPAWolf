@@ -129,6 +129,11 @@ overflow-checks = true
 # Strip debug symbols from the release binary.
 strip = "symbols"
 
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+
 [profile.test]
 # Overflow checks in tests to catch arithmetic bugs.
 overflow-checks = true
