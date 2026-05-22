@@ -704,6 +704,29 @@ pub fn encode_hex(bytes: &[u8], out: &mut Vec<u8>) {
     out.extend(bytes.iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
 }
 
+/// Hex-encodes an EAPOL frame with the MIC field zeroed, without cloning the frame.
+///
+/// Writes three segments: bytes before the MIC (offset 81), zero bytes for the MIC
+/// window, and bytes after the MIC. Equivalent to `eapol_with_mic_zeroed` + `encode_hex`
+/// but avoids the heap allocation for the cloned frame.
+/// Per [IEEE 802.11-2024] §12.7.2 Table 12-11: MIC starts at EAPOL-Key byte 81.
+pub fn encode_hex_mic_zeroed(frame: &[u8], mic_len: usize, out: &mut Vec<u8>) {
+    let mic_start = 81;
+    let mic_end = mic_start + mic_len;
+    out.reserve(frame.len() * 2);
+    let before_end = mic_start.min(frame.len());
+    #[allow(clippy::indexing_slicing, reason = "usize::from(u8) always in-bounds for 256-entry HEX_LUT")]
+    out.extend(frame.get(..before_end).unwrap_or_default().iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
+    let zero_count = mic_len.min(frame.len().saturating_sub(mic_start));
+    for _ in 0..zero_count {
+        out.extend_from_slice(b"00");
+    }
+    if let Some(after) = frame.get(mic_end..) {
+        #[allow(clippy::indexing_slicing, reason = "usize::from(u8) always in-bounds for 256-entry HEX_LUT")]
+        out.extend(after.iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
+    }
+}
+
 /// Returns the lowercase hex encoding of `bytes` as an owned `String`.
 ///
 /// Allocates a new `String` of length `bytes.len() * 2`. Prefer `encode_hex` when

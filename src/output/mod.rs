@@ -17,6 +17,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
+/// Buffer capacity for all output `BufWriter`s (hash sinks + auxiliary files).
+///
+/// The default 8 KiB causes ~160k write syscalls per 1.3 GB output file. 64 KiB
+/// reduces that by 8x, cutting kernel overhead (`clear_page_rep`, `try_charge_memcg`,
+/// `rep_movs`) visible in the perf profile.
+const OUTPUT_BUF_CAPACITY: usize = 64 * 1024;
+
 use crate::debug::{DebugPrinter, emit_progress_interval};
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
@@ -31,7 +38,7 @@ use crate::types::{AkmType, FtFields, HashType, Result};
 
 use self::dedup::{PerSinkDedup, SinkId};
 use self::device_info::write_device_info;
-use self::hashcat::{format_eapol_ft_line, format_eapol_line, format_pmkid_ft_line, format_pmkid_line};
+use self::hashcat::{format_eapol_body, format_eapol_ft_body, format_pmkid_ft_line, format_pmkid_line};
 use self::wordlists::{
     write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist, write_wordlist_scan,
 };
@@ -225,7 +232,7 @@ impl LazySink {
     /// Returns a writable handle, creating (and truncating) the file on first call.
     fn writer(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
         if self.writer.is_none() {
-            self.writer = Some(BufWriter::new(std::fs::File::create(&self.path)?));
+            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(&self.path)?));
         }
         // The branch above guarantees Some.
         Ok(self.writer.as_mut().unwrap_or_else(|| unreachable!()))
@@ -341,23 +348,15 @@ enum FanItem<'a> {
     Eapol { pair: &'a PairedHash, ft: Option<&'a FtFields>, essid: &'a [u8] },
 }
 
-/// Builds the line text for a given `(item, sink, ht)` triple.
-///
-/// Legacy sinks use `ht.legacy_prefix()` plus -- for FT lines -- the FT-extra-field
-/// formatter. Taxonomy sinks use `ht.extended_prefix()`. PMKID rows of FT types route
-/// through the FT formatter to keep MDID+R0KH+R1KH appended. Non-FT rows route through
-/// the plain PMKID/EAPOL formatter.
-fn build_line(item: &FanItem<'_>, sink: SinkId, ht: HashType) -> String {
-    let prefix: &[u8] =
-        if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() };
-    match *item {
-        FanItem::Pmkid { entry, ft, essid } => ft.map_or_else(
-            || format_pmkid_line(prefix, entry, essid),
-            |ft| format_pmkid_ft_line(prefix, entry, ft, essid),
-        ),
-        FanItem::Eapol { pair, ft, essid } => ft
-            .map_or_else(|| format_eapol_line(prefix, pair, essid), |ft| format_eapol_ft_line(prefix, pair, ft, essid)),
-    }
+/// Returns the prefix for a given `(sink, ht)` pair.
+const fn prefix_for(sink: SinkId, ht: HashType) -> &'static [u8] {
+    if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() }
+}
+
+/// Builds a PMKID line for a given `(item, sink, ht)` triple.
+fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sink: SinkId, ht: HashType) -> String {
+    let prefix = prefix_for(sink, ht);
+    ft.map_or_else(|| format_pmkid_line(prefix, entry, essid), |ft| format_pmkid_ft_line(prefix, entry, ft, essid))
 }
 
 /// Fans one classified hash out to every configured sink that accepts it.
@@ -366,6 +365,10 @@ fn build_line(item: &FanItem<'_>, sink: SinkId, ht: HashType) -> String {
 /// configured AND its dedup accepted the fingerprint). The caller increments the
 /// `pmkids_written` / `pairs_written` logical counter exactly when this returns
 /// `true`. Per-sink line and dedup counters are bumped inside.
+///
+/// For EAPOL items, the hex body (everything after the 7-byte prefix) is built once
+/// and reused across all accepting sinks. This avoids redundant EAPOL-frame hex
+/// encoding and MIC-zeroing clones when a line fans out to 2-3 sinks.
 fn fan_out(
     sinks: &mut HashSinks,
     dedup: &mut PerSinkDedup,
@@ -373,8 +376,24 @@ fn fan_out(
     ht: HashType,
     item: FanItem<'_>,
 ) -> Result<bool> {
-    // Each candidate sink: legacy (skipped for SHA-384) + per-AKM-family + combined.
     let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
+
+    // Pre-build the EAPOL body once (prefix-independent) if any sink will accept it.
+    let eapol_body: Option<Vec<u8>> = match item {
+        FanItem::Eapol { pair, ft, essid } => {
+            let any_configured = candidates.iter().flatten().any(|&sink| {
+                let idx = sink.as_index();
+                sinks.sinks.get(idx).and_then(Option::as_ref).is_some()
+            });
+            if any_configured {
+                Some(ft.map_or_else(|| format_eapol_body(pair, essid), |ft| format_eapol_ft_body(pair, ft, essid)))
+            } else {
+                None
+            }
+        },
+        FanItem::Pmkid { .. } => None,
+    };
+
     let mut any_written = false;
     for sink in candidates.into_iter().flatten() {
         let idx = sink.as_index();
@@ -385,11 +404,21 @@ fn fan_out(
             FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
         };
         if accepted {
-            let line = build_line(&item, sink, ht);
-            // First write to a sink creates (and truncates) its file; subsequent
-            // writes reuse the same `BufWriter`. See `LazySink::writer`.
             let writer = lazy.writer()?;
-            writeln!(writer, "{line}")?;
+            match (&eapol_body, item) {
+                (Some(body), FanItem::Eapol { .. }) => {
+                    let prefix = prefix_for(sink, ht);
+                    writer.write_all(prefix)?;
+                    writer.write_all(body)?;
+                    writer.write_all(b"\n")?;
+                },
+                _ => {
+                    if let FanItem::Pmkid { entry, ft, essid } = item {
+                        let line = build_pmkid_line(entry, ft, essid, sink, ht);
+                        writeln!(writer, "{line}")?;
+                    }
+                },
+            }
             if let Some(c) = stats.lines_per_sink.get_mut(idx) {
                 *c += 1;
             }
@@ -840,37 +869,37 @@ impl OutputContext {
         // file and the process would still exit `0`.
 
         if let Some(path) = &paths.essid_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_essid_list(essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.probe_essid_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_probe_essid_list(probe_essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist_scan {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_identities(identity_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.username_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_usernames(username_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.device_info {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_device_info(device_store, &mut f)?;
             f.flush()?;
         }

@@ -38,6 +38,15 @@ const ELAPSED_SECS_THRESHOLD: u64 = 5;
 /// stream of updates rather than a 5 s pulse-only cadence.
 const PACKETS_THRESHOLD: u64 = 2_000_000;
 
+/// Packet-count interval between wall-clock checks.
+///
+/// When `packet_delta < PACKETS_THRESHOLD` we must consult `Instant::elapsed()`
+/// to enforce the 5-second cadence, but calling it on every packet is a
+/// `clock_gettime` vDSO syscall that costs ~5% CPU on a 71M-packet corpus.
+/// Only probe the clock once per this many packets; at typical ingest rates
+/// 100k packets takes ~50 ms, well within the 5-second print window.
+const CLOCK_CHECK_INTERVAL: u64 = 100_000;
+
 /// Stderr-bound periodic progress reporter for the Phase 1 ingest loop.
 ///
 /// Construct once before the loop starts; call `tick` once per packet (cheap;
@@ -84,7 +93,10 @@ impl ProgressReporter {
         // check is a syscall on most platforms, so only consult it when the
         // packet delta is below threshold (avoids the syscall on the hot path).
         let packet_delta = total_packets.saturating_sub(self.last_print_packets);
-        if packet_delta < PACKETS_THRESHOLD && self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD {
+        if packet_delta < PACKETS_THRESHOLD
+            && (packet_delta % CLOCK_CHECK_INTERVAL != 0
+                || self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD)
+        {
             return;
         }
         self.emit(total_packets, files, eapol, pmkids);
@@ -191,9 +203,9 @@ mod tests {
         // Backdate `last_print` by 6 seconds to simulate elapsed time.
         r.last_print = Instant::now().checked_sub(std::time::Duration::from_secs(6)).unwrap();
         let snap_packets = r.last_print_packets;
-        r.tick(1000, 1, 0, 0); // packet_delta=1000 < 2M, but elapsed > 5s
+        r.tick(CLOCK_CHECK_INTERVAL, 1, 0, 0); // packet_delta = CLOCK_CHECK_INTERVAL < 2M, but elapsed > 5s
         assert_ne!(r.last_print_packets, snap_packets, "time fallback should have triggered emit");
-        assert_eq!(r.last_print_packets, 1000);
+        assert_eq!(r.last_print_packets, CLOCK_CHECK_INTERVAL);
     }
 
     #[test]
