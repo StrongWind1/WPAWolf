@@ -153,6 +153,28 @@ impl PerSinkDedup {
         Self::default()
     }
 
+    /// Pre-sizes every per-sink `HashSet` to hold at least `capacity` entries
+    /// without reallocating. Eliminates the transient memory spike from
+    /// hashbrown's power-of-2 resize doubling, where both old and new tables
+    /// are alive simultaneously during the copy.
+    pub fn reserve(&mut self, capacity: usize) {
+        for set in &mut self.sets {
+            set.reserve(capacity);
+        }
+    }
+
+    /// Drops all recorded fingerprints, resetting every per-sink set to empty.
+    /// Capacity is released so the allocator can reclaim the memory.
+    ///
+    /// Used by `--per-file` mode after each file's emit. Cross-file duplicate
+    /// suppression is sacrificed (hashcat deduplicates at load time), but the
+    /// dedup set no longer grows without bound across the corpus.
+    pub fn clear(&mut self) {
+        for set in &mut self.sets {
+            *set = HashSet::new();
+        }
+    }
+
     /// Returns `true` if this PMKID entry is new for `sink` and records the fingerprint.
     pub fn check_pmkid(&mut self, sink: SinkId, entry: &PmkidEntry, essid: &[u8]) -> bool {
         let fp = pmkid_fingerprint(entry, essid);

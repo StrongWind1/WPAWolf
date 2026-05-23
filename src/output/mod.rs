@@ -586,6 +586,20 @@ impl OutputContext {
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
     ) -> Result<()> {
+        // Pre-size the dedup sets so hashbrown never resizes mid-run. Without
+        // this, a resize from 2^31 to 2^32 slots requires both tables to be
+        // alive simultaneously (54 GiB transient spike at ~2B entries).
+        let estimated_pairs = crate::pair::estimate_total_cost(message_store);
+        let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
+        if estimated_hashes > 0 {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
+            )]
+            let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
+            self.dedup.reserve(cap);
+        }
+
         self.emit_inner(
             message_store,
             pmkid_store,
@@ -599,6 +613,15 @@ impl OutputContext {
         )?;
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
+    }
+
+    /// Drops all recorded dedup fingerprints, releasing the memory.
+    ///
+    /// Called after each file's emit in `--per-file` mode so the dedup set
+    /// does not grow without bound across a large corpus. Cross-file
+    /// duplicate suppression is sacrificed; hashcat deduplicates at load time.
+    pub fn clear_dedup(&mut self) {
+        self.dedup.clear();
     }
 
     fn emit_inner(

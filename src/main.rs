@@ -815,6 +815,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             )?;
             message_store.clear();
             pmkid_store.clear();
+            output_ctx.clear_dedup();
         }
     }
 

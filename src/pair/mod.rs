@@ -261,6 +261,14 @@ pub fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
     cost
 }
 
+/// Estimates the total pairing cost across all groups in a `MessageStore`.
+///
+/// Used to pre-size the dedup `HashSet` so hashbrown never resizes mid-run.
+#[must_use]
+pub fn estimate_total_cost(store: &MessageStore) -> u64 {
+    store.groups().map(|(_, msgs)| estimate_group_cost(msgs)).sum()
+}
+
 /// Pairs a single group: clone, sort, generate combos, collapse, NC-dedup.
 fn pair_one_group(
     mac_pair: &MacPair,
