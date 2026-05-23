@@ -405,23 +405,6 @@ The build sequence below ships incremental usable subsets. Each step is independ
 | 6    | (Independent of steps 1 -- 5.) Hashcat-core PR adds aux5 -- aux11 slots per §6.2.                                       |
 | 7    | After step 6 lands, modes 22002 and 22003 switch to **Phase 2** kernel layout in the same release. Operators see no CLI or hash-format change; benchmark numbers improve on PMK-direct and SHA-384 workloads. |
 
-### `wpawolf-convert`: legacy file migration
-
-For operators with existing legacy hash files (extracted by `hcxpcapngtool` or by older `wpawolf` builds writing only `--22000-out` / `--37100-out`), a small companion utility `wpawolf-convert` reads `WPA*01*..*04*` lines and emits `WPA*01*..*11*` lines in the new per-AKM format. It does no pcap parsing; it works on already-extracted hash files.
-
-Conversion notes (the tool documents these in its own help text; listed here for context):
-
-- `WPA*01*` (legacy PMKID) -> type 2 (WPA2-PSK-PMKID). The legacy hashcat 22000 PMKID kernel runs HMAC-SHA1 unconditionally, so any PMKID line that ever cracked under mode 22000 must be a type-2 hash. Lines representing type 4 / 8 PMKIDs that the legacy kernel silently mis-cracked cannot be recovered without the original pcap -- re-extract via `wpawolf --psk-sha256-out` or `--psk-sha384-out`.
-- `WPA*02*` keyver=1 -> type 1 (WPA1-PSK-EAPOL).
-- `WPA*02*` keyver=2 -> type 3 (WPA2-PSK-EAPOL).
-- `WPA*02*` keyver=3 -> type 5 (PSK-SHA256-EAPOL) by default, with a one-line stderr warning that this row is ambiguous between type 5 and type 7 (FT-PSK-EAPOL) in the legacy format. Operators with FT-PSK captures should re-extract via `wpawolf -o` from the original pcap, where the FT IE context resolves the ambiguity.
-- `WPA*03*` -> type 6 (FT-PSK-PMKID).
-- `WPA*04*` -> type 7 (FT-PSK-EAPOL).
-
-The new modules never read a legacy line directly; `wpawolf-convert` is the migration boundary. After conversion, the new modules consume the resulting file natively.
-
-The recommended workflow for new captures is `wpawolf -o all.taxo capture.pcap` followed by `hashcat -m 22002 all.taxo wordlist.txt` -- no conversion step needed, no legacy file ever produced.
-
 ---
 
 ## §9  Why two new modes instead of extending 22000 / 22001 / 37100
