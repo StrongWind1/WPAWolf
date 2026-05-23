@@ -583,7 +583,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
         loop {
             match reader.next_packet() {
-                Ok(Some(packet)) => {
+                Ok(Some(mut packet)) => {
                     stats.total_packets += 1;
                     // Periodic stderr progress line (no-op when --quiet). Cheap on the
                     // hot path: most calls return after a single u64 comparison.
@@ -720,6 +720,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         },
                         _ => {},
                     }
+
+                    reader.recycle_buffer(std::mem::take(&mut packet.data));
                 },
                 Ok(None) => break, // end of file
                 Err(e) => {

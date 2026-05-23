@@ -213,7 +213,7 @@ pub fn store_eapol_key(
     // Extract FT fields (MDIE + FTIE subelements) from the EAPOL Key Data field.
     // Applies to M1/M2 for FT-PSK; M3 Key Data is encrypted so the IE iterator
     // returns None harmlessly. [IEEE 802.11-2024] §9.4.2.45-46; hcxpcapngtool gettags():3517
-    let ft = extract_ft_fields(&key.key_data);
+    let ft = extract_ft_fields(&key.key_data).map(Box::new);
 
     // Determine the AKM for this handshake from observed wire evidence rather than
     // trusting the AP's advertised AKM list. Priority:
@@ -321,7 +321,7 @@ pub fn store_eapol_key(
             pmkid,
             source: PmkidSource::M1KeyData,
             akm: pmkid_akm,
-            ft,
+            ft: ft.clone(),
         }) {
             stats.pmkids_found += 1;
             if pmkid_akm.is_ft() {
@@ -349,7 +349,7 @@ pub fn store_eapol_key(
                             pmkid,
                             source: PmkidSource::M2RsnIe,
                             akm: pmkid_akm,
-                            ft,
+                            ft: ft.clone(),
                         }) {
                             stats.pmkids_found += 1;
                             if pmkid_akm.is_ft() {

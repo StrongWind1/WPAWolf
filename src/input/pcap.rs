@@ -114,6 +114,9 @@ pub struct PcapReader<R: Read> {
     version_major: u16,
     /// pcap global header `version_minor`. [libpcap pcap/pcap.h]
     version_minor: u16,
+    /// Recycled packet-data buffer. Reused across `next_packet` calls to avoid
+    /// a heap allocation per packet (~70 M allocs on a large corpus).
+    pkt_buf: Vec<u8>,
 }
 
 impl<R: Read> PcapReader<R> {
@@ -201,7 +204,17 @@ impl<R: Read> PcapReader<R> {
             })?;
         }
 
-        Ok(Self { reader, byte_order, dlt, nanosecond, kuznetzov, ixia, version_major, version_minor })
+        Ok(Self {
+            reader,
+            byte_order,
+            dlt,
+            nanosecond,
+            kuznetzov,
+            ixia,
+            version_major,
+            version_minor,
+            pkt_buf: Vec::new(),
+        })
     }
 }
 
@@ -265,7 +278,19 @@ impl<R: Read> PacketReader for PcapReader<R> {
             std::io::copy(&mut (&mut self.reader).take(incl_len.into()), &mut std::io::sink())?;
             return self.next_packet();
         }
-        let mut data = vec![0u8; caplen];
+        // Reuse the recycled buffer when it has enough capacity; otherwise allocate fresh.
+        // After the first few packets the buffer stabilises at the largest observed caplen
+        // and no further allocations occur for the rest of the file.
+        let mut data = if self.pkt_buf.capacity() >= caplen {
+            let mut buf = std::mem::take(&mut self.pkt_buf);
+            buf.clear();
+            buf
+        } else {
+            Vec::with_capacity(caplen)
+        };
+        // SAFETY (logical): resize fills with zero then read_exact overwrites every byte.
+        // The zeroing is redundant but required by safe Rust since read_exact takes &mut [u8].
+        data.resize(caplen, 0);
         self.reader.read_exact(&mut data).map_err(|e| {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 Error::Truncated { context: "pcap packet data", needed: caplen, got: 0 }
@@ -293,6 +318,12 @@ impl<R: Read> PacketReader for PcapReader<R> {
     /// header. Any other id returns `None`.
     fn link_type(&self, interface_id: u32) -> Option<u16> {
         if interface_id == 0 { Some(self.dlt) } else { None }
+    }
+
+    fn recycle_buffer(&mut self, buf: Vec<u8>) {
+        if buf.capacity() > self.pkt_buf.capacity() {
+            self.pkt_buf = buf;
+        }
     }
 
     fn file_metadata(&self) -> FileMetadata {

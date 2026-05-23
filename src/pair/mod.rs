@@ -148,8 +148,9 @@ pub struct PairedHash {
     pub message_pair: u8,
     /// AKM suite type -- determines output file (22000 vs 37100).
     pub akm: AkmType,
-    /// FT-PSK fields, present only for FT associations.
-    pub ft: Option<FtFields>,
+    /// FT-PSK fields, present only for FT associations. Boxed because >99.9% of
+    /// pairs are non-FT; saves 50 bytes per struct instance.
+    pub ft: Option<Box<FtFields>>,
     /// Absolute deviation of the actual RC delta from the expected delta for this combo.
     /// 0 = exact RC match, lower is better. Used by `--dedup-hash-combos` survivor
     /// selection: when two combos produce the same crackable hash, prefer the smaller gap.

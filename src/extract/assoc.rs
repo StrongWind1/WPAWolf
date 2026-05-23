@@ -75,7 +75,7 @@ pub fn process_assoc_or_reassoc_req(
     //      eleven hash-type rows in `ARCHITECTURE.md §2`.
     //
     // Parsing FT fields once here avoids a second walk below in the PMKID branch.
-    let ft = extract_ft_fields(ies);
+    let ft = extract_ft_fields(ies).map(Box::new);
     let chosen_akm = if akm_flags.ft_psk_sha384 {
         AkmType::FtPskSha384
     } else if ft.is_some() || akm_flags.ft_psk {
@@ -250,7 +250,7 @@ pub fn process_assoc_or_reassoc_req(
                 pmkid,
                 source,
                 akm,
-                ft,
+                ft: ft.clone(),
             }) {
                 stats.pmkids_found += 1;
                 if akm.is_ft() {

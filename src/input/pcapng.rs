@@ -148,6 +148,8 @@ pub struct PcapngReader<R: Read> {
     block_buf: Vec<u8>,
     /// Major/minor version from the first SHB. [draft-ietf-opsawg-pcapng-05] §4.1
     version: (u16, u16),
+    /// Recycled packet-data buffer returned by the caller via `recycle_buffer`.
+    pkt_buf: Vec<u8>,
 }
 
 impl<R: Read> std::fmt::Debug for PcapngReader<R> {
@@ -253,7 +255,7 @@ impl<R: Read> PcapngReader<R> {
         }
         let minor = byte_order.u16(read_array(&block_buf, 6, "pcapng SHB minor version")?);
 
-        Ok(Self { reader, byte_order, interfaces: Vec::new(), block_buf, version: (major, minor) })
+        Ok(Self { reader, byte_order, interfaces: Vec::new(), block_buf, version: (major, minor), pkt_buf: Vec::new() })
     }
 
     // --- Block reading ---
@@ -331,13 +333,11 @@ impl<R: Read> PcapngReader<R> {
         self.reader.read_exact(&mut trail)?;
 
         // Dispatch on block type.
-        // For blocks where the parse method needs &mut self (SHB, IDB), we clone the
-        // relevant body bytes out of block_buf first to release the immutable borrow.
-        // block_buf is a reusable scratch space -- cloning the body on these infrequent
-        // control-plane blocks costs ~8-64 bytes per IDB and is negligible.
+        // SHB/IDB clone the body out of block_buf to free the borrow for &mut self
+        // methods. These are infrequent control-plane blocks (~8-64 bytes per IDB).
+        // EPBs read fields directly from block_buf and copy only the packet data once.
         match block_type {
             BLOCK_TYPE_SHB => {
-                // SHB body is already in self.block_buf; parse_shb_body reads from it.
                 self.parse_shb_body(body_len)?;
                 Ok(BlockOutcome::Skip)
             },
@@ -350,21 +350,55 @@ impl<R: Read> PcapngReader<R> {
                         needed: body_len,
                         got: self.block_buf.len(),
                     })?
-                    .to_vec(); // clone to free the borrow so parse_idb_body can take &mut self
+                    .to_vec();
                 self.parse_idb_body(&body)?;
                 Ok(BlockOutcome::Skip)
             },
             BLOCK_TYPE_EPB => {
-                let body = self
-                    .block_buf
-                    .get(..body_len)
-                    .ok_or(Error::Truncated {
-                        context: "pcapng EPB body slice",
-                        needed: body_len,
-                        got: self.block_buf.len(),
-                    })?
-                    .to_vec(); // clone so parse_epb_body can borrow self.interfaces
-                self.parse_epb_body(&body)?.map_or(Ok(BlockOutcome::Skip), |pkt| Ok(BlockOutcome::Packet(pkt)))
+                // Read EPB fixed-header fields directly from block_buf to avoid
+                // cloning the entire body. Only the packet data is copied out.
+                if body_len < EPB_HEADER_LEN {
+                    println!("wpawolf: pcapng EPB body too short ({body_len} bytes, need {EPB_HEADER_LEN}), skipping");
+                    return Ok(BlockOutcome::Skip);
+                }
+                let interface_id = self.byte_order.u32(read_array(&self.block_buf, 0, "pcapng EPB interface_id")?);
+                let ts_high = self.byte_order.u32(read_array(&self.block_buf, 4, "pcapng EPB ts_high")?);
+                let ts_low = self.byte_order.u32(read_array(&self.block_buf, 8, "pcapng EPB ts_low")?);
+                let caplen = self.byte_order.u32(read_array(&self.block_buf, 12, "pcapng EPB caplen")?);
+
+                let Some(iface) = self.interfaces.get(interface_id as usize) else {
+                    return Ok(BlockOutcome::Packet(Packet { timestamp_us: 0, interface_id, data: Vec::new() }));
+                };
+
+                let ts_raw = (u64::from(ts_high) << 32) | u64::from(ts_low);
+                let ts_us: u64 = if iface.ts_units_per_sec == 0 {
+                    0
+                } else {
+                    let wide = (u128::from(ts_raw) * 1_000_000_u128) / u128::from(iface.ts_units_per_sec);
+                    u64::try_from(wide).unwrap_or(u64::MAX)
+                };
+                let offset_us = i128::from(iface.ts_offset_sec) * 1_000_000_i128;
+                let timestamp_us = u64::try_from(i128::from(ts_us) + offset_us).unwrap_or(0);
+
+                let caplen_usize = caplen as usize;
+                let data_end = EPB_HEADER_LEN + caplen_usize;
+                let src = self.block_buf.get(EPB_HEADER_LEN..data_end).ok_or(Error::Truncated {
+                    context: "pcapng EPB packet data",
+                    needed: data_end,
+                    got: self.block_buf.len(),
+                })?;
+
+                // Single copy: reuse the recycled pkt_buf when it has enough capacity.
+                let mut data = if self.pkt_buf.capacity() >= caplen_usize {
+                    let mut buf = std::mem::take(&mut self.pkt_buf);
+                    buf.clear();
+                    buf
+                } else {
+                    Vec::with_capacity(caplen_usize)
+                };
+                data.extend_from_slice(src);
+
+                Ok(BlockOutcome::Packet(Packet { timestamp_us, interface_id, data }))
             },
             _ => {
                 // SPB, NRB, ISB, Custom, and any future block types are transparently skipped.
@@ -515,74 +549,6 @@ impl<R: Read> PcapngReader<R> {
         }
         Ok(())
     }
-
-    // --- EPB parsing ---
-
-    /// Parses an EPB body and returns the contained packet, or `None` for a skippable error.
-    ///
-    /// Returns `None` (not `Err`) when the `interface_id` is unregistered -- a parse-level
-    /// error that does not abort the run per the "log-and-continue" policy.
-    /// [draft-ietf-opsawg-pcapng-05] §4.3
-    fn parse_epb_body(&self, body: &[u8]) -> Result<Option<Packet>> {
-        if body.len() < EPB_HEADER_LEN {
-            println!("wpawolf: pcapng EPB body too short ({} bytes, need {EPB_HEADER_LEN}), skipping", body.len());
-            return Ok(None);
-        }
-
-        // EPB fixed header layout (all fields in section byte order):
-        // offset  0: Interface ID (u32)
-        // offset  4: Timestamp High (u32)
-        // offset  8: Timestamp Low (u32)
-        // offset 12: Captured Packet Length (u32)
-        // offset 16: Original Packet Length (u32, not used)
-        // [draft-ietf-opsawg-pcapng-05] §4.3
-        let interface_id = self.byte_order.u32(read_array(body, 0, "pcapng EPB interface_id")?);
-        let ts_high = self.byte_order.u32(read_array(body, 4, "pcapng EPB ts_high")?);
-        let ts_low = self.byte_order.u32(read_array(body, 8, "pcapng EPB ts_low")?);
-        let caplen = self.byte_order.u32(read_array(body, 12, "pcapng EPB caplen")?);
-        // Original Packet Length at offset 16 is not used for packet extraction; skip.
-
-        // EPB referencing an unregistered interface: surface the packet (with empty
-        // data, since we have no DLT to interpret it) so the ingest loop can route
-        // it through `log_unknown_linktype(interface_id)` (main.rs Phase 1) and
-        // skip cleanly. The body is left unread; `caplen` is informational here.
-        let Some(iface) = self.interfaces.get(interface_id as usize) else {
-            let _ = caplen; // intentional: payload not parsed for missing IDB
-            return Ok(Some(Packet { timestamp_us: 0, interface_id, data: Vec::new() }));
-        };
-
-        // Combine high and low 32-bit halves into the 64-bit raw timestamp.
-        // [draft-ietf-opsawg-pcapng-05] §4.3: timestamp = (ts_high << 32) | ts_low
-        let ts_raw = (u64::from(ts_high) << 32) | u64::from(ts_low);
-
-        // Convert raw timestamp to microseconds using u128 arithmetic to avoid overflow.
-        // ts_raw * 1_000_000 could exceed u64::MAX for nanosecond-resolution timestamps.
-        let ts_us: u64 = if iface.ts_units_per_sec == 0 {
-            0 // guard against malformed IDB (division by zero)
-        } else {
-            // u128 intermediate avoids overflow; result always fits in u64 for realistic
-            // timestamps (microsecond values < 2^64). Saturate on overflow.
-            let wide = (u128::from(ts_raw) * 1_000_000_u128) / u128::from(iface.ts_units_per_sec);
-            u64::try_from(wide).unwrap_or(u64::MAX)
-        };
-
-        // Apply the signed seconds offset from if_tsoffset.
-        // [draft-ietf-opsawg-pcapng-05] §4.2, option 14
-        // Use i128 to avoid wrap on u64->i64 cast and sign loss on i64->u64 cast.
-        let offset_us = i128::from(iface.ts_offset_sec) * 1_000_000_i128;
-        let timestamp_us = u64::try_from(i128::from(ts_us) + offset_us).unwrap_or(0);
-
-        // Packet data immediately follows the 20-byte fixed header, unpadded to caplen bytes.
-        let caplen_usize = caplen as usize;
-        let data_end = EPB_HEADER_LEN + caplen_usize;
-        let data = body.get(EPB_HEADER_LEN..data_end).ok_or(Error::Truncated {
-            context: "pcapng EPB packet data",
-            needed: data_end,
-            got: body.len(),
-        })?;
-
-        Ok(Some(Packet { timestamp_us, interface_id, data: data.to_vec() }))
-    }
 }
 
 impl<R: Read> PacketReader for PcapngReader<R> {
@@ -598,6 +564,12 @@ impl<R: Read> PacketReader for PcapngReader<R> {
                 BlockOutcome::Eof => return Ok(None),
                 BlockOutcome::Skip => {}, // non-EPB block processed or skipped -- keep looping
             }
+        }
+    }
+
+    fn recycle_buffer(&mut self, buf: Vec<u8>) {
+        if buf.capacity() > self.pkt_buf.capacity() {
+            self.pkt_buf = buf;
         }
     }
 

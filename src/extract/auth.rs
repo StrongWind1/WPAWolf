@@ -35,7 +35,7 @@ pub fn process_auth_ft(
     if pmkids.is_empty() {
         return;
     }
-    let ft = extract_ft_fields(ies);
+    let ft = extract_ft_fields(ies).map(Box::new);
     // seq=1: STA->AP, mac_hdr.ap = BSSID = AP, mac_hdr.sta = addr2 = STA. [§13.8.3]
     // seq=2: AP->STA, mac_hdr.ap = BSSID = AP, mac_hdr.sta = addr2 = AP (not the STA).
     let (ap, sta, source) = if seq == 1 {
@@ -52,7 +52,7 @@ pub fn process_auth_ft(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
-        if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft }) {
+        if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: ft.clone() }) {
             stats.pmkids_found += 1;
             stats.pmkid_ft_psk += 1;
             stats.pmkid_ft_auth += 1;
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(entry.pmkid, pmkid);
         assert_eq!(entry.source, PmkidSource::FtAuthStaToAp);
         assert!(entry.ft.is_some());
-        assert_eq!(entry.ft.unwrap().mdid, [0x12, 0x34]);
+        assert_eq!(entry.ft.as_ref().unwrap().mdid, [0x12, 0x34]);
         assert_eq!(stats.pmkid_ft_auth, 1);
     }
 

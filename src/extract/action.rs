@@ -13,7 +13,7 @@ use crate::store::{
     essid::EssidMap,
     pmkid::{PmkidEntry, PmkidStore},
 };
-use crate::types::{AkmType, MacAddr, PmkidSource};
+use crate::types::{AkmType, FtFields, MacAddr, PmkidSource};
 
 use super::common::insert_essid;
 
@@ -130,7 +130,7 @@ pub fn process_action(
         let ies = body.get(ie_offset..).unwrap_or(&[]);
         let pmkids = extract_pmkids(ies);
         if !pmkids.is_empty() {
-            let ft = extract_ft_fields(ies);
+            let ft: Option<Box<FtFields>> = extract_ft_fields(ies).map(Box::new);
             let (ap, sta, source) = match action_code {
                 ACTION_FT_REQUEST => (target_ap, sta_addr, PmkidSource::FtActionRequest),
                 ACTION_FT_RESPONSE => (mac_hdr.ap, sta_addr, PmkidSource::FtActionResponse),
@@ -147,7 +147,7 @@ pub fn process_action(
                     pmkid,
                     source,
                     akm: AkmType::FtPsk,
-                    ft,
+                    ft: ft.clone(),
                 }) {
                     stats.pmkids_found += 1;
                     stats.pmkid_ft_psk += 1;

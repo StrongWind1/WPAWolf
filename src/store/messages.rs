@@ -43,7 +43,9 @@ pub struct EapolMessage {
     /// No size limit applied. [ARCHITECTURE.md §5]
     pub eapol_frame: Arc<[u8]>,
     /// FT-PSK fields (None for non-FT associations). [IEEE 802.11-2024] §9.4.2.45-46
-    pub ft: Option<FtFields>,
+    /// Boxed because >99.9% of messages are non-FT; inline `Option<FtFields>` costs 58 bytes
+    /// per message vs 8 bytes for the boxed form (null-pointer optimized).
+    pub ft: Option<Box<FtFields>>,
     /// AKM type from Beacon/ProbeResponse RSN IE context. `Unknown` if no IE was seen.
     pub akm: AkmType,
     /// Whether the EAPOL frame used the RSN descriptor type (0x02 = WPA2/WPA3).
@@ -59,7 +61,7 @@ impl EapolMessage {
     /// AP's Beacon/ProbeResponse RSN IE (stored in the AKM map before pairing). `ft`
     /// is populated for FT-PSK associations from MDE/FTE IEs.
     #[must_use]
-    pub fn from_eapol_key(key: EapolKey, timestamp: u64, akm: AkmType, ft: Option<FtFields>) -> Self {
+    pub fn from_eapol_key(key: EapolKey, timestamp: u64, akm: AkmType, ft: Option<Box<FtFields>>) -> Self {
         Self {
             timestamp,
             msg_type: key.msg_type,

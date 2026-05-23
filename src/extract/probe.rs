@@ -117,7 +117,7 @@ pub fn process_probe_req(
     let pmkids = extract_pmkids(body);
     if !pmkids.is_empty() {
         let akm = akm_map.get(&mac_hdr.ap);
-        let ft = extract_ft_fields(body);
+        let ft = extract_ft_fields(body).map(Box::new);
         for pmkid in pmkids {
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
@@ -129,7 +129,7 @@ pub fn process_probe_req(
                 pmkid,
                 source: PmkidSource::ProbeRequest,
                 akm,
-                ft: if akm.is_ft() { ft } else { None },
+                ft: if akm.is_ft() { ft.clone() } else { None },
             }) {
                 stats.pmkids_found += 1;
                 if akm.is_ft() {
