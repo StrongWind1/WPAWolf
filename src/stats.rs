@@ -360,6 +360,8 @@ pub struct Stats {
     pub messages_thinned: u64,
     /// Phase 1 retroactive thinning events (memory pressure during ingestion).
     pub phase1_retroactive_thins: u64,
+    /// Dedup set clears triggered by memory pressure during per-file emit.
+    pub dedup_clears: u64,
     /// EAPOL pairs written with `FLAG_NC` set (nonce-error-corrections active).
     pub pairs_nc: u64,
     /// EAPOL pairs written with `FLAG_LE` set (LE endianness correction applied).
@@ -1237,13 +1239,18 @@ impl Stats {
         let any_thinned = self.groups_thinned_30s
             + self.groups_thinned_5s
             + self.groups_thinned_subset
-            + self.phase1_retroactive_thins;
+            + self.phase1_retroactive_thins
+            + self.dedup_clears;
         if any_thinned > 0 {
             nz!("  adaptive thinning: groups thinned (30s window)", self.groups_thinned_30s);
             nz!("  adaptive thinning: groups thinned (5s window)", self.groups_thinned_5s);
             nz!("  adaptive thinning: groups thinned (quality subset)", self.groups_thinned_subset);
             nz!("  adaptive thinning: messages removed", self.messages_thinned);
             nz!("  adaptive thinning: Phase 1 retroactive thin events", self.phase1_retroactive_thins);
+            nz!(
+                "  adaptive thinning: dedup set clears (memory pressure; cross-file dups may pass through)",
+                self.dedup_clears
+            );
         }
         nz!(
             "  ANonce M1/M3 mismatch sessions (diagnostic; both anchors emitted; spec §12.7.6.4)",

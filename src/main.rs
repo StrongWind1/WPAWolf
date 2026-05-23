@@ -815,7 +815,20 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             )?;
             message_store.clear();
             pmkid_store.clear();
-            output_ctx.clear_dedup();
+
+            // Adaptive dedup clearing: shed the cross-file dedup set only when
+            // memory pressure is high. On small corpora the set stays resident
+            // and suppresses cross-file duplicates. On wpa-sec-scale runs the
+            // set is cleared before it triggers a HashSet resize spike that
+            // would OOM the machine.
+            if thin_config.mem_limit_pct > 0 {
+                let rss = wpawolf::progress::current_rss_bytes();
+                let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
+                if rss > threshold {
+                    stats.dedup_clears += 1;
+                    output_ctx.clear_dedup();
+                }
+            }
         }
     }
 
