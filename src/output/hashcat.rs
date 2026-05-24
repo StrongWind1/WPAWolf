@@ -529,10 +529,10 @@ mod tests {
         let copy_len = r0khid.len().min(48);
         // copy_len <= 48 always fits in u8; unwrap_or is unreachable but satisfies the lint.
         f.r0khid_len = u8::try_from(copy_len).unwrap_or(48);
-        if let Some(dst) = f.r0khid.get_mut(..copy_len) {
-            if let Some(src) = r0khid.get(..copy_len) {
-                dst.copy_from_slice(src);
-            }
+        if let Some(dst) = f.r0khid.get_mut(..copy_len)
+            && let Some(src) = r0khid.get(..copy_len)
+        {
+            dst.copy_from_slice(src);
         }
         f
     }

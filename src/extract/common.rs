@@ -337,29 +337,29 @@ pub fn store_eapol_key(
     // M2 PMKID from embedded RSN IE in Key Data. [IEEE 802.11-2024] §12.7.2
     if key.msg_type == MsgType::M2 {
         for ie in iter_ies(&key.key_data) {
-            if ie.id == 48 {
-                if let Some(rsn) = parse_rsn_ie(ie.value) {
-                    for pmkid in rsn.pmkids {
-                        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            if ie.id == 48
+                && let Some(rsn) = parse_rsn_ie(ie.value)
+            {
+                for pmkid in rsn.pmkids {
+                    if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+                        logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+                    }
+                    if pmkid_store.add(PmkidEntry {
+                        timestamp: timestamp_us,
+                        ap,
+                        sta,
+                        pmkid,
+                        source: PmkidSource::M2RsnIe,
+                        akm: pmkid_akm,
+                        ft: ft.clone(),
+                    }) {
+                        stats.pmkids_found += 1;
+                        if pmkid_akm.is_ft() {
+                            stats.pmkid_ft_psk += 1;
+                        } else {
+                            stats.pmkid_wpa2_psk += 1;
                         }
-                        if pmkid_store.add(PmkidEntry {
-                            timestamp: timestamp_us,
-                            ap,
-                            sta,
-                            pmkid,
-                            source: PmkidSource::M2RsnIe,
-                            akm: pmkid_akm,
-                            ft: ft.clone(),
-                        }) {
-                            stats.pmkids_found += 1;
-                            if pmkid_akm.is_ft() {
-                                stats.pmkid_ft_psk += 1;
-                            } else {
-                                stats.pmkid_wpa2_psk += 1;
-                            }
-                            stats.pmkid_m2 += 1;
-                        }
+                        stats.pmkid_m2 += 1;
                     }
                 }
             }
@@ -380,11 +380,11 @@ pub fn store_eapol_key(
     stats.record_key_descriptor_version(key.key_version);
 
     let msg = EapolMessage::from_eapol_key(key, timestamp_us, akm, ft);
-    if let Some(cfd) = cross_file_dedup {
-        if !cfd.check_message(ap, sta, msg.msg_type, msg.akm, &msg.eapol_frame) {
-            stats.cross_file_dedup_skipped += 1;
-            return;
-        }
+    if let Some(cfd) = cross_file_dedup
+        && !cfd.check_message(ap, sta, msg.msg_type, msg.akm, &msg.eapol_frame)
+    {
+        stats.cross_file_dedup_skipped += 1;
+        return;
     }
     message_store.add(ap, sta, msg);
 }

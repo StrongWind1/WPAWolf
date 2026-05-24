@@ -145,11 +145,11 @@ impl FragmentStore {
         let key = FragKey { sa, ra, seq_num };
         if frag_num == 0 {
             // First fragment of a new MSDU. Evict oldest entry if at capacity.
-            if self.entries.len() >= self.max_entries {
-                if let Some(victim_key) = self.oldest_key() {
-                    self.entries.remove(&victim_key);
-                    stats.fragments_dropped_safety_cap += 1;
-                }
+            if self.entries.len() >= self.max_entries
+                && let Some(victim_key) = self.oldest_key()
+            {
+                self.entries.remove(&victim_key);
+                stats.fragments_dropped_safety_cap += 1;
             }
             self.entries.insert(key, FragEntry { body: body.to_vec(), last_frag: 0, first_seen_us: timestamp_us });
             stats.fragments_seen += 1;

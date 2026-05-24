@@ -649,20 +649,18 @@ pub fn parse_rejection_reason(data: &[u8]) -> &'static str {
     }
     // Nonce and MIC slices are in-bounds after the MIN_EAPOL_KEY_LEN checks above
     // (nonce ends at offset 49, MIC at 97 for 16-B; both < 99 / 107).
-    if let Some(nonce_arr) = eapol.get(OFF_NONCE..OFF_NONCE + NONCE_LEN).and_then(|s| <[u8; 32]>::try_from(s).ok()) {
-        if garbage_pattern_kind(&nonce_arr).is_some() {
-            return "garbage_nonce";
-        }
+    if let Some(nonce_arr) = eapol.get(OFF_NONCE..OFF_NONCE + NONCE_LEN).and_then(|s| <[u8; 32]>::try_from(s).ok())
+        && garbage_pattern_kind(&nonce_arr).is_some()
+    {
+        return "garbage_nonce";
     }
     let key_mic = (ki >> 8) & 1 != 0;
-    if key_mic {
-        if let Some(mic_slice) = eapol.get(OFF_MIC..OFF_MIC + mic_len) {
-            if let Some(mb) = MicBytes::from_slice(mic_slice) {
-                if mb.garbage_pattern_kind().is_some() {
-                    return "garbage_mic";
-                }
-            }
-        }
+    if key_mic
+        && let Some(mic_slice) = eapol.get(OFF_MIC..OFF_MIC + mic_len)
+        && let Some(mb) = MicBytes::from_slice(mic_slice)
+        && mb.garbage_pattern_kind().is_some()
+    {
+        return "garbage_mic";
     }
     // Tier-3 (WDS/unknown direction) classify_by_flags returned None: ACK=0 MIC=0 is
     // the only unclassifiable combination. [IEEE 802.11-2024] §12.7.2

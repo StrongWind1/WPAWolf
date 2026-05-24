@@ -94,7 +94,7 @@ impl ProgressReporter {
         // packet delta is below threshold (avoids the syscall on the hot path).
         let packet_delta = total_packets.saturating_sub(self.last_print_packets);
         if packet_delta < PACKETS_THRESHOLD
-            && (packet_delta % CLOCK_CHECK_INTERVAL != 0
+            && (!packet_delta.is_multiple_of(CLOCK_CHECK_INTERVAL)
                 || self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD)
         {
             return;

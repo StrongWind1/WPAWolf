@@ -160,10 +160,10 @@ pub fn extract_ft_fields(tagged_params: &[u8]) -> Option<FtFields> {
         let copy_len = r0.len().min(48);
         // copy_len is at most 48, always fits in u8.
         fields.r0khid_len = u8::try_from(copy_len).unwrap_or(48);
-        if let Some(dst) = fields.r0khid.get_mut(..copy_len) {
-            if let Some(src) = r0.get(..copy_len) {
-                dst.copy_from_slice(src);
-            }
+        if let Some(dst) = fields.r0khid.get_mut(..copy_len)
+            && let Some(src) = r0.get(..copy_len)
+        {
+            dst.copy_from_slice(src);
         }
     }
 

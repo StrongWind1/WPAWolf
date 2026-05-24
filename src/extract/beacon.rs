@@ -56,10 +56,10 @@ pub fn process_beacon_or_probe_resp(
 
     // Beacon channel distribution: DS Parameter Set IE (tag 3) gives the primary channel.
     // Populated for Beacons only (ProbeResp may have a different DS channel). [§9.4.2.4]
-    if mac_hdr.subtype == SUBTYPE_BEACON {
-        if let Some(ch) = extract_ds_channel(ies) {
-            *stats.beacon_channels.entry(ch).or_insert(0) += 1;
-        }
+    if mac_hdr.subtype == SUBTYPE_BEACON
+        && let Some(ch) = extract_ds_channel(ies)
+    {
+        *stats.beacon_channels.entry(ch).or_insert(0) += 1;
     }
 
     // Extract SSID from IE id=0. [IEEE 802.11-2024] §9.4.2.3
@@ -181,45 +181,43 @@ pub fn process_beacon_or_probe_resp(
     // some vendor-default PSK derivations key off, so it is hex-encoded into
     // -W. The AP MAC itself is *not* seeded into -W -- it is a device
     // identifier, not password-equivalent text.
-    if populate_device || populate_wordlist {
-        if let Some(wps) = extract_wps_info(ies) {
-            if populate_wordlist {
-                for field in
-                    [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name]
-                {
-                    if !field.is_empty() {
-                        wordlist_store.insert(field.clone());
-                    }
-                }
-                if let Some(uuid) = wps.uuid_e.as_ref() {
-                    wordlist_store.insert(bytes_to_hex_string(uuid).into_bytes());
-                }
-                // Every other text- or credential-bearing WPS attribute the
-                // walker recognised. In a well-behaved capture this is empty;
-                // its purpose is to surface the cleartext PSK / OOB password
-                // / credential bundle that buggy vendor firmware sometimes
-                // leaks through Beacon / ProbeResp WPS bodies. See
-                // `parse_wps_body`.
-                for value in &wps.wordlist_values {
-                    wordlist_store.insert(value.clone());
+    if (populate_device || populate_wordlist)
+        && let Some(wps) = extract_wps_info(ies)
+    {
+        if populate_wordlist {
+            for field in [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name] {
+                if !field.is_empty() {
+                    wordlist_store.insert(field.clone());
                 }
             }
-            if populate_device {
-                let essid = essid_map.resolve(&mac_hdr.ap, timestamp_us).unwrap_or(&[]).to_vec();
-                device_store.push(DeviceInfoEntry {
-                    mac: mac_hdr.ap,
-                    manufacturer: wps.manufacturer,
-                    model_name: wps.model_name,
-                    model_number: wps.model_number,
-                    serial_number: wps.serial_number,
-                    device_name: wps.device_name,
-                    os_version: wps.os_version,
-                    primary_device_type: wps.primary_device_type,
-                    secondary_device_type_list: wps.secondary_device_type_list,
-                    uuid_e: wps.uuid_e,
-                    essid,
-                });
+            if let Some(uuid) = wps.uuid_e.as_ref() {
+                wordlist_store.insert(bytes_to_hex_string(uuid).into_bytes());
             }
+            // Every other text- or credential-bearing WPS attribute the
+            // walker recognised. In a well-behaved capture this is empty;
+            // its purpose is to surface the cleartext PSK / OOB password
+            // / credential bundle that buggy vendor firmware sometimes
+            // leaks through Beacon / ProbeResp WPS bodies. See
+            // `parse_wps_body`.
+            for value in &wps.wordlist_values {
+                wordlist_store.insert(value.clone());
+            }
+        }
+        if populate_device {
+            let essid = essid_map.resolve(&mac_hdr.ap, timestamp_us).unwrap_or(&[]).to_vec();
+            device_store.push(DeviceInfoEntry {
+                mac: mac_hdr.ap,
+                manufacturer: wps.manufacturer,
+                model_name: wps.model_name,
+                model_number: wps.model_number,
+                serial_number: wps.serial_number,
+                device_name: wps.device_name,
+                os_version: wps.os_version,
+                primary_device_type: wps.primary_device_type,
+                secondary_device_type_list: wps.secondary_device_type_list,
+                uuid_e: wps.uuid_e,
+                essid,
+            });
         }
     }
 
@@ -241,11 +239,11 @@ pub fn process_beacon_or_probe_resp(
     // Extracts admin-configured AP hostnames. [Wireshark packet-ieee80211.c]
     if populate_wordlist {
         for ie in iter_ies(ies) {
-            if ie.id == 221 {
-                if let Some(name) = extract_vendor_ap_name(ie.value) {
-                    wordlist_store.insert(name);
-                    stats.vendor_ap_names_extracted += 1;
-                }
+            if ie.id == 221
+                && let Some(name) = extract_vendor_ap_name(ie.value)
+            {
+                wordlist_store.insert(name);
+                stats.vendor_ap_names_extracted += 1;
             }
         }
     }

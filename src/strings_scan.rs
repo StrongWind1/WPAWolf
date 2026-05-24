@@ -56,20 +56,18 @@ pub fn extract_ascii_runs(buf: &[u8], min_len: usize) -> Vec<&[u8]> {
             if start.is_none() {
                 start = Some(i);
             }
-        } else if let Some(s) = start.take() {
-            if let Some(run) = buf.get(s..i) {
-                if run.len() >= min_len {
-                    runs.push(run);
-                }
-            }
+        } else if let Some(s) = start.take()
+            && let Some(run) = buf.get(s..i)
+            && run.len() >= min_len
+        {
+            runs.push(run);
         }
     }
-    if let Some(s) = start.take() {
-        if let Some(run) = buf.get(s..) {
-            if run.len() >= min_len {
-                runs.push(run);
-            }
-        }
+    if let Some(s) = start.take()
+        && let Some(run) = buf.get(s..)
+        && run.len() >= min_len
+    {
+        runs.push(run);
     }
     runs
 }

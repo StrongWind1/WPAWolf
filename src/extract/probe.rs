@@ -90,24 +90,22 @@ pub fn process_probe_req(
     // row never lands in -D. The text-bearing WPS columns plus UUID-E (hex)
     // are routed to -W. The STA MAC itself is *not* seeded -- it is a device
     // identifier, not password-equivalent text.
-    if populate_wordlist {
-        if let Some(wps) = extract_wps_info(body) {
-            for field in [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name] {
-                if !field.is_empty() {
-                    wordlist_store.insert(field.clone());
-                }
+    if populate_wordlist && let Some(wps) = extract_wps_info(body) {
+        for field in [&wps.manufacturer, &wps.model_name, &wps.model_number, &wps.serial_number, &wps.device_name] {
+            if !field.is_empty() {
+                wordlist_store.insert(field.clone());
             }
-            if let Some(uuid) = wps.uuid_e.as_ref() {
-                wordlist_store.insert(crate::types::bytes_to_hex_string(uuid).into_bytes());
-            }
-            // Every other text- or credential-bearing WPS attribute observed
-            // in this Probe Request body -- including any leaked Network Key
-            // / OOB Device Password / Credential bundle. See `parse_wps_body`.
-            for value in &wps.wordlist_values {
-                wordlist_store.insert(value.clone());
-            }
-            stats.wps_probe_req_extracted += 1;
         }
+        if let Some(uuid) = wps.uuid_e.as_ref() {
+            wordlist_store.insert(crate::types::bytes_to_hex_string(uuid).into_bytes());
+        }
+        // Every other text- or credential-bearing WPS attribute observed
+        // in this Probe Request body -- including any leaked Network Key
+        // / OOB Device Password / Credential bundle. See `parse_wps_body`.
+        for value in &wps.wordlist_values {
+            wordlist_store.insert(value.clone());
+        }
+        stats.wps_probe_req_extracted += 1;
     }
 
     // RSN IE PMKID extraction (S14/S15): rare but spec-valid when STA offers a

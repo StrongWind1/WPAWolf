@@ -349,7 +349,7 @@ where
         debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
         let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
         pairs_done.fetch_add(pairs.len(), Ordering::Relaxed);
-        if done % group_progress_interval() == 0 || done == total_groups {
+        if done.is_multiple_of(group_progress_interval()) || done == total_groups {
             debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
         }
         on_group(pairs);

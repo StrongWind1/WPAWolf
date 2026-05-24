@@ -872,19 +872,19 @@ pub fn garbage_pattern_kind(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 4 && bytes.iter().all(|&b| b == first) {
         return Some("repeat_1");
     }
-    if bytes.len() >= 4 && bytes.len() % 2 == 0 {
-        if let Some(p2) = bytes.get(..2) {
-            if bytes.chunks_exact(2).all(|c| c == p2) {
-                return Some("repeat_2");
-            }
-        }
+    if bytes.len() >= 4
+        && bytes.len().is_multiple_of(2)
+        && let Some(p2) = bytes.get(..2)
+        && bytes.chunks_exact(2).all(|c| c == p2)
+    {
+        return Some("repeat_2");
     }
-    if bytes.len() >= 8 && bytes.len() % 4 == 0 {
-        if let Some(p4) = bytes.get(..4) {
-            if bytes.chunks_exact(4).all(|c| c == p4) {
-                return Some("repeat_4");
-            }
-        }
+    if bytes.len() >= 8
+        && bytes.len().is_multiple_of(4)
+        && let Some(p4) = bytes.get(..4)
+        && bytes.chunks_exact(4).all(|c| c == p4)
+    {
+        return Some("repeat_4");
     }
     None
 }
