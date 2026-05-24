@@ -30,6 +30,7 @@ pub fn resolve_wds_eapol(
     pmkid_store: &mut PmkidStore,
     stats: &mut Stats,
     logger: &mut Logger,
+    mut cross_file_dedup: Option<&mut crate::output::dedup::CrossFileDedup>,
 ) {
     use std::collections::HashSet;
 
@@ -103,7 +104,18 @@ pub fn resolve_wds_eapol(
             }
         }
         if let Some(key) = eapol::parse(&p.body, resolved_dir) {
-            store_eapol_key(key, ap, sta, p.timestamp, akm_map, message_store, pmkid_store, stats, logger);
+            store_eapol_key(
+                key,
+                ap,
+                sta,
+                p.timestamp,
+                akm_map,
+                message_store,
+                pmkid_store,
+                stats,
+                logger,
+                cross_file_dedup.as_deref_mut(),
+            );
             match (resolved_dir, is_tier1b) {
                 (Some(_), true) => stats.eapol_tier1b_essid += 1,
                 (Some(_), false) => stats.eapol_tier2_ack_discovery += 1,
@@ -230,6 +242,7 @@ mod tests {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
+            None,
         );
 
         assert_eq!(stats.eapol_tier1b_essid, 1);
@@ -263,6 +276,7 @@ mod tests {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
+            None,
         );
 
         assert_eq!(stats.eapol_tier1b_essid, 1);
@@ -306,6 +320,7 @@ mod tests {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
+            None,
         );
 
         // M1: discovered via ACK=1 in first pass -> tier 2.
@@ -342,6 +357,7 @@ mod tests {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
+            None,
         );
 
         assert_eq!(stats.eapol_tier3_flag_fallback, 1);
@@ -358,7 +374,16 @@ mod tests {
         let mut stats = Stats::new();
 
         let mut logger = Logger::new(None).unwrap();
-        resolve_wds_eapol(&[], &essid_map, &mut akm_map, &mut msg_store, &mut pmkid_store, &mut stats, &mut logger);
+        resolve_wds_eapol(
+            &[],
+            &essid_map,
+            &mut akm_map,
+            &mut msg_store,
+            &mut pmkid_store,
+            &mut stats,
+            &mut logger,
+            None,
+        );
 
         assert_eq!(stats.eapol_tier1b_essid, 0);
         assert_eq!(stats.eapol_tier2_ack_discovery, 0);

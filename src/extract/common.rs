@@ -209,6 +209,7 @@ pub fn store_eapol_key(
     pmkid_store: &mut PmkidStore,
     stats: &mut Stats,
     logger: &mut Logger,
+    cross_file_dedup: Option<&mut crate::output::dedup::CrossFileDedup>,
 ) {
     // Extract FT fields (MDIE + FTIE subelements) from the EAPOL Key Data field.
     // Applies to M1/M2 for FT-PSK; M3 Key Data is encrypted so the IE iterator
@@ -379,6 +380,12 @@ pub fn store_eapol_key(
     stats.record_key_descriptor_version(key.key_version);
 
     let msg = EapolMessage::from_eapol_key(key, timestamp_us, akm, ft);
+    if let Some(cfd) = cross_file_dedup {
+        if !cfd.check_message(ap, sta, msg.msg_type, msg.akm, &msg.eapol_frame) {
+            stats.cross_file_dedup_skipped += 1;
+            return;
+        }
+    }
     message_store.add(ap, sta, msg);
 }
 
@@ -667,6 +674,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].akm, AkmType::Wpa1, "KDV=1 must route to Wpa1");
@@ -704,6 +712,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].akm, AkmType::Wpa2Psk);
@@ -733,6 +742,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].akm, AkmType::PskSha256, "KDV=3 with AKM 6 in IE must route to PskSha256");
@@ -761,6 +771,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         assert_eq!(pmkids.total_count(), 1, "M1 PMKID KDE must be stored");
         let entry = pmkids.iter().next().unwrap();
@@ -795,6 +806,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].akm, AkmType::Wpa1, "EAPOL still routes as Wpa1 (KDV=1)");
@@ -820,6 +832,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         assert_eq!(stats.eapol_m1, 1);
         assert_eq!(stats.eapol_m2, 0);
@@ -843,6 +856,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         assert_eq!(stats.eapol_kdv2, 1, "KDV=2 must increment kdv2 counter");
     }
@@ -896,6 +910,7 @@ mod tests {
             &mut pmkids,
             &mut stats,
             &mut logger,
+            None,
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].mic, MicBytes::from_24(mic24), "24-B MIC must be carried into the store unchanged");

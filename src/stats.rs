@@ -362,6 +362,8 @@ pub struct Stats {
     pub phase1_retroactive_thins: u64,
     /// Dedup set clears triggered by memory pressure during per-file emit.
     pub dedup_clears: u64,
+    /// EAPOL messages skipped by cross-file dedup (--per-file mode only).
+    pub cross_file_dedup_skipped: u64,
     /// EAPOL pairs written with `FLAG_NC` set (nonce-error-corrections active).
     pub pairs_nc: u64,
     /// EAPOL pairs written with `FLAG_LE` set (LE endianness correction applied).
@@ -1240,7 +1242,8 @@ impl Stats {
             + self.groups_thinned_5s
             + self.groups_thinned_subset
             + self.phase1_retroactive_thins
-            + self.dedup_clears;
+            + self.dedup_clears
+            + self.cross_file_dedup_skipped;
         if any_thinned > 0 {
             nz!("  adaptive thinning: groups thinned (30s window)", self.groups_thinned_30s);
             nz!("  adaptive thinning: groups thinned (5s window)", self.groups_thinned_5s);
@@ -1251,6 +1254,7 @@ impl Stats {
                 "  adaptive thinning: dedup set clears (memory pressure; cross-file dups may pass through)",
                 self.dedup_clears
             );
+            nz!("  cross-file message dedup: EAPOL messages skipped (--per-file)", self.cross_file_dedup_skipped);
         }
         nz!(
             "  ANonce M1/M3 mismatch sessions (diagnostic; both anchors emitted; spec §12.7.6.4)",

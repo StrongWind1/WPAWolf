@@ -38,6 +38,7 @@ pub fn process_data(
     pending_eapol: &mut Vec<PendingEapol>,
     fragment_store: &mut FragmentStore,
     logger: &mut Logger,
+    mut cross_file_dedup: Option<&mut crate::output::dedup::CrossFileDedup>,
 ) {
     // Count WPA/WEP encrypted data frames (Protected Frame bit set).
     // [IEEE 802.11-2024] §9.2.4.1.1 bit B14
@@ -197,6 +198,7 @@ pub fn process_data(
         wordlist_store,
         stats,
         logger,
+        cross_file_dedup.as_deref_mut(),
     );
     if mac_hdr.is_amsdu {
         stats.amsdu_frames_seen += 1;
@@ -215,6 +217,7 @@ pub fn process_data(
                 wordlist_store,
                 stats,
                 logger,
+                cross_file_dedup.as_deref_mut(),
             );
         }
     }
@@ -238,6 +241,7 @@ fn process_msdu_payload(
     wordlist_store: &mut WordlistStore,
     stats: &mut Stats,
     logger: &mut Logger,
+    cross_file_dedup: Option<&mut crate::output::dedup::CrossFileDedup>,
 ) {
     // --- Standard BSS EAPOL-Key path (Tier 1: direction-based) ---
     // Pre-check for invalid nonce/MIC values before full parse so stats can count them
@@ -288,7 +292,18 @@ fn process_msdu_payload(
         }
         stats.eapol_tier1_direction += 1;
 
-        store_eapol_key(key, mac_hdr.ap, mac_hdr.sta, timestamp_us, akm_map, message_store, pmkid_store, stats, logger);
+        store_eapol_key(
+            key,
+            mac_hdr.ap,
+            mac_hdr.sta,
+            timestamp_us,
+            akm_map,
+            message_store,
+            pmkid_store,
+            stats,
+            logger,
+            cross_file_dedup,
+        );
         return;
     }
     // LLC/SNAP gate said EAPOL/preauth EtherType AND the EAPOL Packet Type byte
@@ -438,6 +453,7 @@ mod tests {
             &mut world.pending_eapol,
             &mut world.fragment_store,
             &mut world.logger,
+            None,
         );
     }
 

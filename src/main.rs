@@ -26,7 +26,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
-    output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
+    output::{EssidFilterConfig, OutputPaths, dedup::CrossFileDedup, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
     stats::Stats,
@@ -445,6 +445,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut stats = Stats::new();
     let mut logger = Logger::new(cli.log.as_deref())?;
     let mut pending_eapol: Vec<PendingEapol> = Vec::new();
+    let mut cross_file_dedup = if cli.per_file { Some(CrossFileDedup::new()) } else { None };
     // Periodic stderr progress lines during Phase 1. On by default; `--quiet`
     // suppresses entirely. The closing stats banner is unaffected. See
     // `wpawolf::progress`.
@@ -716,6 +717,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                                 &mut pending_eapol,
                                 &mut fragment_store,
                                 &mut logger,
+                                cross_file_dedup.as_mut(),
                             );
                         },
                         _ => {},
@@ -792,6 +794,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     &mut pmkid_store,
                     &mut stats,
                     &mut logger,
+                    cross_file_dedup.as_mut(),
                 );
                 pending_eapol.clear();
             }
@@ -827,6 +830,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 if rss > threshold {
                     stats.dedup_clears += 1;
                     output_ctx.clear_dedup();
+                    if let Some(cfd) = cross_file_dedup.as_mut() {
+                        cfd.clear();
+                    }
                 }
             }
         }
@@ -854,6 +860,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
+            cross_file_dedup.as_mut(),
         );
         debug.wds_resolved(wds_count, 0);
     }
