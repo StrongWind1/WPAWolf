@@ -177,8 +177,19 @@ use crate::types::{MacPair, MsgType};
 /// Cost threshold below which thinning is never applied (group too small to matter).
 const THIN_COST_THRESHOLD: u64 = 50_000;
 
-/// Checks whether memory pressure warrants thinning, then applies staged
-/// session-window filters to a group's messages if needed.
+/// Groups whose pairing cost exceeds this are thinned unconditionally, regardless
+/// of current RSS. Prevents single-group O(n^2) blowups (e.g. rogue-AP
+/// captures with 20K+ M1/M2 per group) from attempting multi-GiB allocations
+/// while overall memory pressure is still low.
+const HARD_COST_CEILING: u64 = 25_000_000;
+
+/// Checks whether a group should be thinned, then applies staged session-window
+/// filters if needed.
+///
+/// Thinning fires on two independent triggers (either is sufficient):
+///   1. **Cost ceiling**: group cost >= `HARD_COST_CEILING` (unconditional).
+///   2. **Memory pressure**: group cost >= `THIN_COST_THRESHOLD` AND current RSS
+///      exceeds `--mem-limit` percent of system RAM.
 ///
 /// Returns `None` when no thinning was applied (the caller should use the
 /// original slice as-is), or `Some((filtered, result))` when filtering ran.
@@ -192,10 +203,15 @@ pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> Option
     if cost < THIN_COST_THRESHOLD {
         return None;
     }
-    let rss = current_rss_bytes();
-    let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
-    if rss < threshold {
-        return None;
+
+    let cost_forced = cost >= HARD_COST_CEILING;
+
+    if !cost_forced {
+        let rss = current_rss_bytes();
+        let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
+        if rss < threshold {
+            return None;
+        }
     }
 
     let before_count = messages.len();
@@ -217,6 +233,14 @@ pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> Option
     }
 
     let mut filtered = filtered_5s;
+    quality_subset_filter(&mut filtered);
+
+    let after_count = filtered.len();
+    Some((filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count }))
+}
+
+/// Keeps only the earliest 64 messages per type (M1/M2/M3/M4).
+fn quality_subset_filter(filtered: &mut Vec<EapolMessage>) {
     for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
         let typed_count = filtered.iter().filter(|m| m.msg_type == msg_type).count();
         if typed_count > 64 {
@@ -237,9 +261,6 @@ pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> Option
             });
         }
     }
-
-    let after_count = filtered.len();
-    Some((filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count }))
 }
 
 /// Folds `other` into `acc` in place: `collapsed_lines` and `cluster_count`

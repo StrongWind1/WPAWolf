@@ -37,7 +37,10 @@ pub struct Stats {
     pub eapol_m3: u64,
     /// EAPOL-Key M4 frames stored.
     pub eapol_m4: u64,
-    /// PMKIDs extracted (before dedup).
+    /// PMKID store insertions (pre-dedup). In `--per-file` mode this counts every
+    /// insertion across files, so the same PMKID appearing in N files is counted N
+    /// times. The emitted line count (after global dedup) is the authoritative
+    /// unique-PMKID number.
     pub pmkids_found: u64,
     /// Relay (WDS) data frames with EAPOL deferred for Phase 1.5 resolution.
     pub relay_frames: u64,
@@ -343,8 +346,6 @@ pub struct Stats {
 
     // --- RC / NC / endianness stats ---
     /// Maximum actual RC gap magnitude seen across useful pairs written to output.
-    /// Unfiltered (no --rc-drift), cross-session pairs can have very large gaps;
-    /// this is only displayed when it's within a plausible handshake range (< 2^16).
     pub rc_gap_max: u64,
     /// Whether `--rc-drift` was enabled for this run. Controls `rc_gap_max` display.
     pub rc_drift_enabled: bool,
@@ -1274,7 +1275,10 @@ impl Stats {
         nz!("  EAP-Failure frames (RFC 3748 §4.2)", self.eap_failure_frames);
 
         // PMKID extraction by source (S1-S20 from ARCHITECTURE.md §6).
-        stat!("PMKID found (total)", self.pmkids_found);
+        // In --per-file mode, the total counts every per-file insertion (the same
+        // PMKID re-seen across files is counted again). The emitted line count in
+        // Phase 4 is the authoritative unique number after global dedup.
+        stat!("PMKID store insertions (total, pre-dedup)", self.pmkids_found);
         nz!("  M1 Key Data KDE", self.pmkid_m1);
         nz!("  M2 RSN IE in Key Data", self.pmkid_m2);
         nz!("  Association Request RSN IE", self.pmkid_assoc_req);
@@ -1325,7 +1329,16 @@ impl Stats {
         nz!("  NC-dedup cluster count (--nc-dedup)", self.nc_dedup_cluster_count);
         nz!("  NC-dedup max cluster size (--nc-dedup)", self.nc_dedup_max_cluster_size);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
-            stat!("  RC gap max (suggested NC threshold)", self.rc_gap_max);
+            // Firmware bugs and replay-counter corruption in wild captures produce
+            // values like 2^56. Cap the display at 2^32 so the "suggested threshold"
+            // remains useful; show the raw max separately when it exceeds the cap.
+            const RC_GAP_SANE_LIMIT: u64 = 1 << 32;
+            if self.rc_gap_max <= RC_GAP_SANE_LIMIT {
+                stat!("  RC gap max (suggested NC threshold)", self.rc_gap_max);
+            } else {
+                stat!("  RC gap max (raw; firmware outlier)", self.rc_gap_max);
+                stat!("  RC gap max (suggested NC threshold)", "see --log for outlier source");
+            }
         }
 
         // PMKIDs found by AKM family (extraction-time tally, before dedup and
