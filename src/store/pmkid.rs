@@ -39,8 +39,9 @@ pub struct PmkidEntry {
     pub source: PmkidSource,
     /// AKM type for correct hash-line routing (22000 vs 37100).
     pub akm: AkmType,
-    /// FT fields, present only for FT-PSK PMKIDs.
-    pub ft: Option<FtFields>,
+    /// FT fields, present only for FT-PSK PMKIDs. Boxed because >99.9% of entries
+    /// are non-FT.
+    pub ft: Option<Box<FtFields>>,
 }
 
 // --- PmkidStore ---

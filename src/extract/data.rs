@@ -326,10 +326,10 @@ fn process_msdu_payload(
                 if cfg.populate_wordlist && !identity_bytes.is_empty() {
                     wordlist_store.insert(identity_bytes.clone());
                 }
-                if let Ok(s) = String::from_utf8(identity_bytes) {
-                    if !s.is_empty() {
-                        identity_set.insert(s);
-                    }
+                if let Ok(s) = String::from_utf8(identity_bytes)
+                    && !s.is_empty()
+                {
+                    identity_set.insert(s);
                 }
             }
             // -U (username) / -W (wordlist): only Response/Identity yields a
@@ -340,10 +340,10 @@ fn process_msdu_payload(
                 if cfg.populate_wordlist && !username_bytes.is_empty() {
                     wordlist_store.insert(username_bytes.clone());
                 }
-                if let Ok(s) = String::from_utf8(username_bytes) {
-                    if !s.is_empty() {
-                        username_set.insert(s);
-                    }
+                if let Ok(s) = String::from_utf8(username_bytes)
+                    && !s.is_empty()
+                {
+                    username_set.insert(s);
                 }
             }
         }

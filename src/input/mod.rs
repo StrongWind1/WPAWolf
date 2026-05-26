@@ -134,6 +134,15 @@ pub trait PacketReader {
 
     /// Returns file metadata for display in the stats summary header.
     fn file_metadata(&self) -> FileMetadata;
+
+    /// Returns a previously-owned packet data buffer for reuse by the next
+    /// `next_packet` call, avoiding a heap allocation per packet.
+    ///
+    /// Callers should pass the `Packet::data` Vec back after processing each
+    /// packet. Readers that support recycling keep the buffer's heap allocation
+    /// alive and reuse it for the next read. Readers that do not override this
+    /// method simply drop the buffer (no-op default).
+    fn recycle_buffer(&mut self, _buf: Vec<u8>) {}
 }
 
 // --- Format detection and dispatch ---

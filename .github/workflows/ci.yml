@@ -28,9 +28,9 @@ name: CI
 
 # Label each run in the Actions tab so CI / Security / Release runs are easy
 # to distinguish. Scheduled runs have no head_commit; fall back to ref name.
-run-name: "CI -- ${{ github.event.head_commit.message || github.ref_name }}"
+run-name: CI -- ${{ github.event.head_commit.message || github.ref_name }}
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -139,7 +139,7 @@ jobs:
     env:
       # Pinned oracle version. Bump when wpawolf is re-validated against a
       # newer hcxpcapngtool tag. Keep this >= the test's MIN_HCXPCAPNGTOOL.
-      HCXTOOLS_TAG: "7.1.2"
+      HCXTOOLS_TAG: 7.1.2
     steps:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -298,7 +298,7 @@ jobs:
       - name: cargo doc
         env:
           # Turns rustdoc warnings into errors so broken links fail CI.
-          RUSTDOCFLAGS: "-D warnings"
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc --all-features --no-deps
 
   # ---------------------------------------------------------------------------

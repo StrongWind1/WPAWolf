@@ -722,10 +722,10 @@ pub fn parse_mle_basic(value: &[u8]) -> Option<MleBasicInfo> {
 #[must_use]
 pub fn extract_mle_basic(tagged_params: &[u8]) -> Option<MleBasicInfo> {
     for ie in iter_ies(tagged_params) {
-        if ie.id == IE_ELEMENT_EXTENSION {
-            if let Some(info) = parse_mle_basic(ie.value) {
-                return Some(info);
-            }
+        if ie.id == IE_ELEMENT_EXTENSION
+            && let Some(info) = parse_mle_basic(ie.value)
+        {
+            return Some(info);
         }
     }
     None
@@ -939,12 +939,11 @@ pub fn extract_rnr_bssids(value: &[u8]) -> Vec<[u8; 6]> {
                 n if n >= 7 => Some(1usize),
                 _ => None,
             };
-            if let Some(off) = bssid_off {
-                if let Some(slice) = entry.get(off..off + 6) {
-                    if let Ok(arr) = <[u8; 6]>::try_from(slice) {
-                        out.push(arr);
-                    }
-                }
+            if let Some(off) = bssid_off
+                && let Some(slice) = entry.get(off..off + 6)
+                && let Ok(arr) = <[u8; 6]>::try_from(slice)
+            {
+                out.push(arr);
             }
             entry_pos = entry_end;
         }

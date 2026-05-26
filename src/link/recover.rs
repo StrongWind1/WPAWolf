@@ -190,25 +190,20 @@ pub fn recover(data: &[u8], dlt: u16) -> Option<RecoveryResult<'_>> {
     }
 
     // Tier 2: radiotap-specific -- compute offset from it_present.
-    if dlt == super::DLT_RADIOTAP && data.len() >= 8 {
-        if let Some(computed_offset) = compute_offset_from_present(data) {
-            if let Some(payload) = data.get(computed_offset..) {
-                if !payload.is_empty() {
-                    let fcs_valid = fcs::verify_crc32(payload);
-                    let frame = if fcs_valid {
-                        payload.get(..payload.len().saturating_sub(4)).unwrap_or(payload)
-                    } else {
-                        payload
-                    };
-                    return Some(RecoveryResult {
-                        frame,
-                        tier: RecoveryTier::ComputedFromPresent,
-                        offset: computed_offset,
-                        fcs_stripped: fcs_valid,
-                    });
-                }
-            }
-        }
+    if dlt == super::DLT_RADIOTAP
+        && data.len() >= 8
+        && let Some(computed_offset) = compute_offset_from_present(data)
+        && let Some(payload) = data.get(computed_offset..)
+        && !payload.is_empty()
+    {
+        let fcs_valid = fcs::verify_crc32(payload);
+        let frame = if fcs_valid { payload.get(..payload.len().saturating_sub(4)).unwrap_or(payload) } else { payload };
+        return Some(RecoveryResult {
+            frame,
+            tier: RecoveryTier::ComputedFromPresent,
+            offset: computed_offset,
+            fcs_stripped: fcs_valid,
+        });
     }
 
     // Tier 3: CRC-32 offset scan -- works for any DLT.

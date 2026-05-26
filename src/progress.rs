@@ -7,9 +7,8 @@
 //!
 //! `[progress] elapsed=<s> files=<n> packets=<n> eapol=<n> pmkids=<n> rss=<n>MiB`
 //!
-//! `rss` is omitted on platforms where the RSS lookup is not implemented
-//! (currently anything other than Linux). The closing Phase 1-5 stats banner is
-//! unaffected by this reporter.
+//! `rss` is populated via `sysinfo` (cross-platform: Linux, macOS, Windows).
+//! The closing Phase 1-5 stats banner is unaffected by this reporter.
 //!
 //! Cadence is hybrid: every 5 seconds **or** every 2 000 000 packets, whichever
 //! fires first. The packet check guards against single-file runs where wall
@@ -21,11 +20,6 @@
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-// `Read` trait is only used inside the Linux `current_rss_mib` cfg block
-// (the `/proc/self/statm` reader); on macOS / Windows the unused-imports lint
-// would otherwise reject the build. Gate the import to match the only call site.
-#[cfg(target_os = "linux")]
-use std::io::Read as _;
 use std::time::Instant;
 
 // --- Cadence thresholds ---
@@ -43,6 +37,15 @@ const ELAPSED_SECS_THRESHOLD: u64 = 5;
 /// check fires *before* the wall clock for a healthy run and we get a smooth
 /// stream of updates rather than a 5 s pulse-only cadence.
 const PACKETS_THRESHOLD: u64 = 2_000_000;
+
+/// Packet-count interval between wall-clock checks.
+///
+/// When `packet_delta < PACKETS_THRESHOLD` we must consult `Instant::elapsed()`
+/// to enforce the 5-second cadence, but calling it on every packet is a
+/// `clock_gettime` vDSO syscall that costs ~5% CPU on a 71M-packet corpus.
+/// Only probe the clock once per this many packets; at typical ingest rates
+/// 100k packets takes ~50 ms, well within the 5-second print window.
+const CLOCK_CHECK_INTERVAL: u64 = 100_000;
 
 /// Stderr-bound periodic progress reporter for the Phase 1 ingest loop.
 ///
@@ -90,7 +93,10 @@ impl ProgressReporter {
         // check is a syscall on most platforms, so only consult it when the
         // packet delta is below threshold (avoids the syscall on the hot path).
         let packet_delta = total_packets.saturating_sub(self.last_print_packets);
-        if packet_delta < PACKETS_THRESHOLD && self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD {
+        if packet_delta < PACKETS_THRESHOLD
+            && (!packet_delta.is_multiple_of(CLOCK_CHECK_INTERVAL)
+                || self.last_print.elapsed().as_secs() < ELAPSED_SECS_THRESHOLD)
+        {
             return;
         }
         self.emit(total_packets, files, eapol, pmkids);
@@ -125,35 +131,30 @@ impl ProgressReporter {
     }
 }
 
-/// Returns the current process's resident set size in MiB, or `None` when the
-/// platform does not expose a cheap probe.
-///
-/// Linux: reads `VmRSS:` from `/proc/self/status` which reports in KiB
-/// regardless of the kernel's page size (correct on both 4 KiB `x86_64` and
-/// 64 KiB `aarch64` pages). Other platforms return `None` so the caller omits
-/// the `rss=` field rather than printing a wrong value.
+/// Returns the current process's resident set size in bytes, or 0 when the
+/// platform probe fails. Cross-platform via `sysinfo`.
+#[must_use]
+pub fn current_rss_bytes() -> u64 {
+    let Ok(pid) = sysinfo::get_current_pid() else { return 0 };
+    let mut sys = sysinfo::System::new();
+    let refresh = sysinfo::ProcessRefreshKind::nothing().with_memory();
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), false, refresh);
+    sys.process(pid).map_or(0, sysinfo::Process::memory)
+}
+
+/// Returns the current process's RSS in MiB, or `None` when the probe fails.
 #[must_use]
 pub fn current_rss_mib() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        // /proc/self/status contains `VmRSS:  <N> kB` -- already in KiB,
-        // page-size-independent. Divide by 1024 for MiB.
-        let mut buf = String::new();
-        let mut f = std::fs::File::open("/proc/self/status").ok()?;
-        f.read_to_string(&mut buf).ok()?;
-        for line in buf.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kib: u64 =
-                    rest.trim().strip_suffix("kB").or_else(|| rest.trim().strip_suffix("KB"))?.trim().parse().ok()?;
-                return Some(kib / 1024);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    let bytes = current_rss_bytes();
+    if bytes > 0 { Some(bytes / (1024 * 1024)) } else { None }
+}
+
+/// Returns the total physical RAM in bytes. Cross-platform via `sysinfo`.
+#[must_use]
+pub fn total_ram_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    sys.total_memory()
 }
 
 // --- Unit tests ---
@@ -202,21 +203,28 @@ mod tests {
         // Backdate `last_print` by 6 seconds to simulate elapsed time.
         r.last_print = Instant::now().checked_sub(std::time::Duration::from_secs(6)).unwrap();
         let snap_packets = r.last_print_packets;
-        r.tick(1000, 1, 0, 0); // packet_delta=1000 < 2M, but elapsed > 5s
+        r.tick(CLOCK_CHECK_INTERVAL, 1, 0, 0); // packet_delta = CLOCK_CHECK_INTERVAL < 2M, but elapsed > 5s
         assert_ne!(r.last_print_packets, snap_packets, "time fallback should have triggered emit");
-        assert_eq!(r.last_print_packets, 1000);
+        assert_eq!(r.last_print_packets, CLOCK_CHECK_INTERVAL);
     }
 
     #[test]
-    fn current_rss_mib_returns_a_value_on_linux() {
-        // On a Linux build host this should always return Some(>0); on other
-        // platforms it returns None and we accept that.
+    fn current_rss_mib_returns_a_value() {
+        // sysinfo is cross-platform; should return Some(>0) on Linux/macOS/Windows.
         let r = current_rss_mib();
-        if cfg!(target_os = "linux") {
-            assert!(r.is_some(), "Linux should report RSS");
-            assert!(r.unwrap() > 0, "process must have non-zero RSS");
-        } else {
-            assert!(r.is_none(), "non-Linux platforms return None");
-        }
+        assert!(r.is_some(), "sysinfo should report RSS on this platform");
+        assert!(r.unwrap() > 0, "process must have non-zero RSS");
+    }
+
+    #[test]
+    fn total_ram_bytes_returns_nonzero() {
+        let ram = total_ram_bytes();
+        assert!(ram > 0, "total_ram_bytes must report non-zero physical RAM");
+    }
+
+    #[test]
+    fn current_rss_bytes_returns_nonzero() {
+        let rss = current_rss_bytes();
+        assert!(rss > 0, "current_rss_bytes must report non-zero RSS");
     }
 }

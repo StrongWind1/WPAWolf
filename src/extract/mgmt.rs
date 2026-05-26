@@ -119,10 +119,10 @@ pub fn process_mgmt(
             SUBTYPE_ACTION => Some(2),
             _ => None,
         };
-        if let Some(offset) = fixed {
-            if let Some(ies_bytes) = body.get(offset..) {
-                scan_ies_for_wordlist(ies_bytes, scan_ies_store, stats);
-            }
+        if let Some(offset) = fixed
+            && let Some(ies_bytes) = body.get(offset..)
+        {
+            scan_ies_for_wordlist(ies_bytes, scan_ies_store, stats);
         }
     }
 

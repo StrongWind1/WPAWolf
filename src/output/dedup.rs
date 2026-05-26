@@ -153,6 +153,16 @@ impl PerSinkDedup {
         Self::default()
     }
 
+    /// Pre-sizes every per-sink `HashSet` to hold at least `capacity` entries
+    /// without reallocating. Eliminates the transient memory spike from
+    /// hashbrown's power-of-2 resize doubling, where both old and new tables
+    /// are alive simultaneously during the copy.
+    pub fn reserve(&mut self, capacity: usize) {
+        for set in &mut self.sets {
+            set.reserve(capacity);
+        }
+    }
+
     /// Returns `true` if this PMKID entry is new for `sink` and records the fingerprint.
     pub fn check_pmkid(&mut self, sink: SinkId, entry: &PmkidEntry, essid: &[u8]) -> bool {
         let fp = pmkid_fingerprint(entry, essid);

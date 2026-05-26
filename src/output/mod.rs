@@ -17,10 +17,16 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
+/// Buffer capacity for all output `BufWriter`s (hash sinks + auxiliary files).
+///
+/// The default 8 KiB causes ~160k write syscalls per 1.3 GB output file. 64 KiB
+/// reduces that by 8x, cutting kernel overhead (`clear_page_rep`, `try_charge_memcg`,
+/// `rep_movs`) visible in the perf profile.
+const OUTPUT_BUF_CAPACITY: usize = 64 * 1024;
+
 use crate::debug::{DebugPrinter, emit_progress_interval};
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
-use crate::pair::pair_all_groups;
 use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 use crate::store::AkmMap;
 use crate::store::auxiliary::{
@@ -32,7 +38,7 @@ use crate::types::{AkmType, FtFields, HashType, Result};
 
 use self::dedup::{PerSinkDedup, SinkId};
 use self::device_info::write_device_info;
-use self::hashcat::{format_eapol_ft_line, format_eapol_line, format_pmkid_ft_line, format_pmkid_line};
+use self::hashcat::{format_eapol_body, format_eapol_ft_body, format_pmkid_ft_line, format_pmkid_line};
 use self::wordlists::{
     write_essid_list, write_identities, write_probe_essid_list, write_usernames, write_wordlist, write_wordlist_scan,
 };
@@ -216,7 +222,7 @@ impl LazySink {
     /// Returns a writable handle, creating (and truncating) the file on first call.
     fn writer(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
         if self.writer.is_none() {
-            self.writer = Some(BufWriter::new(std::fs::File::create(&self.path)?));
+            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(&self.path)?));
         }
         // The branch above guarantees Some.
         Ok(self.writer.as_mut().unwrap_or_else(|| unreachable!()))
@@ -332,23 +338,15 @@ enum FanItem<'a> {
     Eapol { pair: &'a PairedHash, ft: Option<&'a FtFields>, essid: &'a [u8] },
 }
 
-/// Builds the line text for a given `(item, sink, ht)` triple.
-///
-/// Legacy sinks use `ht.legacy_prefix()` plus -- for FT lines -- the FT-extra-field
-/// formatter. Taxonomy sinks use `ht.extended_prefix()`. PMKID rows of FT types route
-/// through the FT formatter to keep MDID+R0KH+R1KH appended. Non-FT rows route through
-/// the plain PMKID/EAPOL formatter.
-fn build_line(item: &FanItem<'_>, sink: SinkId, ht: HashType) -> String {
-    let prefix: &[u8] =
-        if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() };
-    match *item {
-        FanItem::Pmkid { entry, ft, essid } => ft.map_or_else(
-            || format_pmkid_line(prefix, entry, essid),
-            |ft| format_pmkid_ft_line(prefix, entry, ft, essid),
-        ),
-        FanItem::Eapol { pair, ft, essid } => ft
-            .map_or_else(|| format_eapol_line(prefix, pair, essid), |ft| format_eapol_ft_line(prefix, pair, ft, essid)),
-    }
+/// Returns the prefix for a given `(sink, ht)` pair.
+const fn prefix_for(sink: SinkId, ht: HashType) -> &'static [u8] {
+    if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() }
+}
+
+/// Builds a PMKID line for a given `(item, sink, ht)` triple.
+fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sink: SinkId, ht: HashType) -> String {
+    let prefix = prefix_for(sink, ht);
+    ft.map_or_else(|| format_pmkid_line(prefix, entry, essid), |ft| format_pmkid_ft_line(prefix, entry, ft, essid))
 }
 
 /// Fans one classified hash out to every configured sink that accepts it.
@@ -357,6 +355,10 @@ fn build_line(item: &FanItem<'_>, sink: SinkId, ht: HashType) -> String {
 /// configured AND its dedup accepted the fingerprint). The caller increments the
 /// `pmkids_written` / `pairs_written` logical counter exactly when this returns
 /// `true`. Per-sink line and dedup counters are bumped inside.
+///
+/// For EAPOL items, the hex body (everything after the 7-byte prefix) is built once
+/// and reused across all accepting sinks. This avoids redundant EAPOL-frame hex
+/// encoding and MIC-zeroing clones when a line fans out to 2-3 sinks.
 fn fan_out(
     sinks: &mut HashSinks,
     dedup: &mut PerSinkDedup,
@@ -364,8 +366,24 @@ fn fan_out(
     ht: HashType,
     item: FanItem<'_>,
 ) -> Result<bool> {
-    // Each candidate sink: legacy (skipped for SHA-384) + per-AKM-family + combined.
     let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
+
+    // Pre-build the EAPOL body once (prefix-independent) if any sink will accept it.
+    let eapol_body: Option<Vec<u8>> = match item {
+        FanItem::Eapol { pair, ft, essid } => {
+            let any_configured = candidates.iter().flatten().any(|&sink| {
+                let idx = sink.as_index();
+                sinks.sinks.get(idx).and_then(Option::as_ref).is_some()
+            });
+            if any_configured {
+                Some(ft.map_or_else(|| format_eapol_body(pair, essid), |ft| format_eapol_ft_body(pair, ft, essid)))
+            } else {
+                None
+            }
+        },
+        FanItem::Pmkid { .. } => None,
+    };
+
     let mut any_written = false;
     for sink in candidates.into_iter().flatten() {
         let idx = sink.as_index();
@@ -376,11 +394,21 @@ fn fan_out(
             FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
         };
         if accepted {
-            let line = build_line(&item, sink, ht);
-            // First write to a sink creates (and truncates) its file; subsequent
-            // writes reuse the same `BufWriter`. See `LazySink::writer`.
             let writer = lazy.writer()?;
-            writeln!(writer, "{line}")?;
+            match (&eapol_body, item) {
+                (Some(body), FanItem::Eapol { .. }) => {
+                    let prefix = prefix_for(sink, ht);
+                    writer.write_all(prefix)?;
+                    writer.write_all(body)?;
+                    writer.write_all(b"\n")?;
+                },
+                _ => {
+                    if let FanItem::Pmkid { entry, ft, essid } = item {
+                        let line = build_pmkid_line(entry, ft, essid, sink, ht);
+                        writeln!(writer, "{line}")?;
+                    }
+                },
+            }
             if let Some(c) = stats.lines_per_sink.get_mut(idx) {
                 *c += 1;
             }
@@ -547,6 +575,20 @@ impl OutputContext {
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
     ) -> Result<()> {
+        // Pre-size the dedup sets so hashbrown never resizes mid-run. Without
+        // this, a resize from 2^31 to 2^32 slots requires both tables to be
+        // alive simultaneously (54 GiB transient spike at ~2B entries).
+        let estimated_pairs = crate::pair::estimate_total_cost(message_store);
+        let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
+        if estimated_hashes > 0 {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
+            )]
+            let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
+            self.dedup.reserve(cap);
+        }
+
         self.emit_inner(
             message_store,
             pmkid_store,
@@ -641,94 +683,130 @@ impl OutputContext {
             }
         }
 
-        // --- Pipeline 2: EAPOL pairs ---
+        // --- Pipeline 2: EAPOL pairs (streaming fan-out) ---
         //
-        // Same multi-SSID logic as Pipeline 1. The ESSID is part of the EAPOL hash line
-        // (hashcat uses it to derive the PMK), so each unique SSID observed for the AP
-        // must produce a separate hash line. Dedup fingerprints include the ESSID field,
-        // so identical (pair + SSID) combinations are still deduplicated correctly.
-        let (all_pairs, nc_stats) = pair_all_groups(message_store, pair_config, thread_count, debug);
-        debug.phase4_pairs_generated(all_pairs.len());
-        // Accumulate across `emit` calls so `--per-file` runs report the
-        // total NC-dedup yield across every file's pair_all_groups pass
-        // rather than just the last file's. `collapsed_lines` and
-        // `cluster_count` are component-wise sums; `max_cluster_size`
-        // tracks the global maximum -- same merge rule as `merge_nc_stats`
-        // in `pair/mod.rs`.
-        stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
-        stats.nc_dedup_cluster_count += nc_stats.cluster_count;
-        stats.nc_dedup_max_cluster_size = stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+        // Same multi-SSID logic as Pipeline 1. Pairs are fanned out per-group
+        // inside the streaming callback, then dropped -- peak memory is one
+        // group's pairs at a time instead of the full cross-product.
         let pairs_written_before = stats.pairs_written;
         let dedup_dropped_before = stats.dedup_dropped;
-        if any_sink {
-            for (emit_idx, pair) in all_pairs.iter().enumerate() {
-                if debug.enabled && (emit_idx + 1) % emit_progress_interval() == 0 {
-                    debug.emit_progress(emit_idx + 1, all_pairs.len(), stats.pairs_written - pairs_written_before);
-                }
 
-                let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
-                let ssids = essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
-                let is_ft = ht.is_ft();
-
-                // For FT-PSK EAPOL pairs, only write when FT context is present (R0KH-ID required).
-                // [hcxpcapngtool:2351] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
-                let ft_ctx: Option<&FtFields> = if is_ft {
-                    match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                        Some(ft) => Some(ft),
-                        None => continue, // FT-PSK pair without FT context -- not crackable
-                    }
-                } else {
-                    None
-                };
-
-                // See pipeline 1 comment: a missing SSID makes the line uncrackable,
-                // so we drop the emission, record the AP for end-of-run logging, and
-                // move on. No fan-out, no per-sink line counter.
-                if ssids.is_empty() {
-                    *unresolved_drops.entry(pair.ap).or_insert(0) += 1;
-                    stats.essid_unresolved_emissions += 1;
-                    continue;
-                }
-
-                for essid in ssids {
-                    let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
-                    let written = fan_out(sinks, dedup, stats, ht, item)?;
-                    if written {
-                        stats.pairs_written += 1;
-                        *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
-
-                        // Per-combo / flag counters for the stats summary, bumped once per
-                        // logical pair that survived at least one sink's dedup.
-                        match pair.combo_type {
-                            ComboType::N1E2 => stats.n1e2 += 1,
-                            ComboType::N3E2 => stats.n3e2 += 1,
-                            ComboType::N1E4 => stats.n1e4 += 1,
-                            ComboType::N2E3 => stats.n2e3 += 1,
-                            ComboType::N4E3 => stats.n4e3 += 1,
-                            ComboType::N3E4 => stats.n3e4 += 1,
-                        }
-                        if pair.message_pair & FLAG_NC != 0 {
-                            stats.pairs_nc += 1;
-                        }
-                        if pair.message_pair & FLAG_LE != 0 {
-                            stats.pairs_le += 1;
-                        }
-                        if pair.message_pair & FLAG_BE != 0 {
-                            stats.pairs_be += 1;
-                        }
-                        stats.rc_gap_max = stats.rc_gap_max.max(pair.rc_gap_magnitude);
-                    } else {
-                        stats.dedup_dropped += 1;
-                    }
-                }
-            }
+        #[allow(clippy::items_after_statements, reason = "EmitState must be defined after Pipeline 1 borrows are used")]
+        struct EmitState<'a> {
+            sinks: &'a mut HashSinks,
+            dedup: &'a mut PerSinkDedup,
+            stats: &'a mut OutputStats,
+            unresolved_drops: &'a mut HashMap<crate::types::MacAddr, u64>,
+            first_error: Option<crate::types::Error>,
         }
+
+        let emit_state = std::sync::Mutex::new(EmitState { sinks, dedup, stats, unresolved_drops, first_error: None });
+        let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
+
+        let nc_stats =
+            crate::pair::pair_all_groups_streaming(message_store, pair_config, thread_count, debug, |pairs| {
+                if pairs.is_empty() {
+                    return;
+                }
+                let batch_len = pairs.len();
+                let mut guard = emit_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+                if guard.first_error.is_some() {
+                    return;
+                }
+
+                if any_sink {
+                    let EmitState { sinks: s, dedup: d, stats: st, unresolved_drops: ud, first_error } = &mut *guard;
+                    for pair in &pairs {
+                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
+                        let ssids =
+                            essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
+                        let is_ft = ht.is_ft();
+
+                        let ft_ctx: Option<&FtFields> = if is_ft {
+                            match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                                Some(ft) => Some(ft),
+                                None => continue,
+                            }
+                        } else {
+                            None
+                        };
+
+                        if ssids.is_empty() {
+                            *ud.entry(pair.ap).or_insert(0) += 1;
+                            st.essid_unresolved_emissions += 1;
+                            continue;
+                        }
+
+                        for essid in ssids {
+                            let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
+                            match fan_out(s, d, st, ht, item) {
+                                Ok(written) => {
+                                    if written {
+                                        st.pairs_written += 1;
+                                        *st.hash_type_emitted.entry(ht).or_insert(0) += 1;
+                                        match pair.combo_type {
+                                            ComboType::N1E2 => st.n1e2 += 1,
+                                            ComboType::N3E2 => st.n3e2 += 1,
+                                            ComboType::N1E4 => st.n1e4 += 1,
+                                            ComboType::N2E3 => st.n2e3 += 1,
+                                            ComboType::N4E3 => st.n4e3 += 1,
+                                            ComboType::N3E4 => st.n3e4 += 1,
+                                        }
+                                        if pair.message_pair & FLAG_NC != 0 {
+                                            st.pairs_nc += 1;
+                                        }
+                                        if pair.message_pair & FLAG_LE != 0 {
+                                            st.pairs_le += 1;
+                                        }
+                                        if pair.message_pair & FLAG_BE != 0 {
+                                            st.pairs_be += 1;
+                                        }
+                                        st.rc_gap_max = st.rc_gap_max.max(pair.rc_gap_magnitude);
+                                    } else {
+                                        st.dedup_dropped += 1;
+                                    }
+                                },
+                                Err(e) => {
+                                    *first_error = Some(e);
+                                    return;
+                                },
+                            }
+                        }
+                    }
+                }
+
+                let processed =
+                    total_pairs_processed.fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed) + batch_len;
+                if debug.enabled
+                    && processed / emit_progress_interval() != (processed - batch_len) / emit_progress_interval()
+                {
+                    debug.emit_progress(processed, 0, guard.stats.pairs_written.saturating_sub(pairs_written_before));
+                }
+            });
+
+        // Recover mutable state from the Mutex. The references point back into
+        // `self` -- they were moved in, not copied, so the compiler needs the
+        // destructure to release the borrows.
+        let es = emit_state.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(e) = es.first_error {
+            return Err(e);
+        }
+
+        // `es.stats` etc. are `&mut self.stats` etc. -- writing through them
+        // mutates `self` directly. No need to copy back.
+        es.stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
+        es.stats.nc_dedup_cluster_count += nc_stats.cluster_count;
+        es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+
+        let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
+        debug.phase4_pairs_generated(total_pairs);
         debug.emit_fan_out_done(
-            all_pairs.len(),
-            stats.pairs_written - pairs_written_before,
-            stats.dedup_dropped - dedup_dropped_before,
-            stats.nc_dedup_collapsed_lines,
-            stats.nc_dedup_cluster_count,
+            total_pairs,
+            es.stats.pairs_written - pairs_written_before,
+            es.stats.dedup_dropped - dedup_dropped_before,
+            es.stats.nc_dedup_collapsed_lines,
+            es.stats.nc_dedup_cluster_count,
         );
         Ok(())
     }
@@ -782,37 +860,37 @@ impl OutputContext {
         // file and the process would still exit `0`.
 
         if let Some(path) = &paths.essid_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_essid_list(essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.probe_essid_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_probe_essid_list(probe_essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist_scan {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_identities(identity_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.username_list {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_usernames(username_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.device_info {
-            let mut f = BufWriter::new(std::fs::File::create(path)?);
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
             write_device_info(device_store, &mut f)?;
             f.flush()?;
         }

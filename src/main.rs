@@ -4,7 +4,7 @@
 //! Phase 1 collects all EAPOL messages and PMKIDs from every input file into in-memory
 //! stores; Phase 2 pairs messages and writes output files. See `ARCHITECTURE.md §3`.
 //!
-//! Unfiltered by default: all 6 N#E# combinations, 10-minute session window, no
+//! Unfiltered by default: all 6 N#E# combinations, unlimited session window, no
 //! replay-counter check. Add output filter flags (`--rc-drift`, `--dedup-hash-combos`) to
 //! narrow output to only well-validated hashes. See `ARCHITECTURE.md §8.8 (FR-CLI)`.
 
@@ -15,6 +15,8 @@
 // so suppress the unused_crate_dependencies lint with the `as _` form.
 use crc32fast as _;
 use flate2 as _;
+use rayon as _;
+use sysinfo as _;
 
 use clap::Parser;
 
@@ -238,12 +240,6 @@ struct Cli {
     #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
     per_file: bool,
 
-    /// Cap stored messages per type per pair
-    ///
-    /// Limits M1/M2/M3/M4 independently per (AP, STA) group. Prevents OOM from rotating-nonce firmware. Set to 0 for unlimited.
-    #[arg(long, value_name = "N", default_value_t = 2048, help_heading = "Runtime", display_order = 33)]
-    max_eapol_per_type: usize,
-
     /// Print per-store memory footprint at end of run
     ///
     /// Approximate byte counts for every long-lived store (MessageStore, PmkidStore, EssidMap, etc.), sorted descending. For OOM triage.
@@ -368,11 +364,11 @@ fn strip_and_resolve<'a>(
 ) -> Option<&'a [u8]> {
     match link::strip(&packet.data, dlt) {
         Ok((payload, header_says_fcs)) => {
-            if dlt == link::DLT_RADIOTAP {
-                if let Some(v) = link::radiotap::version_warning(&packet.data) {
-                    stats.radiotap_version_nonzero += 1;
-                    logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
-                }
+            if dlt == link::DLT_RADIOTAP
+                && let Some(v) = link::radiotap::version_warning(&packet.data)
+            {
+                stats.radiotap_version_nonzero += 1;
+                logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
             }
             let badfcs = dlt == link::DLT_RADIOTAP && link::radiotap::has_badfcs(&packet.data);
             let outcome = link::fcs::resolve(payload, header_says_fcs, badfcs);
@@ -427,7 +423,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let debug = DebugPrinter::new(cli.debug);
 
     // --- Initialise stores ---
-    let mut message_store = MessageStore::with_per_type_cap(cli.max_eapol_per_type);
+    let mut message_store = MessageStore::new();
     let mut pmkid_store = PmkidStore::new();
     let mut fragment_store = FragmentStore::new();
     let mut essid_map = EssidMap::new();
@@ -470,6 +466,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             "no input capture files found (check paths and extensions)",
         )));
     }
+
+    // OOM guard: abort if RSS exceeds 80% of system RAM.
+    let oom_threshold_bytes = wpawolf::progress::total_ram_bytes() * 80 / 100;
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
     let pair_config = PairConfig {
@@ -574,7 +573,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
         loop {
             match reader.next_packet() {
-                Ok(Some(packet)) => {
+                Ok(Some(mut packet)) => {
                     stats.total_packets += 1;
                     // Periodic stderr progress line (no-op when --quiet). Cheap on the
                     // hot path: most calls return after a single u64 comparison.
@@ -711,6 +710,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         },
                         _ => {},
                     }
+
+                    reader.recycle_buffer(std::mem::take(&mut packet.data));
                 },
                 Ok(None) => break, // end of file
                 Err(e) => {
@@ -743,6 +744,20 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 message_store.group_count(),
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
+
+            // OOM guard: every 1000 files, check RSS and abort if approaching OOM.
+            if (file_idx + 1) % 1000 == 0 {
+                let rss = wpawolf::progress::current_rss_bytes();
+                if rss > oom_threshold_bytes {
+                    let rss_mib = rss / (1024 * 1024);
+                    let total_mib = wpawolf::progress::total_ram_bytes() / (1024 * 1024);
+                    println!(
+                        "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 1 ingestion (file {}/{total_inputs}). Reduce input size, use --per-file, or increase available RAM.",
+                        file_idx + 1
+                    );
+                    std::process::exit(1);
+                }
+            }
         }
 
         // --- Per-file emit (--per-file mode only) ---
@@ -916,12 +931,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     cost_low,
                     cost_medium,
                     cost_heavy,
-                    stats.eapol_type_saturated_dropped,
                 );
                 debug.top_groups(&summaries, total_groups);
-                if stats.eapol_type_saturated_dropped > 0 {
-                    debug.saturated_pairs_detail(message_store.type_saturated_iter());
-                }
             }
 
             debug.phase_start(4, "Emit");

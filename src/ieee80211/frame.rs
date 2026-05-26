@@ -260,10 +260,8 @@ pub fn parse(data: &[u8]) -> ParseResult {
         // Honoring B8 unconditionally caused 3-address EAPOL bodies whose Queue
         // Size happened to be odd to be misclassified as mesh frames and have a
         // phantom 6-byte mesh-control header stripped, mangling the EAPOL body.
-        if four_addr {
-            if let Some(&b_hi) = data.get(qos_offset + 1) {
-                mesh_control_present = (b_hi & 0x01) != 0;
-            }
+        if four_addr && let Some(&b_hi) = data.get(qos_offset + 1) {
+            mesh_control_present = (b_hi & 0x01) != 0;
         }
     }
 

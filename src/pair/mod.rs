@@ -10,6 +10,7 @@
 pub mod collapse;
 pub mod combos;
 pub mod constraints;
+
 pub mod nc_dedup;
 
 use std::sync::Arc;
@@ -82,8 +83,9 @@ pub struct PairedHash {
     pub message_pair: u8,
     /// AKM suite type -- determines output file (22000 vs 37100).
     pub akm: AkmType,
-    /// FT-PSK fields, present only for FT associations.
-    pub ft: Option<FtFields>,
+    /// FT-PSK fields, present only for FT associations. Boxed because >99.9% of
+    /// pairs are non-FT; saves 50 bytes per struct instance.
+    pub ft: Option<Box<FtFields>>,
     /// Absolute deviation of the actual RC delta from the expected delta for this combo.
     /// 0 = exact RC match, lower is better. Used by `--dedup-hash-combos` survivor
     /// selection: when two combos produce the same crackable hash, prefer the smaller gap.
@@ -93,8 +95,11 @@ pub struct PairedHash {
 
 // --- Orchestration ---
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+
+use rayon::prelude::*;
 
 use crate::debug::{DebugPrinter, HEAVY_GROUP_COST, group_progress_interval};
 use crate::pair::collapse::collapse;
@@ -116,30 +121,21 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
 /// Estimates the pairing cost of a single (AP, STA) group.
 ///
 /// Returns the total number of message-pair comparisons across all six N#E# combos.
-/// Used by `pair_all_groups` for LPT (Longest Processing Time) scheduling: groups
-/// with higher cost are assigned first so the heaviest group doesn't end up queued
-/// behind lighter groups on the same thread.
 #[must_use]
 pub fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
-    let (mut m1, mut m2, mut m3, mut m4) = (0u64, 0u64, 0u64, 0u64);
-    for msg in messages {
-        match msg.msg_type {
-            MsgType::M1 => m1 += 1,
-            MsgType::M2 => m2 += 1,
-            MsgType::M3 => m3 += 1,
-            MsgType::M4 => m4 += 1,
-        }
-    }
-    // Six combo cross-products: N1E2 + N1E4 + N3E2 + N2E3 + N4E3 + N3E4
-    m1 * m2 + m1 * m4 + m3 * m2 + m2 * m3 + m4 * m3 + m3 * m4
+    let (_, _, _, _, cost) = group_counts_and_cost(messages);
+    cost
+}
+
+/// Estimates the total pairing cost across all groups in a `MessageStore`.
+///
+/// Used to pre-size the dedup `HashSet` so hashbrown never resizes mid-run.
+#[must_use]
+pub fn estimate_total_cost(store: &MessageStore) -> u64 {
+    store.groups().map(|(_, msgs)| estimate_group_cost(msgs)).sum()
 }
 
 /// Pairs a single group: clone, sort, generate combos, collapse, NC-dedup.
-///
-/// Factored out so both the serial path and threaded workers share the same
-/// logic. Returns the pruned pair vec plus the NC-dedup stats triple; when
-/// `config.nc_dedup_enabled` is false the stats triple is zero and the pair
-/// vec is byte-identical to the pre-NC-dedup output.
 fn pair_one_group(
     mac_pair: &MacPair,
     messages: &[EapolMessage],
@@ -152,27 +148,94 @@ fn pair_one_group(
     nc_dedup(pairs, config)
 }
 
-/// Runs the full pairing pipeline over all (AP, STA) groups in `store`.
+/// Streaming pairing pipeline: pairs each group and delivers results via callback.
 ///
-/// When `thread_count > 1` and there are multiple groups, uses `std::thread::scope`
-/// to pair groups in parallel across `thread_count` worker threads. Groups are assigned
-/// to threads via LPT (Longest Processing Time First) round-robin scheduling to
-/// balance uneven workloads. Each thread returns its local `Vec<PairedHash>` and
-/// results are concatenated after all threads join.
+/// Instead of materializing all pairs across all groups into a single `Vec`, this
+/// function calls `on_group` once per group with that group's pairs. The caller
+/// can process and drop pairs immediately, bounding peak memory to one group's
+/// output at a time.
 ///
-/// Falls back to a serial loop when `thread_count == 1` or there is only one group.
+/// When `thread_count > 1`, uses rayon's work-stealing `par_iter` for parallel
+/// pairing. The `on_group` callback is serialized via a `Mutex` so I/O-bound
+/// fan-out (writing to `BufWriter`s) does not need to be thread-safe. Pairing
+/// itself runs fully parallel across cores.
 ///
-/// For each group:
-/// 1. Sorts messages by timestamp (ascending).
-/// 2. Calls `combos::generate` to try all six N#E# combinations.
-/// 3. Unless `config.all_combos`, calls `collapse::collapse` to deduplicate
-///    equivalence classes (up to 3 unique hashes per session).
-/// 4. When `config.nc_dedup_enabled`, calls `nc_dedup::nc_dedup` to fold
-///    near-identical-nonce siblings into one survivor.
-///
-/// Returns all `PairedHash` values across all groups plus the aggregate
-/// `NcDedupStats` (component-wise sum, max for `max_cluster_size`).
-/// See `ARCHITECTURE.md §5.5` and `§5.8.1`.
+/// Returns the aggregate `NcDedupStats` across all groups.
+pub fn pair_all_groups_streaming<F>(
+    store: &MessageStore,
+    config: &PairConfig,
+    thread_count: usize,
+    debug: &DebugPrinter,
+    on_group: F,
+) -> NcDedupStats
+where
+    F: Fn(Vec<PairedHash>) + Send + Sync,
+{
+    let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
+
+    if groups.is_empty() {
+        return NcDedupStats::default();
+    }
+
+    let total_groups = groups.len();
+    let groups_done = AtomicUsize::new(0);
+    let pairs_done = AtomicUsize::new(0);
+    let all_nc = Mutex::new(NcDedupStats::default());
+
+    let process_group = |mac_pair: &MacPair, messages: &[EapolMessage]| {
+        let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
+        debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
+        if cost >= HEAVY_GROUP_COST {
+            let ctx = format!(
+                "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
+                mac_pair.ap, mac_pair.sta
+            );
+            if let Some(pct_tenths) = debug.memory_check(&ctx)
+                && pct_tenths >= 800
+            {
+                let rss_mib = crate::progress::current_rss_mib().unwrap_or(0);
+                let total_mib = crate::progress::total_ram_bytes() / (1024 * 1024);
+                println!(
+                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size, use --per-file, or increase available RAM."
+                );
+                std::process::exit(1);
+            }
+        }
+        let t0 = Instant::now();
+        let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+        let elapsed_us = t0.elapsed().as_micros();
+        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+        let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
+        pairs_done.fetch_add(pairs.len(), Ordering::Relaxed);
+        if done.is_multiple_of(group_progress_interval()) || done == total_groups {
+            debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
+        }
+        on_group(pairs);
+        if let Ok(mut guard) = all_nc.lock() {
+            merge_nc_stats(&mut guard, nc);
+        }
+    };
+
+    if thread_count <= 1 {
+        for &(mac_pair, messages) in &groups {
+            process_group(mac_pair, messages);
+        }
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(thread_count).build().unwrap_or_else(|_| {
+            rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap_or_else(|_| unreachable!())
+        });
+        pool.install(|| {
+            groups.par_iter().for_each(|&(mac_pair, messages)| {
+                process_group(mac_pair, messages);
+            });
+        });
+    }
+
+    all_nc.into_inner().unwrap_or_default()
+}
+
+/// Collects all pairs into a `Vec`. Prefer `pair_all_groups_streaming` when
+/// peak memory matters -- this wrapper materializes the full pair set.
 #[must_use]
 pub fn pair_all_groups(
     store: &MessageStore,
@@ -180,125 +243,17 @@ pub fn pair_all_groups(
     thread_count: usize,
     debug: &DebugPrinter,
 ) -> (Vec<PairedHash>, NcDedupStats) {
-    let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
-
-    if groups.is_empty() {
-        return (Vec::new(), NcDedupStats::default());
-    }
-
-    let effective_threads = thread_count.max(1).min(groups.len());
-    let total_groups = groups.len();
-
-    // Atomic counters shared between the serial / parallel paths for the progress ticker.
-    // Relaxed ordering is fine: the ticker is display-only and does not gate correctness.
-    let groups_done = AtomicUsize::new(0);
-    let pairs_done = AtomicUsize::new(0);
-
-    // --- Serial fast path ---
-    if effective_threads <= 1 {
-        let mut all_pairs: Vec<PairedHash> = Vec::new();
-        let mut all_nc = NcDedupStats::default();
-        for &(mac_pair, messages) in &groups {
-            let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
-            debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
-            if cost >= HEAVY_GROUP_COST {
-                let _ = debug.memory_check(&format!(
-                    "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
-                    mac_pair.ap, mac_pair.sta
-                ));
-            }
-            let t0 = Instant::now();
-            let (pairs, nc) = pair_one_group(mac_pair, messages, config);
-            let elapsed_us = t0.elapsed().as_micros();
-            debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
-            let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
-            pairs_done.fetch_add(pairs.len(), Ordering::Relaxed);
-            if done % group_progress_interval() == 0 || done == total_groups {
-                debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
-            }
-            all_pairs.extend(pairs);
-            merge_nc_stats(&mut all_nc, nc);
+    let all_pairs = Mutex::new(Vec::<PairedHash>::new());
+    let nc = pair_all_groups_streaming(store, config, thread_count, debug, |pairs| {
+        if let Ok(mut guard) = all_pairs.lock() {
+            guard.extend(pairs);
         }
-        return (all_pairs, all_nc);
-    }
-
-    // --- Parallel path: LPT round-robin scheduling with std::thread::scope ---
-
-    // Estimate cost per group for load-balancing.
-    let mut indexed: Vec<(usize, u64)> =
-        groups.iter().enumerate().map(|(i, &(_, msgs))| (i, estimate_group_cost(msgs))).collect();
-    // Sort descending by cost (heaviest groups assigned first).
-    indexed.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.1));
-
-    // Round-robin assignment to thread buckets (LPT heuristic).
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); effective_threads];
-    for (rank, &(group_idx, _)) in indexed.iter().enumerate() {
-        if let Some(bucket) = buckets.get_mut(rank % effective_threads) {
-            bucket.push(group_idx);
-        }
-    }
-
-    // Spawn scoped threads -- each thread pairs its assigned groups and
-    // returns (pairs, nc_stats). Stats merge after join.
-    let groups_ref = &groups;
-    let groups_done_ref = &groups_done;
-    let pairs_done_ref = &pairs_done;
-    std::thread::scope(|s| {
-        let handles: Vec<_> = buckets
-            .iter()
-            .filter(|b| !b.is_empty())
-            .map(|bucket| {
-                s.spawn(move || {
-                    let mut local_pairs: Vec<PairedHash> = Vec::new();
-                    let mut local_nc = NcDedupStats::default();
-                    for &group_idx in bucket {
-                        let Some(&(mac_pair, messages)) = groups_ref.get(group_idx) else {
-                            continue;
-                        };
-                        let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
-                        debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
-                        if cost >= HEAVY_GROUP_COST {
-                            let _ = debug.memory_check(&format!(
-                                "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
-                                mac_pair.ap, mac_pair.sta
-                            ));
-                        }
-                        let t0 = Instant::now();
-                        let (pairs, nc) = pair_one_group(mac_pair, messages, config);
-                        let elapsed_us = t0.elapsed().as_micros();
-                        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
-                        let done = groups_done_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                        pairs_done_ref.fetch_add(pairs.len(), Ordering::Relaxed);
-                        if done % group_progress_interval() == 0 || done == total_groups {
-                            debug.group_progress(done, total_groups, pairs_done_ref.load(Ordering::Relaxed));
-                        }
-                        local_pairs.extend(pairs);
-                        merge_nc_stats(&mut local_nc, nc);
-                    }
-                    (local_pairs, local_nc)
-                })
-            })
-            .collect();
-
-        // Collect results from all threads.
-        let total_capacity: usize = handles.len() * 1024; // rough pre-alloc
-        let mut all_pairs: Vec<PairedHash> = Vec::with_capacity(total_capacity);
-        let mut all_nc = NcDedupStats::default();
-        for handle in handles {
-            // Thread body is pure computation (no indexing, no unwrap). Cannot panic.
-            if let Ok((pairs, nc)) = handle.join() {
-                all_pairs.extend(pairs);
-                merge_nc_stats(&mut all_nc, nc);
-            }
-        }
-        (all_pairs, all_nc)
-    })
+    });
+    let pairs = all_pairs.into_inner().unwrap_or_default();
+    (pairs, nc)
 }
 
 /// Returns `(m1, m2, m3, m4, cost)` for a message slice.
-///
-/// Extracted from `pair_all_groups` so both the serial and parallel paths share the
-/// same counting logic without duplicating the iteration.
 fn group_counts_and_cost(messages: &[EapolMessage]) -> (usize, usize, usize, usize, u64) {
     let (mut m1, mut m2, mut m3, mut m4) = (0usize, 0usize, 0usize, 0usize);
     for msg in messages {

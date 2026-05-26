@@ -11,7 +11,7 @@ resolver = "3"
 name = "wpawolf"
 version = "0.3.10"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100)"
 license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/WPAWolf"
@@ -104,6 +104,13 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 crc32fast = "1"
 # CLI argument parsing. Minimal feature set: no env, no yaml, no suggestions.
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
+# Parallel iteration for Phase 4 pairing. Replaces ~70 lines of manual
+# std::thread::scope + LPT scheduling with par_iter() and work-stealing.
+rayon = "1"
+# Cross-platform process RSS + total RAM queries. Replaces Linux-only
+# /proc/self/status and /proc/meminfo parsing with System::process(pid).memory()
+# and System::total_memory(). Works on Linux, macOS, and Windows.
+sysinfo = "0.39"
 
 # --- Lint policy ---
 [profile.dev]
@@ -121,6 +128,11 @@ panic = "abort"
 overflow-checks = true
 # Strip debug symbols from the release binary.
 strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
 
 [profile.test]
 # Overflow checks in tests to catch arithmetic bugs.

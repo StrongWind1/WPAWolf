@@ -11,7 +11,7 @@ use crate::stats::Stats;
 use crate::store::{
     AkmMap,
     essid::EssidMap,
-    messages::{Admission, EapolMessage, MessageStore},
+    messages::{EapolMessage, MessageStore},
     pmkid::{PmkidEntry, PmkidStore},
 };
 use crate::types::{AkmType, MacAddr, MsgType, PmkidSource};
@@ -213,7 +213,7 @@ pub fn store_eapol_key(
     // Extract FT fields (MDIE + FTIE subelements) from the EAPOL Key Data field.
     // Applies to M1/M2 for FT-PSK; M3 Key Data is encrypted so the IE iterator
     // returns None harmlessly. [IEEE 802.11-2024] §9.4.2.45-46; hcxpcapngtool gettags():3517
-    let ft = extract_ft_fields(&key.key_data);
+    let ft = extract_ft_fields(&key.key_data).map(Box::new);
 
     // Determine the AKM for this handshake from observed wire evidence rather than
     // trusting the AP's advertised AKM list. Priority:
@@ -321,7 +321,7 @@ pub fn store_eapol_key(
             pmkid,
             source: PmkidSource::M1KeyData,
             akm: pmkid_akm,
-            ft,
+            ft: ft.clone(),
         }) {
             stats.pmkids_found += 1;
             if pmkid_akm.is_ft() {
@@ -336,29 +336,29 @@ pub fn store_eapol_key(
     // M2 PMKID from embedded RSN IE in Key Data. [IEEE 802.11-2024] §12.7.2
     if key.msg_type == MsgType::M2 {
         for ie in iter_ies(&key.key_data) {
-            if ie.id == 48 {
-                if let Some(rsn) = parse_rsn_ie(ie.value) {
-                    for pmkid in rsn.pmkids {
-                        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
-                            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            if ie.id == 48
+                && let Some(rsn) = parse_rsn_ie(ie.value)
+            {
+                for pmkid in rsn.pmkids {
+                    if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+                        logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+                    }
+                    if pmkid_store.add(PmkidEntry {
+                        timestamp: timestamp_us,
+                        ap,
+                        sta,
+                        pmkid,
+                        source: PmkidSource::M2RsnIe,
+                        akm: pmkid_akm,
+                        ft: ft.clone(),
+                    }) {
+                        stats.pmkids_found += 1;
+                        if pmkid_akm.is_ft() {
+                            stats.pmkid_ft_psk += 1;
+                        } else {
+                            stats.pmkid_wpa2_psk += 1;
                         }
-                        if pmkid_store.add(PmkidEntry {
-                            timestamp: timestamp_us,
-                            ap,
-                            sta,
-                            pmkid,
-                            source: PmkidSource::M2RsnIe,
-                            akm: pmkid_akm,
-                            ft,
-                        }) {
-                            stats.pmkids_found += 1;
-                            if pmkid_akm.is_ft() {
-                                stats.pmkid_ft_psk += 1;
-                            } else {
-                                stats.pmkid_wpa2_psk += 1;
-                            }
-                            stats.pmkid_m2 += 1;
-                        }
+                        stats.pmkid_m2 += 1;
                     }
                 }
             }
@@ -379,12 +379,7 @@ pub fn store_eapol_key(
     stats.record_key_descriptor_version(key.key_version);
 
     let msg = EapolMessage::from_eapol_key(key, timestamp_us, akm, ft);
-    if let Admission::TypeSaturated { is_new_saturation } = message_store.add(ap, sta, msg) {
-        stats.eapol_type_saturated_dropped += 1;
-        if is_new_saturation {
-            logger.log_eapol_group_saturated(timestamp_us, ap, sta, msg_type, message_store.per_type_cap());
-        }
-    }
+    message_store.add(ap, sta, msg);
 }
 
 // --- Unit tests ---

@@ -193,11 +193,11 @@ fn parse_domain_name_list(body: &[u8], out: &mut Vec<Vec<u8>>) -> u64 {
         if value_end > body.len() {
             break; // truncated
         }
-        if let Some(name) = body.get(value_start..value_end) {
-            if !name.is_empty() {
-                out.push(name.to_vec());
-                count += 1;
-            }
+        if let Some(name) = body.get(value_start..value_end)
+            && !name.is_empty()
+        {
+            out.push(name.to_vec());
+            count += 1;
         }
         pos = value_end;
     }
@@ -243,11 +243,11 @@ fn parse_nai_realm(body: &[u8], out: &mut Vec<Vec<u8>>) -> u64 {
             let realm_len = usize::from(*realm_data.get(1).unwrap_or(&0));
             let realm_start = 2usize;
             let realm_end = realm_start.saturating_add(realm_len);
-            if let Some(realm) = realm_data.get(realm_start..realm_end) {
-                if !realm.is_empty() {
-                    out.push(realm.to_vec());
-                    count += 1;
-                }
+            if let Some(realm) = realm_data.get(realm_start..realm_end)
+                && !realm.is_empty()
+            {
+                out.push(realm.to_vec());
+                count += 1;
             }
         }
         pos = data_end;
@@ -301,11 +301,11 @@ fn parse_duples(body: &[u8], out: &mut Vec<Vec<u8>>) -> u64 {
             break;
         }
         let text_start = value_start + LANGUAGE_CODE_LEN;
-        if let Some(text) = body.get(text_start..value_end) {
-            if !text.is_empty() {
-                out.push(text.to_vec());
-                count += 1;
-            }
+        if let Some(text) = body.get(text_start..value_end)
+            && !text.is_empty()
+        {
+            out.push(text.to_vec());
+            count += 1;
         }
         pos = value_end;
     }

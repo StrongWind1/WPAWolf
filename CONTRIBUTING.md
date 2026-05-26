@@ -26,7 +26,7 @@ wpawolf/
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
 
-The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 746 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
+The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 904 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
 
 ## Before you open a PR
 
@@ -68,7 +68,7 @@ If hcxpcapngtool is missing or older than 7.0.1, the test prints a clearly-tagge
 
 ## Dependency additions
 
-Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 2 (`flate2`, `clap`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
+Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 4 (`flate2`, `clap`, `rayon`, `sysinfo`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
 
 ## Adding a capture fixture
 

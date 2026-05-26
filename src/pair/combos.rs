@@ -369,7 +369,7 @@ fn try_pair(
         mic: eapol_msg.mic,
         message_pair,
         akm: eapol_msg.akm,
-        ft: eapol_msg.ft,
+        ft: eapol_msg.ft.clone(),
         rc_gap_magnitude,
     })
 }

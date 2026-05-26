@@ -157,10 +157,10 @@ pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
         match ie.id {
             48 => {
                 // RSN IE [IEEE 802.11-2024] §9.4.2.24
-                if let Some(info) = parse_rsn_ie(ie.value) {
-                    if let Some(&akm) = info.akm_types.first() {
-                        rsn_akm = Some(akm);
-                    }
+                if let Some(info) = parse_rsn_ie(ie.value)
+                    && let Some(&akm) = info.akm_types.first()
+                {
+                    rsn_akm = Some(akm);
                 }
             },
             221 if wpa_akm.is_none() => {
@@ -171,12 +171,11 @@ pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
                 // (ARCHITECTURE.md §2) this is type 1 (WPA1-PSK-EAPOL), distinct from
                 // type 3 (WPA2-PSK-EAPOL) which the AKM 2 selector would otherwise imply.
                 // Map the inner WPA2-PSK to the dedicated AkmType::Wpa1 variant.
-                if let Some(body) = vendor_ie_body(&ie, OUI_WFA, WPA_IE_TYPE) {
-                    if let Some(info) = parse_wpa_ie(body) {
-                        if let Some(&akm) = info.akm_types.first() {
-                            wpa_akm = Some(if akm == AkmType::Wpa2Psk { AkmType::Wpa1 } else { akm });
-                        }
-                    }
+                if let Some(body) = vendor_ie_body(&ie, OUI_WFA, WPA_IE_TYPE)
+                    && let Some(info) = parse_wpa_ie(body)
+                    && let Some(&akm) = info.akm_types.first()
+                {
+                    wpa_akm = Some(if akm == AkmType::Wpa2Psk { AkmType::Wpa1 } else { akm });
                 }
             },
             _ => {},
@@ -388,67 +387,67 @@ pub fn detect_assoc_akm_flags(tagged_params: &[u8]) -> AssocAkmFlags {
             flags.wpa1 = true;
             continue;
         }
-        if ie.id == 48 {
-            if let Some(akm_types) = parse_rsn_ie_raw_akm_types(ie.value) {
-                for suite_type in akm_types {
-                    match suite_type {
-                        // Enterprise (802.1X / EAP) family, SHA-1-based PRFs.
-                        // AKM 1 = 802.1X, AKM 3 = FT-802.1X. [Table 9-190]
-                        1 | 3 => flags.enterprise_sha1 = true,
-                        // AKM 2: WPA2-PSK (HMAC-SHA1 PMKID, PRF-SHA1 PTK; hashcat mode 22000).
-                        2 => flags.psk = true,
-                        // AKM 4: FT-PSK (SHA-256 chain; hashcat mode 37100).
-                        4 => {
-                            flags.ft_psk = true;
-                            flags.ft_psk_sha256 = true;
-                        },
-                        // Enterprise SHA-256: AKM 5 = 802.1X-SHA256, AKM 11 = Suite B.
-                        5 | 11 => flags.enterprise_sha256 = true,
-                        // AKM 6: PSK-SHA256 (KDF-SHA256 PTK, AES-CMAC MIC; hashcat mode 22000).
-                        6 => {
-                            flags.psk_sha256 = true;
-                            flags.psk_sha256_only = true;
-                        },
-                        // TDLS peer-key (AKM 7). [§12.7.5]
-                        7 => flags.tdls = true,
-                        // WPA3-SAE family including FT-SAE (9) and SAE-EXT-KEY (24, 25). [§12.4]
-                        8 | 9 | 24 | 25 => flags.sae = true,
-                        // APPeerKey (AKM 10) -- deprecated but still observable.
-                        10 => flags.appeerkey = true,
-                        // Enterprise SHA-384: AKM 12 (Suite B 384), 13 (FT-802.1X-SHA384),
-                        // 22 (802.1X-SHA384), 23 (FT-802.1X-SHA384 alt). [Table 9-190]
-                        12 | 13 | 22 | 23 => flags.enterprise_sha384 = true,
-                        // FILS: AKM 14 (FILS-SHA256), 15 (FILS-SHA384),
-                        // 16 (FT-FILS-SHA256), 17 (FT-FILS-SHA384). [§12.11, Table 9-190]
-                        14..=17 => flags.fils = true,
-                        18 => flags.owe = true,
-                        // AKM 19: FT-PSK-SHA384 (no hashcat module; output suppressed).
-                        19 => {
-                            flags.ft_psk = true;
-                            flags.ft_psk_sha384 = true;
-                        },
-                        // AKM 20: PSK-SHA384 (no hashcat module; output suppressed).
-                        20 => {
-                            flags.psk_sha256 = true;
-                            flags.psk_sha384 = true;
-                        },
-                        // PASN: AKM 21 (Pre-Association Security Negotiation).
-                        // [IEEE 802.11-2024] §12.13, Table 9-190.
-                        21 => flags.pasn = true,
-                        // Unknown / reserved / future AKM type -- never drop silently.
-                        other => {
-                            flags.akm_unknown = true;
-                            if flags.first_unknown_akm.is_none() {
-                                flags.first_unknown_akm = Some(other);
-                            }
-                        },
-                    }
+        if ie.id == 48
+            && let Some(akm_types) = parse_rsn_ie_raw_akm_types(ie.value)
+        {
+            for suite_type in akm_types {
+                match suite_type {
+                    // Enterprise (802.1X / EAP) family, SHA-1-based PRFs.
+                    // AKM 1 = 802.1X, AKM 3 = FT-802.1X. [Table 9-190]
+                    1 | 3 => flags.enterprise_sha1 = true,
+                    // AKM 2: WPA2-PSK (HMAC-SHA1 PMKID, PRF-SHA1 PTK; hashcat mode 22000).
+                    2 => flags.psk = true,
+                    // AKM 4: FT-PSK (SHA-256 chain; hashcat mode 37100).
+                    4 => {
+                        flags.ft_psk = true;
+                        flags.ft_psk_sha256 = true;
+                    },
+                    // Enterprise SHA-256: AKM 5 = 802.1X-SHA256, AKM 11 = Suite B.
+                    5 | 11 => flags.enterprise_sha256 = true,
+                    // AKM 6: PSK-SHA256 (KDF-SHA256 PTK, AES-CMAC MIC; hashcat mode 22000).
+                    6 => {
+                        flags.psk_sha256 = true;
+                        flags.psk_sha256_only = true;
+                    },
+                    // TDLS peer-key (AKM 7). [§12.7.5]
+                    7 => flags.tdls = true,
+                    // WPA3-SAE family including FT-SAE (9) and SAE-EXT-KEY (24, 25). [§12.4]
+                    8 | 9 | 24 | 25 => flags.sae = true,
+                    // APPeerKey (AKM 10) -- deprecated but still observable.
+                    10 => flags.appeerkey = true,
+                    // Enterprise SHA-384: AKM 12 (Suite B 384), 13 (FT-802.1X-SHA384),
+                    // 22 (802.1X-SHA384), 23 (FT-802.1X-SHA384 alt). [Table 9-190]
+                    12 | 13 | 22 | 23 => flags.enterprise_sha384 = true,
+                    // FILS: AKM 14 (FILS-SHA256), 15 (FILS-SHA384),
+                    // 16 (FT-FILS-SHA256), 17 (FT-FILS-SHA384). [§12.11, Table 9-190]
+                    14..=17 => flags.fils = true,
+                    18 => flags.owe = true,
+                    // AKM 19: FT-PSK-SHA384 (no hashcat module; output suppressed).
+                    19 => {
+                        flags.ft_psk = true;
+                        flags.ft_psk_sha384 = true;
+                    },
+                    // AKM 20: PSK-SHA384 (no hashcat module; output suppressed).
+                    20 => {
+                        flags.psk_sha256 = true;
+                        flags.psk_sha384 = true;
+                    },
+                    // PASN: AKM 21 (Pre-Association Security Negotiation).
+                    // [IEEE 802.11-2024] §12.13, Table 9-190.
+                    21 => flags.pasn = true,
+                    // Unknown / reserved / future AKM type -- never drop silently.
+                    other => {
+                        flags.akm_unknown = true;
+                        if flags.first_unknown_akm.is_none() {
+                            flags.first_unknown_akm = Some(other);
+                        }
+                    },
                 }
             }
-            // Only one RSN IE per frame [IEEE 802.11-2024] §9.4.2.24, but the
-            // outer loop must keep walking IEs to find the WPA1 vendor IE if
-            // present (mixed-mode WPA1+WPA2 beacons advertise both).
         }
+        // Only one RSN IE per frame [IEEE 802.11-2024] §9.4.2.24, but the
+        // outer loop must keep walking IEs to find the WPA1 vendor IE if
+        // present (mixed-mode WPA1+WPA2 beacons advertise both).
     }
     flags
 }
@@ -490,10 +489,10 @@ fn parse_rsn_ie_raw_akm_types(value: &[u8]) -> Option<Vec<u8>> {
         }
         let Some(suite) = value.get(pos..pos + 4) else { break };
         // Only collect IEEE 802.11 defined AKM suites (OUI 00:0F:AC). [Table 9-190]
-        if suite.get(..3) == Some(&OUI_IEEE) {
-            if let Some(&t) = suite.get(3) {
-                types.push(t);
-            }
+        if suite.get(..3) == Some(&OUI_IEEE)
+            && let Some(&t) = suite.get(3)
+        {
+            types.push(t);
         }
         pos += 4;
     }

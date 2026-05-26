@@ -13,23 +13,7 @@
 
 use crate::pair::PairedHash;
 use crate::store::pmkid::PmkidEntry;
-use crate::types::{FtFields, encode_hex};
-
-// --- MIC zeroing ---
-
-/// Returns a copy of `eapol_frame` with the Key MIC field set to all-zero bytes.
-///
-/// The Key MIC starts at byte 81 of the EAPOL frame and is 16 bytes wide for AKMs
-/// 1-6, 8, 9, 11 or 24 bytes wide for AKMs 12, 13, 19, 20, 22, 23 (the SHA-384 /
-/// Suite-B family). Hashcat requires the MIC to be cleared before computing the hash.
-/// Per `ARCHITECTURE.md §5` and [IEEE 802.11-2024] §12.7.2 Table 12-11.
-fn eapol_with_mic_zeroed(eapol_frame: &[u8], mic_len: usize) -> Vec<u8> {
-    let mut frame = eapol_frame.to_vec();
-    if let Some(mic_field) = frame.get_mut(81..81 + mic_len) {
-        mic_field.fill(0);
-    }
-    frame
-}
+use crate::types::{FtFields, encode_hex, encode_hex_mic_zeroed};
 
 // --- Public formatters ---
 
@@ -119,12 +103,13 @@ pub fn format_eapol_37100(pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> Str
 ///
 /// Used by the new 11-type extended sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
 /// which write `WPA*07*` / `WPA*11*` instead of the legacy `WPA*04*`.
+/// Builds the FT EAPOL line body (everything after the 7-byte prefix) into a `Vec<u8>`.
+///
+/// Includes MDID, R0KH-ID, and R1KH-ID FT fields after the `message_pair` byte.
 #[must_use]
-pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> String {
-    let zeroed = eapol_with_mic_zeroed(&pair.eapol_frame, pair.mic.len());
-    let capacity = 150 + essid.len() * 2 + zeroed.len() * 2 + usize::from(ft.r0khid_len) * 2;
+pub fn format_eapol_ft_body(pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> Vec<u8> {
+    let capacity = 143 + essid.len() * 2 + pair.eapol_frame.len() * 2 + usize::from(ft.r0khid_len) * 2;
     let mut out: Vec<u8> = Vec::with_capacity(capacity);
-    out.extend_from_slice(prefix);
     encode_hex(pair.mic.as_slice(), &mut out);
     out.push(b'*');
     encode_hex(&pair.ap.0, &mut out);
@@ -135,9 +120,7 @@ pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, ess
     out.push(b'*');
     encode_hex(&pair.nonce, &mut out);
     out.push(b'*');
-    encode_hex(&zeroed, &mut out);
-    // "*{mp}*{mdid}*{r0khid}*{r1khid}"
-    // [hcxpcapngtool:2368] "*%02x*%04x*" followed by r0khid, "*", r1khid
+    encode_hex_mic_zeroed(&pair.eapol_frame, pair.mic.len(), &mut out);
     out.push(b'*');
     encode_hex(&[pair.message_pair], &mut out);
     out.push(b'*');
@@ -149,6 +132,16 @@ pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, ess
     }
     out.push(b'*');
     encode_hex(&ft.r1khid, &mut out);
+    out
+}
+
+/// Builds a complete FT EAPOL hash line with the given prefix.
+#[must_use]
+pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> String {
+    let body = format_eapol_ft_body(pair, ft, essid);
+    let mut out = Vec::with_capacity(prefix.len() + body.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(&body);
     String::from_utf8(out).unwrap_or_default()
 }
 
@@ -253,13 +246,14 @@ pub fn format_pmkid_line(prefix: &[u8], entry: &PmkidEntry, essid: &[u8]) -> Str
 /// extended sinks (non-FT rows). The EAPOL frame is copied and the MIC bytes zeroed
 /// before hex-encoding; the original `PairedHash` is not modified. `message_pair`
 /// is encoded as exactly two hex characters.
+/// Builds the EAPOL line body (everything after the 7-byte prefix) into a `Vec<u8>`.
+///
+/// Returned body is reusable across sinks that differ only in prefix. Uses
+/// `encode_hex_mic_zeroed` to avoid cloning the EAPOL frame.
 #[must_use]
-pub fn format_eapol_line(prefix: &[u8], pair: &PairedHash, essid: &[u8]) -> String {
-    let zeroed = eapol_with_mic_zeroed(&pair.eapol_frame, pair.mic.len());
-    // WPA*02*: 7 + (32 or 48) + 1 + 12 + 1 + 12 + 1 + essid*2 + 1 + 64 + 1 + eapol*2 + 1 + 2
-    let capacity = 135 + pair.mic.len() * 2 + essid.len() * 2 + zeroed.len() * 2;
+pub fn format_eapol_body(pair: &PairedHash, essid: &[u8]) -> Vec<u8> {
+    let capacity = 128 + pair.mic.len() * 2 + essid.len() * 2 + pair.eapol_frame.len() * 2;
     let mut out: Vec<u8> = Vec::with_capacity(capacity);
-    out.extend_from_slice(prefix);
     encode_hex(pair.mic.as_slice(), &mut out);
     out.push(b'*');
     encode_hex(&pair.ap.0, &mut out);
@@ -270,12 +264,19 @@ pub fn format_eapol_line(prefix: &[u8], pair: &PairedHash, essid: &[u8]) -> Stri
     out.push(b'*');
     encode_hex(&pair.nonce, &mut out);
     out.push(b'*');
-    encode_hex(&zeroed, &mut out);
+    encode_hex_mic_zeroed(&pair.eapol_frame, pair.mic.len(), &mut out);
     out.push(b'*');
-    // message_pair as exactly 2 hex characters (one byte).
     encode_hex(&[pair.message_pair], &mut out);
-    // encode_hex writes only ASCII bytes from HEX_TABLE (b"0123456789abcdef").
-    // from_utf8 cannot fail; unwrap_or_default returns "" on the unreachable Err branch.
+    out
+}
+
+/// Builds a complete EAPOL hash line with the given prefix.
+#[must_use]
+pub fn format_eapol_line(prefix: &[u8], pair: &PairedHash, essid: &[u8]) -> String {
+    let body = format_eapol_body(pair, essid);
+    let mut out = Vec::with_capacity(prefix.len() + body.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(&body);
     String::from_utf8(out).unwrap_or_default()
 }
 
@@ -358,44 +359,65 @@ mod tests {
         }
     }
 
-    // --- MIC-zeroing ---
+    // --- MIC-zeroing (via encode_hex_mic_zeroed) ---
+
+    fn hex_decode(hex: &[u8]) -> Vec<u8> {
+        hex.chunks_exact(2)
+            .map(|pair| {
+                let hi = match pair[0] {
+                    b'0'..=b'9' => pair[0] - b'0',
+                    b'a'..=b'f' => pair[0] - b'a' + 10,
+                    _ => 0,
+                };
+                let lo = match pair[1] {
+                    b'0'..=b'9' => pair[1] - b'0',
+                    b'a'..=b'f' => pair[1] - b'a' + 10,
+                    _ => 0,
+                };
+                (hi << 4) | lo
+            })
+            .collect()
+    }
 
     #[test]
-    fn eapol_with_mic_zeroed_short_frame() {
-        // Frames shorter than 97 bytes must not panic; zeroing is skipped.
+    fn encode_hex_mic_zeroed_short_frame() {
         let frame = vec![0xFFu8; 80];
-        let result = eapol_with_mic_zeroed(&frame, 16);
-        assert_eq!(result, frame, "short frame must be returned unchanged");
+        let mut out = Vec::new();
+        encode_hex_mic_zeroed(&frame, 16, &mut out);
+        let decoded = hex_decode(&out);
+        assert_eq!(decoded, frame, "short frame must be returned unchanged");
     }
 
     #[test]
-    fn eapol_with_mic_zeroed_exact_boundary() {
-        // Frame of exactly 97 bytes: bytes 81-96 (indices 81..97) should be zero.
+    fn encode_hex_mic_zeroed_exact_boundary() {
         let frame = vec![0xFFu8; 97];
-        let result = eapol_with_mic_zeroed(&frame, 16);
-        assert!(result[..81].iter().all(|&b| b == 0xFF));
-        assert!(result[81..97].iter().all(|&b| b == 0x00));
+        let mut out = Vec::new();
+        encode_hex_mic_zeroed(&frame, 16, &mut out);
+        let decoded = hex_decode(&out);
+        assert!(decoded[..81].iter().all(|&b| b == 0xFF));
+        assert!(decoded[81..97].iter().all(|&b| b == 0x00));
     }
 
     #[test]
-    fn eapol_with_mic_zeroed_longer_frame() {
-        // Only the 16-byte MIC window must be zeroed; surrounding bytes unchanged.
+    fn encode_hex_mic_zeroed_longer_frame() {
         let frame = vec![0xFFu8; 200];
-        let result = eapol_with_mic_zeroed(&frame, 16);
-        assert!(result[..81].iter().all(|&b| b == 0xFF));
-        assert!(result[81..97].iter().all(|&b| b == 0x00));
-        assert!(result[97..].iter().all(|&b| b == 0xFF));
+        let mut out = Vec::new();
+        encode_hex_mic_zeroed(&frame, 16, &mut out);
+        let decoded = hex_decode(&out);
+        assert!(decoded[..81].iter().all(|&b| b == 0xFF));
+        assert!(decoded[81..97].iter().all(|&b| b == 0x00));
+        assert!(decoded[97..].iter().all(|&b| b == 0xFF));
     }
 
     #[test]
-    fn eapol_with_mic_zeroed_24_byte_window() {
-        // SHA-384-family frame: 24-byte MIC at offset 81..105 must be zeroed,
-        // and bytes outside that window must be preserved untouched.
+    fn encode_hex_mic_zeroed_24_byte_window() {
         let frame = vec![0xFFu8; 200];
-        let result = eapol_with_mic_zeroed(&frame, 24);
-        assert!(result[..81].iter().all(|&b| b == 0xFF));
-        assert!(result[81..105].iter().all(|&b| b == 0x00), "24 B MIC window must be zero");
-        assert!(result[105..].iter().all(|&b| b == 0xFF));
+        let mut out = Vec::new();
+        encode_hex_mic_zeroed(&frame, 24, &mut out);
+        let decoded = hex_decode(&out);
+        assert!(decoded[..81].iter().all(|&b| b == 0xFF));
+        assert!(decoded[81..105].iter().all(|&b| b == 0x00), "24 B MIC window must be zero");
+        assert!(decoded[105..].iter().all(|&b| b == 0xFF));
     }
 
     #[test]
@@ -507,10 +529,10 @@ mod tests {
         let copy_len = r0khid.len().min(48);
         // copy_len <= 48 always fits in u8; unwrap_or is unreachable but satisfies the lint.
         f.r0khid_len = u8::try_from(copy_len).unwrap_or(48);
-        if let Some(dst) = f.r0khid.get_mut(..copy_len) {
-            if let Some(src) = r0khid.get(..copy_len) {
-                dst.copy_from_slice(src);
-            }
+        if let Some(dst) = f.r0khid.get_mut(..copy_len)
+            && let Some(src) = r0khid.get(..copy_len)
+        {
+            dst.copy_from_slice(src);
         }
         f
     }

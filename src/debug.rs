@@ -29,7 +29,7 @@
 use std::io::Write as _;
 use std::time::Instant;
 
-use crate::types::{MacAddr, MacPair, MsgType};
+use crate::types::{MacAddr, MsgType};
 
 // --- Constants ---
 
@@ -170,7 +170,6 @@ impl DebugPrinter {
         cost_low: usize,
         cost_medium: usize,
         cost_heavy: usize,
-        saturated_dropped: u64,
     ) {
         if !self.enabled {
             return;
@@ -182,26 +181,6 @@ impl DebugPrinter {
         self.emit(&format!(
             "  cost tiers:  zero={cost_zero}  low(1-999)={cost_low}  medium(1k-49k)={cost_medium}  heavy(>=50k)={cost_heavy}"
         ));
-        if saturated_dropped > 0 {
-            self.emit(&format!("  per-type cap: {saturated_dropped} frames dropped (--max-eapol-per-type cap hit)"));
-        }
-    }
-
-    /// Lists each (AP, STA, `msg_type`) combo that hit the per-type cap.
-    ///
-    /// Call after `pre_phase4_store_summary` when `saturated_dropped > 0`. Pinpoints
-    /// the exact APs with rotating-ANonce or high-retransmit behaviour that triggered
-    /// the cap, so the operator can cross-reference with the top-groups survey.
-    #[allow(single_use_lifetimes, reason = "impl Trait requires named lifetime on stable")]
-    pub fn saturated_pairs_detail<'a>(&self, pairs: impl Iterator<Item = (&'a MacPair, MsgType)>) {
-        if !self.enabled {
-            return;
-        }
-        let mut entries: Vec<_> = pairs.collect();
-        entries.sort_by_key(|(p, mt)| (p.ap, p.sta, *mt as u8));
-        for (pair, mt) in &entries {
-            self.emit(&format!("    saturated  ap={}  sta={}  type={mt}", pair.ap, pair.sta));
-        }
     }
 
     /// Logs the raw pair count produced by `pair_all_groups` before global dedup.
@@ -224,10 +203,14 @@ impl DebugPrinter {
             return;
         }
         let rss = rss_tag();
-        let pct = pairs_processed.checked_mul(100).map_or(100, |n| n / total_pairs.max(1));
-        self.emit(&format!(
-            "Phase4 fan-out  {pairs_processed:>8}/{total_pairs} ({pct:>3}%)  written={pairs_written:>8}{rss}"
-        ));
+        if total_pairs > 0 {
+            let pct = pairs_processed.checked_mul(100).map_or(100, |n| n / total_pairs.max(1));
+            self.emit(&format!(
+                "Phase4 fan-out  {pairs_processed:>8}/{total_pairs} ({pct:>3}%)  written={pairs_written:>8}{rss}"
+            ));
+        } else {
+            self.emit(&format!("Phase4 fan-out  {pairs_processed:>8} (streaming)  written={pairs_written:>8}{rss}"));
+        }
     }
 
     /// Called once after the EAPOL fan-out loop completes. Shows final pair counts,
@@ -387,28 +370,18 @@ impl GroupSummary {
 
 // --- Platform helpers ---
 
-/// Returns `(MemTotal_kb, MemAvailable_kb)` from `/proc/meminfo` on Linux.
-#[cfg(target_os = "linux")]
+/// Returns `(total_kb, available_kb)` using `sysinfo`. Cross-platform.
 fn ram_info() -> Option<(u64, u64)> {
-    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let mut total = 0u64;
-    let mut avail = 0u64;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            total = rest.split_whitespace().next()?.parse().ok()?;
-        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            avail = rest.split_whitespace().next()?.parse().ok()?;
-        }
-        if total > 0 && avail > 0 {
-            break;
-        }
+    let mut sys = sysinfo::System::new();
+    let refresh = sysinfo::MemoryRefreshKind::nothing().with_ram();
+    sys.refresh_memory_specifics(refresh);
+    let total_bytes = sys.total_memory();
+    let used_bytes = sys.used_memory();
+    if total_bytes == 0 {
+        return None;
     }
-    if total > 0 { Some((total, avail)) } else { None }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn ram_info() -> Option<(u64, u64)> {
-    None
+    let avail_bytes = total_bytes.saturating_sub(used_bytes);
+    Some((total_bytes / 1024, avail_bytes / 1024))
 }
 
 fn rss_tag() -> String {
