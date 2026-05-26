@@ -520,6 +520,10 @@ pub struct Stats {
     /// Radiotap frames where `it_version` was non-zero but parsing succeeded
     /// via the relaxed version gate (Tier 1 recovery).
     pub radiotap_version_nonzero: u64,
+    /// Frames recovered via Tier 2 (radiotap offset computed from `it_present`).
+    pub recovered_tier2: u64,
+    /// Frames recovered via Tier 3 (CRC-32 multi-offset scan).
+    pub recovered_tier3: u64,
 
     /// FCS outcome: header said FCS present, CRC-32 confirmed. Stripped.
     pub fcs_header_and_crc_agree: u64,
@@ -1014,6 +1018,8 @@ impl Stats {
         nz!("A-MSDU aggregated Data frames (802.11n)", self.amsdu_frames_seen);
         nz!("  subframes recovered for hidden EAPOL", self.amsdu_subframes_total);
         nz!("radiotap it_version != 0 (Tier 1 recovered)", self.radiotap_version_nonzero);
+        nz!("frames recovered via it_present computation (Tier 2)", self.recovered_tier2);
+        nz!("frames recovered via CRC-32 offset scan (Tier 3)", self.recovered_tier3);
         nz!("FCS stripped (header + CRC-32 agree)", self.fcs_header_and_crc_agree);
         nz!("FCS stripped (CRC-32 detected, header silent)", self.fcs_detected_by_crc);
         nz!("FCS stripped (header announced, CRC-32 mismatch)", self.fcs_crc_mismatch);

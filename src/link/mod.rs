@@ -11,6 +11,7 @@ pub mod fcs;
 pub mod ppi;
 pub mod prism;
 pub mod radiotap;
+pub mod recover;
 pub mod sll;
 
 use crate::types::{Error, Result};
