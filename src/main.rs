@@ -370,11 +370,11 @@ fn strip_and_resolve<'a>(
 ) -> Option<&'a [u8]> {
     match link::strip(&packet.data, dlt) {
         Ok((payload, header_says_fcs)) => {
-            if dlt == link::DLT_RADIOTAP {
-                if let Some(v) = link::radiotap::version_warning(&packet.data) {
-                    stats.radiotap_version_nonzero += 1;
-                    logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
-                }
+            if dlt == link::DLT_RADIOTAP
+                && let Some(v) = link::radiotap::version_warning(&packet.data)
+            {
+                stats.radiotap_version_nonzero += 1;
+                logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
             }
             let badfcs = dlt == link::DLT_RADIOTAP && link::radiotap::has_badfcs(&packet.data);
             let outcome = link::fcs::resolve(payload, header_says_fcs, badfcs);
