@@ -19,6 +19,10 @@ pub enum LinkType {
     Avs = 163,
     /// `DLT_PPI` -- Per-Packet Information (192).
     Ppi = 192,
+    /// `DLT_LINUX_SLL` -- Linux cooked capture v1 (113).
+    Sll = 113,
+    /// `DLT_LINUX_SLL2` -- Linux cooked capture v2 (276).
+    Sll2 = 276,
 }
 
 impl LinkType {
@@ -114,6 +118,52 @@ pub fn ppi(frame: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Wrap an inner payload in a 16-byte Linux SLL (cooked capture v1) header.
+///
+/// `arphrd` is the ARPHRD value that identifies the inner payload format:
+/// 801 = raw 802.11, 802 = Prism + 802.11, 803 = radiotap + 802.11.
+/// The caller is responsible for wrapping `inner_payload` in the appropriate
+/// radio header before calling this function (e.g. `radiotap(frame, false)`
+/// for ARPHRD 803).
+///
+/// Header layout (all fields big-endian, per `libpcap/pcap/sll.h`):
+/// `sll_pkttype (2) | sll_hatype (2) | sll_halen (2) | sll_addr (8) | sll_protocol (2)`.
+#[must_use]
+pub fn sll(inner_payload: &[u8], arphrd: u16) -> Vec<u8> {
+    const SLL_HDR_LEN: usize = 16;
+    let mut out = Vec::with_capacity(SLL_HDR_LEN + inner_payload.len());
+    out.extend_from_slice(&0u16.to_be_bytes()); // sll_pkttype = LINUX_SLL_HOST.
+    out.extend_from_slice(&arphrd.to_be_bytes()); // sll_hatype.
+    out.extend_from_slice(&6u16.to_be_bytes()); // sll_halen = 6 (MAC).
+    out.extend_from_slice(&[0u8; 8]); // sll_addr (synthetic).
+    out.extend_from_slice(&0u16.to_be_bytes()); // sll_protocol (not inspected).
+    out.extend_from_slice(inner_payload);
+    out
+}
+
+/// Wrap an inner payload in a 20-byte Linux SLL2 (cooked capture v2) header.
+///
+/// Same ARPHRD semantics as [`sll`]. SLL2 adds a 4-byte interface index field
+/// (set to 1 here) and rearranges field order vs SLL v1.
+///
+/// Header layout (multi-byte fields big-endian, per `libpcap/pcap/sll.h`):
+/// `sll2_protocol (2) | reserved (2) | if_index (4) | sll2_hatype (2) |
+///  sll2_pkttype (1) | sll2_halen (1) | sll2_addr (8)`.
+#[must_use]
+pub fn sll2(inner_payload: &[u8], arphrd: u16) -> Vec<u8> {
+    const SLL2_HDR_LEN: usize = 20;
+    let mut out = Vec::with_capacity(SLL2_HDR_LEN + inner_payload.len());
+    out.extend_from_slice(&0u16.to_be_bytes()); // sll2_protocol.
+    out.extend_from_slice(&0u16.to_be_bytes()); // sll2_reserved_mbz.
+    out.extend_from_slice(&1u32.to_be_bytes()); // sll2_if_index = 1.
+    out.extend_from_slice(&arphrd.to_be_bytes()); // sll2_hatype.
+    out.push(0); // sll2_pkttype = LINUX_SLL_HOST.
+    out.push(6); // sll2_halen = 6 (MAC).
+    out.extend_from_slice(&[0u8; 8]); // sll2_addr (synthetic).
+    out.extend_from_slice(inner_payload);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +227,39 @@ mod tests {
         assert_eq!(LinkType::Radiotap.dlt(), 127);
         assert_eq!(LinkType::Avs.dlt(), 163);
         assert_eq!(LinkType::Ppi.dlt(), 192);
+        assert_eq!(LinkType::Sll.dlt(), 113);
+        assert_eq!(LinkType::Sll2.dlt(), 276);
+    }
+
+    #[test]
+    fn sll_header_length_and_arphrd() {
+        let wrapped = sll(PROBE, 803);
+        assert_eq!(wrapped.len(), 16 + PROBE.len());
+        // sll_hatype at offset 2, big-endian.
+        let hatype = u16::from_be_bytes([wrapped[2], wrapped[3]]);
+        assert_eq!(hatype, 803);
+        assert!(wrapped.ends_with(PROBE));
+    }
+
+    #[test]
+    fn sll2_header_length_and_arphrd() {
+        let wrapped = sll2(PROBE, 801);
+        assert_eq!(wrapped.len(), 20 + PROBE.len());
+        // sll2_hatype at offset 8, big-endian.
+        let hatype = u16::from_be_bytes([wrapped[8], wrapped[9]]);
+        assert_eq!(hatype, 801);
+        // sll2_if_index at offset 4, big-endian = 1.
+        let if_index = u32::from_be_bytes([wrapped[4], wrapped[5], wrapped[6], wrapped[7]]);
+        assert_eq!(if_index, 1);
+        assert!(wrapped.ends_with(PROBE));
+    }
+
+    #[test]
+    fn sll_wrapping_radiotap_stacks_headers() {
+        let rt = radiotap(PROBE, false);
+        let wrapped = sll(&rt, 803);
+        // Total = 16 (SLL) + 9 (radiotap) + PROBE.
+        assert_eq!(wrapped.len(), 16 + 9 + PROBE.len());
+        assert!(wrapped.ends_with(PROBE));
     }
 }

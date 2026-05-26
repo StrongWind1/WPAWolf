@@ -2,13 +2,15 @@
 //!
 //! Matches on the DLT (Data Link Type) value from the pcap/pcapng interface descriptor
 //! and strips the appropriate radio/monitor-mode header to expose the raw IEEE 802.11
-//! frame payload. Supported DLTs: 105 (raw 802.11), 119 (Prism), 127 (Radiotap),
-//! 163 (AVS), 192 (PPI). Unknown DLTs are logged and the packet is skipped.
+//! frame payload. Supported DLTs: 105 (raw 802.11), 113 (Linux SLL), 119 (Prism),
+//! 127 (Radiotap), 163 (AVS), 192 (PPI), 276 (Linux SLL2). Unknown DLTs are logged
+//! and the packet is skipped.
 
 pub mod avs;
 pub mod ppi;
 pub mod prism;
 pub mod radiotap;
+pub mod sll;
 
 use crate::types::{Error, Result};
 
@@ -23,6 +25,10 @@ pub const DLT_RADIOTAP: u16 = 127;
 pub const DLT_AVS: u16 = 163;
 /// Per-Packet Information header. [libpcap dlt.h: `DLT_PPI`]
 pub const DLT_PPI: u16 = 192;
+/// Linux cooked capture v1 (`any` device). [libpcap dlt.h: `DLT_LINUX_SLL`]
+pub const DLT_LINUX_SLL: u16 = 113;
+/// Linux cooked capture v2 (`any` device, with interface index). [libpcap dlt.h: `DLT_LINUX_SLL2`]
+pub const DLT_LINUX_SLL2: u16 = 276;
 
 /// Strips the link-layer header from `data` for the given `dlt` and returns
 /// `(payload, had_fcs)`.
@@ -60,6 +66,10 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
         // PPI's 802.11-Common field has an FCS-error bit but no spec-clean
         // FCS-at-end signal we can rely on; skip tail-strip.
         DLT_PPI => (ppi::ieee80211_offset(data)?, false),
+        // Linux cooked capture: meta-header wrapping another link-layer format.
+        // ARPHRD dispatch determines the inner parser (raw/prism/radiotap).
+        DLT_LINUX_SLL => sll::strip(data)?,
+        DLT_LINUX_SLL2 => sll::strip_v2(data)?,
 
         other => {
             return Err(Error::UnknownFormat(format!("unsupported DLT {other}")));
@@ -94,7 +104,12 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
 /// Band mapping: 2412-2484 MHz = 2.4 GHz; 5180-5825 MHz = 5 GHz; 5925-7125 MHz = 6 GHz.
 #[must_use]
 pub fn channel_freq(data: &[u8], dlt: u16) -> Option<u16> {
-    if dlt == DLT_RADIOTAP { radiotap::channel_freq(data) } else { None }
+    match dlt {
+        DLT_RADIOTAP => radiotap::channel_freq(data),
+        DLT_LINUX_SLL => sll::channel_freq(data),
+        DLT_LINUX_SLL2 => sll::channel_freq_v2(data),
+        _ => None,
+    }
 }
 
 /// Returns true when the radio header advertises the radiotap A-MPDU Status field
@@ -106,5 +121,10 @@ pub fn channel_freq(data: &[u8], dlt: u16) -> Option<u16> {
 /// captures. See `ARCHITECTURE.md §3.3` transport-vector inventory item 6.
 #[must_use]
 pub fn has_ampdu_status(data: &[u8], dlt: u16) -> bool {
-    if dlt == DLT_RADIOTAP { radiotap::has_ampdu_status(data) } else { false }
+    match dlt {
+        DLT_RADIOTAP => radiotap::has_ampdu_status(data),
+        DLT_LINUX_SLL => sll::has_ampdu_status(data),
+        DLT_LINUX_SLL2 => sll::has_ampdu_status_v2(data),
+        _ => false,
+    }
 }

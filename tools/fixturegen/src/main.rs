@@ -240,10 +240,12 @@ const fn container_name(c: Container) -> &'static str {
 const fn link_name(dlt: u32) -> &'static str {
     match dlt {
         105 => "raw_802_11",
+        113 => "sll",
         119 => "prism",
         127 => "radiotap",
         163 => "avs",
         192 => "ppi",
+        276 => "sll2",
         _ => "unknown",
     }
 }
