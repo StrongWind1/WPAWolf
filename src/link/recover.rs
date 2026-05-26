@@ -125,6 +125,13 @@ pub fn compute_offset_from_present(data: &[u8]) -> Option<usize> {
 /// SLL2+raw (20).
 const CANDIDATE_OFFSETS: &[usize] = &[0, 8, 9, 12, 13, 14, 16, 18, 20, 24, 32, 36, 40, 48, 52, 56, 64, 144];
 
+/// Minimum candidate slice length for CRC-32 offset scan: 10-byte control frame
+/// (FC + Duration + RA) plus 4-byte FCS = 14 bytes. Shorter slices produce
+/// systematic false positives because `crc32([0x00]*4) == RESIDUE` (the
+/// empty-message FCS) and `crc32([0xFF]*8) == RESIDUE` -- null/FF-padded
+/// trailing bytes in short control frames trigger these.
+const MIN_SCAN_SLICE: usize = 14;
+
 /// Scans candidate offsets using CRC-32 FCS residue to find the 802.11 frame.
 ///
 /// Returns `Some((offset, payload_without_fcs))` on the first CRC-32 match.
@@ -134,7 +141,7 @@ const CANDIDATE_OFFSETS: &[usize] = &[0, 8, 9, 12, 13, 14, 16, 18, 20, 24, 32, 3
 pub fn crc32_offset_scan(data: &[u8]) -> Option<(usize, &[u8])> {
     for &offset in CANDIDATE_OFFSETS {
         let candidate = data.get(offset..)?;
-        if candidate.len() < 4 {
+        if candidate.len() < MIN_SCAN_SLICE {
             continue;
         }
         if fcs::verify_crc32(candidate) {
@@ -354,8 +361,10 @@ mod tests {
     #[test]
     fn recover_tier3_unknown_dlt() {
         // DLT 177 (LINUX_LAPD, mislabeled). Frame with valid FCS at offset 0.
-        let frame = b"\x80\x00beacon";
+        // Must be >= MIN_SCAN_SLICE (14) including FCS, so 10+ byte frame.
+        let frame = b"\x80\x00beacon-pad";
         let data = append_fcs(frame);
+        assert!(data.len() >= 14);
         let result = recover(&data, 177).unwrap();
         assert_eq!(result.tier, RecoveryTier::Crc32Scan);
         assert_eq!(result.offset, 0);
