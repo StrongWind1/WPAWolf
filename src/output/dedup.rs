@@ -12,84 +12,7 @@ use std::collections::HashSet;
 
 use crate::pair::PairedHash;
 use crate::store::pmkid::PmkidEntry;
-use crate::types::{MacAddr, MsgType, hash_slices};
-
-// --- CrossFileDedup ---
-
-/// Cross-file EAPOL message dedup for `--per-file` mode.
-///
-/// In `--per-file` mode, `MessageStore` clears after each file. Without this filter,
-/// the same EAPOL message appearing in multiple capture files gets re-stored,
-/// re-paired (N#E# Cartesian explosion), and re-emitted -- with `PerSinkDedup`
-/// catching duplicates at the output end. At wpa-sec scale (116M messages, 1.96B
-/// hash lines) this causes `PerSinkDedup` to grow to ~36 GiB.
-///
-/// `CrossFileDedup` catches duplicates *before* pairing at the message level:
-/// 116M entries (~1.1 GiB) instead of 1.96B entries (~36 GiB). Fingerprint is
-/// ESSID-blind because ESSID resolves at emit time from `EssidMap`, not at ingest.
-///
-/// Gated behind `--per-file`: when the flag is off, `MessageStore` never clears
-/// and `MessageStore::add()` already deduplicates naturally.
-pub struct CrossFileDedup {
-    seen: HashSet<u64>,
-}
-
-impl std::fmt::Debug for CrossFileDedup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CrossFileDedup").field("len", &self.seen.len()).finish()
-    }
-}
-
-impl Default for CrossFileDedup {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CrossFileDedup {
-    /// Creates an empty cross-file dedup filter.
-    #[must_use]
-    pub fn new() -> Self {
-        Self { seen: HashSet::new() }
-    }
-
-    /// Returns `true` if this message is new (not a duplicate) and records it.
-    ///
-    /// Fingerprint: `kind(0x05) || AP(6) || STA(6) || msg_type(1) || akm(1) || eapol_frame(N)`.
-    /// Kind byte `0x05` avoids collision with `PerSinkDedup`'s `0x01..0x04`.
-    /// Includes AKM because `MessageStore::add()` deduplicates on
-    /// `(msg_type, akm, eapol_frame)` -- the same frame bytes with a different
-    /// AKM context (e.g. `Wpa2Psk` vs `PskSha256` from different beacon RSN IEs)
-    /// are distinct messages that pair into different hash types.
-    pub fn check_message(
-        &mut self,
-        ap: MacAddr,
-        sta: MacAddr,
-        msg_type: MsgType,
-        akm: crate::types::AkmType,
-        eapol_frame: &[u8],
-    ) -> bool {
-        let fp = hash_slices(0x05, &[&ap.0, &sta.0, &[msg_type as u8], &[akm as u8], eapol_frame]);
-        self.seen.insert(fp)
-    }
-
-    /// Returns the number of unique messages recorded.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.seen.len()
-    }
-
-    /// Returns `true` if no messages have been recorded.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.seen.is_empty()
-    }
-
-    /// Drops all recorded fingerprints, releasing memory.
-    pub fn clear(&mut self) {
-        self.seen = HashSet::new();
-    }
-}
+use crate::types::hash_slices;
 
 // --- DedupSet ---
 
@@ -237,18 +160,6 @@ impl PerSinkDedup {
     pub fn reserve(&mut self, capacity: usize) {
         for set in &mut self.sets {
             set.reserve(capacity);
-        }
-    }
-
-    /// Drops all recorded fingerprints, resetting every per-sink set to empty.
-    /// Capacity is released so the allocator can reclaim the memory.
-    ///
-    /// Used by `--per-file` mode after each file's emit. Cross-file duplicate
-    /// suppression is sacrificed (hashcat deduplicates at load time), but the
-    /// dedup set no longer grows without bound across the corpus.
-    pub fn clear(&mut self) {
-        for set in &mut self.sets {
-            *set = HashSet::new();
         }
     }
 

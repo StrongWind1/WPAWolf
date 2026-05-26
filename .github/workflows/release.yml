@@ -50,13 +50,13 @@ name: Release
 # Label each run with the tag being released, prefixed with the workflow
 # name. Prevents the Actions tab from showing "Initial commit" for a
 # release-workflow run.
-run-name: "Release -- ${{ github.ref_name }}"
+run-name: Release -- ${{ github.ref_name }}
 
-on:
+"on":
   # A tag push is the only way this workflow starts. Cutting a release is a
   # deliberate act: `git tag v1.2.3 && git push origin v1.2.3`.
   push:
-    tags: ['v*']
+    tags: [v*]
 
 # If a release run is already in flight for this tag, do NOT cancel it. A
 # half-published release is worse than letting a duplicate run fail naturally.

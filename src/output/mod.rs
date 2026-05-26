@@ -27,7 +27,7 @@ const OUTPUT_BUF_CAPACITY: usize = 64 * 1024;
 use crate::debug::{DebugPrinter, emit_progress_interval};
 use crate::log::Logger;
 use crate::pair::combos::PairConfig;
-use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash, ThinConfig};
+use crate::pair::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 use crate::store::AkmMap;
 use crate::store::auxiliary::{
     DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
@@ -172,16 +172,6 @@ pub struct OutputStats {
     pub nc_dedup_max_cluster_size: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
-
-    // --- Adaptive thinning (from pair pipeline) ---
-    /// Groups thinned with the 30-second session-window filter.
-    pub groups_thinned_30s: u64,
-    /// Groups thinned with the 5-second session-window filter.
-    pub groups_thinned_5s: u64,
-    /// Groups thinned to a quality-subset (max 64 per type).
-    pub groups_thinned_subset: u64,
-    /// Total messages removed by adaptive thinning.
-    pub messages_thinned: u64,
 
     /// Hash lines written, keyed by `HashType` (the 11-type classification in
     /// `ARCHITECTURE.md §2`). Counted once per logical hash regardless of how many
@@ -468,7 +458,7 @@ pub fn run_output(
     debug: &DebugPrinter,
 ) -> Result<OutputStats> {
     let mut ctx = OutputContext::new(paths);
-    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, None, thread_count, essid_filter, debug)?;
+    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter, debug)?;
     ctx.finalize(
         paths,
         essid_set,
@@ -581,7 +571,6 @@ impl OutputContext {
         essid_map: &crate::store::essid::EssidMap,
         akm_map: &AkmMap,
         pair_config: &PairConfig,
-        thin_config: Option<&ThinConfig>,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
@@ -606,22 +595,12 @@ impl OutputContext {
             essid_map,
             akm_map,
             pair_config,
-            thin_config,
             thread_count,
             essid_filter,
             debug,
         )?;
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
-    }
-
-    /// Drops all recorded dedup fingerprints, releasing the memory.
-    ///
-    /// Called after each file's emit in `--per-file` mode so the dedup set
-    /// does not grow without bound across a large corpus. Cross-file
-    /// duplicate suppression is sacrificed; hashcat deduplicates at load time.
-    pub fn clear_dedup(&mut self) {
-        self.dedup.clear();
     }
 
     fn emit_inner(
@@ -631,7 +610,6 @@ impl OutputContext {
         essid_map: &crate::store::essid::EssidMap,
         akm_map: &AkmMap,
         pair_config: &PairConfig,
-        thin_config: Option<&ThinConfig>,
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
@@ -725,13 +703,8 @@ impl OutputContext {
         let emit_state = std::sync::Mutex::new(EmitState { sinks, dedup, stats, unresolved_drops, first_error: None });
         let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
 
-        let (nc_stats, thin_stats) = crate::pair::pair_all_groups_streaming(
-            message_store,
-            pair_config,
-            thin_config,
-            thread_count,
-            debug,
-            |pairs| {
+        let nc_stats =
+            crate::pair::pair_all_groups_streaming(message_store, pair_config, thread_count, debug, |pairs| {
                 if pairs.is_empty() {
                     return;
                 }
@@ -810,8 +783,7 @@ impl OutputContext {
                 {
                     debug.emit_progress(processed, 0, guard.stats.pairs_written.saturating_sub(pairs_written_before));
                 }
-            },
-        );
+            });
 
         // Recover mutable state from the Mutex. The references point back into
         // `self` -- they were moved in, not copied, so the compiler needs the
@@ -823,10 +795,6 @@ impl OutputContext {
 
         // `es.stats` etc. are `&mut self.stats` etc. -- writing through them
         // mutates `self` directly. No need to copy back.
-        es.stats.groups_thinned_30s += thin_stats.groups_thinned_30s;
-        es.stats.groups_thinned_5s += thin_stats.groups_thinned_5s;
-        es.stats.groups_thinned_subset += thin_stats.groups_thinned_subset;
-        es.stats.messages_thinned += thin_stats.messages_thinned;
         es.stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
         es.stats.nc_dedup_cluster_count += nc_stats.cluster_count;
         es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);

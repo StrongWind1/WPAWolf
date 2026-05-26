@@ -23,7 +23,7 @@
 - **Deep frame walking** -- A-MSDU subframes, MSDU fragment reassembly, radiotap FCS strip
 - **Garbage-pattern rejection** -- nonces / MICs / PMKIDs checked against five pattern classes
 - **Fast** -- >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **854 tests**; `make check-all` zero-warning under strict clippy
+- **904 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 
@@ -105,7 +105,7 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 |---|---|---|
 | EAPOL session window | 5 seconds | unlimited; `--eapoltimeout` opts in |
 | EAPOL frame size ceiling | 512 bytes at parse | no size gate |
-| Per-(AP, STA) message buffer | one shared 64-entry circular buffer | `HashMap<(AP, STA), Vec<Message>>`, adaptive thinning under memory pressure |
+| Per-(AP, STA) message buffer | one shared 64-entry circular buffer | `HashMap<(AP, STA), Vec<Message>>`, no eviction |
 | WDS / 4-address relay frames | skipped unless `--all` | always processed |
 | Pairing strategy | stream-pairs as frames arrive | reads everything, then pairs |
 | State across input files | reset between files | carried across files |
@@ -167,7 +167,6 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 |---|---|---|
 | `--threads N` | CPU count | Phase 4 worker count; `--threads=1` for reproducible output |
 | `--per-file` | off | pair + emit + clear per input file; bounds RSS |
-| `--mem-limit PCT` | 80 | max % of system RAM before adaptive thinning activates; 0 = disabled |
 | `--quiet` | off | suppress progress lines |
 | `--mem-stats` | off | per-store footprint table after closing banner |
 | `--debug` | off | timestamped phase/file/group diagnostic lines |

@@ -100,10 +100,6 @@ pub enum Admission {
 /// append-only vector. Messages are never evicted by timestamp or replay counter.
 /// The pairing engine (Phase 4) reads from this store after all packets are collected.
 /// See `ARCHITECTURE.md §3.3` and `§5.1`.
-///
-/// Memory pressure from rotating-nonce firmware is handled by adaptive thinning
-/// in the pair pipeline (session-window filtering on heavy groups when RSS exceeds
-/// `--mem-limit`), not by a hard per-type cap at ingest time.
 #[derive(Debug, Default)]
 pub struct MessageStore {
     groups: HashMap<MacPair, Vec<EapolMessage>>,
@@ -313,54 +309,6 @@ impl MessageStore {
         }
         mismatches
     }
-
-    /// Retroactively thins the heaviest groups by applying a session-window filter in place.
-    ///
-    /// Sorts all groups by message count descending, then for each of the top `max_groups`
-    /// groups, applies a per-type session-window filter: within each message type, sort by
-    /// timestamp and keep only messages spaced at least `window_us` microseconds apart.
-    /// Messages within the window of an already-kept message are removed in place.
-    ///
-    /// Returns the number of messages removed across all thinned groups.
-    pub fn thin_heaviest_groups(&mut self, window_us: u64, max_groups: usize) -> u64 {
-        let mut group_sizes: Vec<(MacPair, usize)> = self.groups.iter().map(|(k, v)| (*k, v.len())).collect();
-        group_sizes.sort_unstable_by_key(|&(_, len)| std::cmp::Reverse(len));
-        group_sizes.truncate(max_groups);
-
-        let mut total_removed: u64 = 0;
-        for (pair, _) in group_sizes {
-            let Some(msgs) = self.groups.get_mut(&pair) else { continue };
-            let before = msgs.len();
-            *msgs = session_window_filter(msgs, window_us);
-            let removed = before.saturating_sub(msgs.len());
-            self.total_count = self.total_count.saturating_sub(removed);
-            total_removed += removed as u64;
-        }
-        total_removed
-    }
-}
-
-/// Applies a per-type session-window filter to a message slice.
-///
-/// For each message type independently: sorts by timestamp, walks forward keeping a
-/// message only if `timestamp >= prev_kept + window_us`. Returns the filtered set.
-#[must_use]
-pub(crate) fn session_window_filter(msgs: &[EapolMessage], window_us: u64) -> Vec<EapolMessage> {
-    use crate::types::MsgType;
-
-    let mut result = Vec::with_capacity(msgs.len());
-    for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
-        let mut typed: Vec<&EapolMessage> = msgs.iter().filter(|m| m.msg_type == msg_type).collect();
-        typed.sort_unstable_by_key(|m| m.timestamp);
-        let mut last_kept_ts: Option<u64> = None;
-        for m in typed {
-            if last_kept_ts.is_none_or(|prev| m.timestamp >= prev + window_us) {
-                result.push(m.clone());
-                last_kept_ts = Some(m.timestamp);
-            }
-        }
-    }
-    result
 }
 
 // --- PendingEapol (deferred WDS EAPOL) ---
@@ -675,58 +623,5 @@ mod tests {
         assert_eq!(*msg.eapol_frame, *expected_frame);
         assert!(msg.ft.is_none());
         assert_eq!(msg.akm, AkmType::FtPsk);
-    }
-
-    // --- thin_heaviest_groups tests ---
-
-    #[test]
-    fn thin_heaviest_groups_removes_close_timestamps() {
-        let mut store = MessageStore::new();
-        let ap = mac(0x11);
-        let sta = mac(0x22);
-        for i in 0u8..10 {
-            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
-            m.timestamp = u64::from(i) * 1_000_000; // 0s, 1s, 2s, ..., 9s
-            store.add(ap, sta, m);
-        }
-        assert_eq!(store.total_count(), 10);
-        let removed = store.thin_heaviest_groups(30_000_000, 10); // 30s window
-        assert_eq!(removed, 9, "9 of 10 M1s within 30s window should be removed");
-        assert_eq!(store.total_count(), 1);
-    }
-
-    #[test]
-    fn thin_heaviest_groups_keeps_spaced_messages() {
-        let mut store = MessageStore::new();
-        let ap = mac(0x11);
-        let sta = mac(0x22);
-        for i in 0u8..3 {
-            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
-            m.timestamp = u64::from(i) * 60_000_000; // 0s, 60s, 120s
-            store.add(ap, sta, m);
-        }
-        assert_eq!(store.total_count(), 3);
-        let removed = store.thin_heaviest_groups(30_000_000, 10);
-        assert_eq!(removed, 0, "all messages spaced > 30s should survive");
-        assert_eq!(store.total_count(), 3);
-    }
-
-    #[test]
-    fn thin_heaviest_groups_respects_max_groups() {
-        let mut store = MessageStore::new();
-        for i in 0u8..10 {
-            let mut m = msg_with_nonce(MsgType::M1, [i; 32]);
-            m.timestamp = u64::from(i) * 1_000_000;
-            store.add(mac(0x11), mac(0x22), m);
-        }
-        for i in 0u8..5 {
-            let mut m = msg_with_nonce(MsgType::M1, [i + 100; 32]);
-            m.timestamp = u64::from(i) * 1_000_000;
-            store.add(mac(0x33), mac(0x44), m);
-        }
-        assert_eq!(store.total_count(), 15);
-        let removed = store.thin_heaviest_groups(30_000_000, 1);
-        assert_eq!(removed, 9, "only the heaviest group (10 msgs) thinned to 1");
-        assert_eq!(store.total_count(), 6); // 1 + 5
     }
 }

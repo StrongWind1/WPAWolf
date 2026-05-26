@@ -279,7 +279,7 @@ These are the non-negotiable rules of the codebase. Violating any of them is a r
 
 ### 2. Collect-then-pair (no stream pairing, no eviction)
 
-All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. There is no ring buffer and no eviction. Memory pressure from degenerate rotating-ANonce firmware is handled by adaptive thinning (`--mem-limit`, default 80 % of system RAM): when RSS exceeds the threshold, heavy groups are thinned via staged session-window filters (30 s, 5 s, then quality-subset to 64 per type) before pairing. Phase 1 also retroactively thins the heaviest groups every 1000 files if RSS exceeds the threshold.
+All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. There is no ring buffer, no eviction, and no per-type message cap. If RSS exceeds 80 % of system RAM during Phase 1 ingestion or Phase 4 pairing, the process aborts with a clear "approaching OOM" message. Use `--per-file` to bound memory on large corpora.
 
 This is the single most important architectural difference vs upstream hcxpcapngtool. Their implementation pairs on arrival using a 64-entry shared ring (`MESSAGELIST_MAX = 64`); when the 65th message arrives without a successful pair, the oldest is silently dropped. wpawolf cannot miss a valid pair regardless of message ordering or interleaving from other AP/STA pairs because pairing never runs on a partial set.
 
@@ -387,7 +387,7 @@ Error policy:
 
 ### 11. Minimal dependency budget
 
-Direct runtime dependencies: 4 crates -- `flate2` (gzip, `rust_backend`-only feature), `clap` (CLI, derive), `rayon` (parallel Phase 4 pairing via work-stealing), and `sysinfo` (cross-platform RSS + total-RAM queries for adaptive thinning). New deps require a paragraph-long justification in the PR body. Rejected crates: `pcap-file` / `pcap-parser` (8-10 transitive deps for ~500 lines we write); `ieee80211` (9 mandatory deps for a fraction of its features); `serde`, `regex`, `tokio`, `anyhow`, `thiserror`, `hex`, `nom` (each replaceable inline or out of scope). Future cryptographic primitives may use RustCrypto (`sha1`, `md-5`, `aes`, `cmac`, `hmac`). `cargo deny` (`deny.toml`) gates the supply chain: OSI-permissive licenses only, no unknown registries, no git deps.
+Direct runtime dependencies: 4 crates -- `flate2` (gzip, `rust_backend`-only feature), `clap` (CLI, derive), `rayon` (parallel Phase 4 pairing via work-stealing), and `sysinfo` (cross-platform RSS + total-RAM queries for OOM detection and `--debug` memory reporting). New deps require a paragraph-long justification in the PR body. Rejected crates: `pcap-file` / `pcap-parser` (8-10 transitive deps for ~500 lines we write); `ieee80211` (9 mandatory deps for a fraction of its features); `serde`, `regex`, `tokio`, `anyhow`, `thiserror`, `hex`, `nom` (each replaceable inline or out of scope). Future cryptographic primitives may use RustCrypto (`sha1`, `md-5`, `aes`, `cmac`, `hmac`). `cargo deny` (`deny.toml`) gates the supply chain: OSI-permissive licenses only, no unknown registries, no git deps.
 
 ### Memory budget (informational)
 
@@ -1125,7 +1125,7 @@ Extract ALL PMKIDs regardless of AKM type. No filtering based on hashcat support
 ### §8.5  EAPOL message storage - FR-MSG-*
 
 #### FR-MSG-1
-Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. Adaptive thinning (`--mem-limit`, default 80 %) bounds degenerate inputs under memory pressure; 0 disables.
+Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. No per-type cap. Process aborts if RSS exceeds 80 % of system RAM.
 
 #### FR-MSG-2
 Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay_counter (u64), nonce (32 B), mic (16 B), KDV (0/1/2/3), eapol_frame (heap, no upper bound), eapol_frame_len, pmkid (16 B optional), FT fields (MDID 2 B, R0KH-ID up to 48 B, R1KH-ID 6 B), AKM type from context.
@@ -1300,7 +1300,6 @@ Output-filter and runtime flags (unfiltered defaults):
 | `--strict`            | false | bundle: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --per-file --nc-dedup` |
 | `--per-file`          | false | pair + emit + clear MessageStore/PmkidStore per input file |
 | `--threads` *n*       | CPU count | Phase 4 worker thread count |
-| `--mem-limit` *pct* | 80 | max % of system RAM before adaptive thinning activates; 0 = disabled |
 | `--essid-collapse-min` *n* | 3 | multi-SSID collapse guard: minimum distinct SSIDs before collapse fires |
 | `--essid-collapse-ratio` *n* | 10 | multi-SSID collapse guard: top-count / second-count ratio threshold |
 | `--quiet`             | false | suppress periodic `[progress]` lines; closing banner unaffected |

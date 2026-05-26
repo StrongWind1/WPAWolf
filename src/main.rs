@@ -4,7 +4,7 @@
 //! Phase 1 collects all EAPOL messages and PMKIDs from every input file into in-memory
 //! stores; Phase 2 pairs messages and writes output files. See `ARCHITECTURE.md §3`.
 //!
-//! Unfiltered by default: all 6 N#E# combinations, 10-minute session window, no
+//! Unfiltered by default: all 6 N#E# combinations, unlimited session window, no
 //! replay-counter check. Add output filter flags (`--rc-drift`, `--dedup-hash-combos`) to
 //! narrow output to only well-validated hashes. See `ARCHITECTURE.md §8.8 (FR-CLI)`.
 
@@ -26,7 +26,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
-    output::{EssidFilterConfig, OutputPaths, dedup::CrossFileDedup, dedup::SinkId},
+    output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
     stats::Stats,
@@ -240,12 +240,6 @@ struct Cli {
     #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
     per_file: bool,
 
-    /// Max percentage of system RAM before adaptive thinning activates [default: 80]
-    ///
-    /// When process RSS exceeds this percentage of total RAM, heavy groups are thinned using session-window filters before pairing. Set to 0 to disable adaptive thinning entirely.
-    #[arg(long, value_name = "PCT", default_value_t = 80, help_heading = "Runtime", display_order = 33)]
-    mem_limit: u8,
-
     /// Print per-store memory footprint at end of run
     ///
     /// Approximate byte counts for every long-lived store (MessageStore, PmkidStore, EssidMap, etc.), sorted descending. For OOM triage.
@@ -445,7 +439,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut stats = Stats::new();
     let mut logger = Logger::new(cli.log.as_deref())?;
     let mut pending_eapol: Vec<PendingEapol> = Vec::new();
-    let mut cross_file_dedup = if cli.per_file { Some(CrossFileDedup::new()) } else { None };
     // Periodic stderr progress lines during Phase 1. On by default; `--quiet`
     // suppresses entirely. The closing stats banner is unaffected. See
     // `wpawolf::progress`.
@@ -474,12 +467,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         )));
     }
 
-    // --- Adaptive thinning config (from --mem-limit and --eapoltimeout) ---
-    let thin_config = wpawolf::pair::ThinConfig {
-        mem_limit_pct: cli.mem_limit,
-        total_ram_bytes: wpawolf::progress::total_ram_bytes(),
-        user_eapol_timeout_us: cli.eapoltimeout.map(|s| s * 1_000_000),
-    };
+    // OOM guard: abort if RSS exceeds 80% of system RAM.
+    let oom_threshold_bytes = wpawolf::progress::total_ram_bytes() * 80 / 100;
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
     let pair_config = PairConfig {
@@ -717,7 +706,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                                 &mut pending_eapol,
                                 &mut fragment_store,
                                 &mut logger,
-                                cross_file_dedup.as_mut(),
                             );
                         },
                         _ => {},
@@ -757,19 +745,17 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
 
-            // Phase 1 adaptive thinning: every 1000 files, check RSS and thin
-            // the heaviest groups retroactively if memory pressure is high.
-            if thin_config.mem_limit_pct > 0 && (file_idx + 1) % 1000 == 0 {
+            // OOM guard: every 1000 files, check RSS and abort if approaching OOM.
+            if (file_idx + 1) % 1000 == 0 {
                 let rss = wpawolf::progress::current_rss_bytes();
-                let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
-                if rss > threshold {
-                    let removed = message_store.thin_heaviest_groups(30_000_000, 100);
-                    if removed > 0 {
-                        stats.phase1_retroactive_thins += 1;
-                        stats.messages_thinned += removed;
-                        let rss_mib = wpawolf::progress::current_rss_mib().unwrap_or(0);
-                        debug.phase1_thin(removed, rss_mib);
-                    }
+                if rss > oom_threshold_bytes {
+                    let rss_mib = rss / (1024 * 1024);
+                    let total_mib = wpawolf::progress::total_ram_bytes() / (1024 * 1024);
+                    println!(
+                        "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 1 ingestion (file {}/{total_inputs}). Reduce input size, use --per-file, or increase available RAM.",
+                        file_idx + 1
+                    );
+                    std::process::exit(1);
                 }
             }
         }
@@ -794,7 +780,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     &mut pmkid_store,
                     &mut stats,
                     &mut logger,
-                    cross_file_dedup.as_mut(),
                 );
                 pending_eapol.clear();
             }
@@ -811,30 +796,12 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 &essid_map,
                 &akm_map,
                 &pair_config,
-                Some(&thin_config),
                 thread_count,
                 essid_filter,
                 &debug,
             )?;
             message_store.clear();
             pmkid_store.clear();
-
-            // Adaptive dedup clearing: shed the cross-file dedup set only when
-            // memory pressure is high. On small corpora the set stays resident
-            // and suppresses cross-file duplicates. On wpa-sec-scale runs the
-            // set is cleared before it triggers a HashSet resize spike that
-            // would OOM the machine.
-            if thin_config.mem_limit_pct > 0 {
-                let rss = wpawolf::progress::current_rss_bytes();
-                let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
-                if rss > threshold {
-                    stats.dedup_clears += 1;
-                    output_ctx.clear_dedup();
-                    if let Some(cfd) = cross_file_dedup.as_mut() {
-                        cfd.clear();
-                    }
-                }
-            }
         }
     }
 
@@ -860,7 +827,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &mut pmkid_store,
             &mut stats,
             &mut logger,
-            cross_file_dedup.as_mut(),
         );
         debug.wds_resolved(wds_count, 0);
     }
@@ -979,7 +945,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             &essid_map,
             &akm_map,
             &pair_config,
-            Some(&thin_config),
             thread_count,
             essid_filter,
             &debug,
@@ -1053,11 +1018,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // line via `HashType::from_akm_and_attack`; copy the resulting tally into
         // the global stats for `print_summary`.
         stats.hash_type_emitted = output_stats.hash_type_emitted;
-
-        stats.groups_thinned_30s += output_stats.groups_thinned_30s;
-        stats.groups_thinned_5s += output_stats.groups_thinned_5s;
-        stats.groups_thinned_subset += output_stats.groups_thinned_subset;
-        stats.messages_thinned += output_stats.messages_thinned;
     }
 
     logger.flush()?;

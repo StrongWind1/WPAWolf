@@ -6,18 +6,16 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ### v0.4.0 -- unreleased (`feat/adaptive-pipeline`)
 
-Two-phase adaptive pipeline: rayon-based parallel pairing with streaming per-group fan-out, cross-platform memory monitoring via `sysinfo`, and adaptive thinning under memory pressure. Prevents OOM on wpa-sec-scale corpora (400K+ captures, 2.5B packets). No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v0.3.10 for any capture that did not hit the old per-type cap.
+Rayon-based parallel pairing with streaming per-group fan-out, cross-platform memory monitoring via `sysinfo`, per-packet buffer recycling, and `FtFields` boxing. No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v0.3.10 for any capture.
 
-- **Streaming per-group fan-out eliminates the all-pairs Vec.** `emit_inner` Pipeline 2 no longer collects every `PairedHash` across all groups into a single `Vec` before iterating. Instead, `pair_all_groups_streaming()` delivers each group's pairs via a callback that locks a `Mutex<EmitState>`, fans out (ESSID resolution + hash classification + dedup check + buffered write), and releases. Peak memory drops by `sizeof(PairedHash) * total_pairs` -- roughly 540 MB on a 2.25B-pair corpus. Pairs are dropped at callback exit.
+- **Streaming per-group fan-out eliminates the all-pairs Vec.** `emit_inner` no longer collects every `PairedHash` across all groups into a single `Vec` before iterating. Instead, `pair_all_groups_streaming()` delivers each group's pairs via a callback that locks a `Mutex<EmitState>`, fans out (ESSID resolution + hash classification + dedup check + buffered write), and releases. Peak memory drops by `sizeof(PairedHash) * total_pairs` -- roughly 540 MB on a 2.25B-pair corpus. Pairs are dropped at callback exit.
 - **Rayon work-stealing replaces manual `std::thread::scope` + LPT scheduling.** `pair_all_groups_streaming()` runs pairing across a per-run rayon thread pool (`--threads N`). Work-stealing handles load imbalance naturally (heavy groups don't block the tail). The Mutex serializes only the I/O fan-out (microseconds per group); pairing itself runs fully lock-free across cores.
-- **Cross-platform memory monitoring via `sysinfo`.** `current_rss_bytes()`, `current_rss_mib()`, `total_ram_bytes()`, and `ram_info()` replace Linux-only `/proc/self/status` and `/proc/meminfo` parsing. Works on Linux, macOS, and Windows.
-- **`--mem-limit PCT` flag (default 80).** When process RSS exceeds this percentage of total system RAM, adaptive thinning activates on heavy groups (cost >= 50K pairs). Three stages: 30-second session-window filter, 5-second session-window filter, quality-subset (earliest 64 per type). Set to 0 to disable entirely. Thinning stats appear in the closing banner when active.
-- **Phase 1 retroactive thinning.** Every 1000 files during ingestion, RSS is checked against `--mem-limit`. If over threshold, the 100 heaviest groups are thinned with a 30-second session-window filter in place. Prevents OOM during ingestion before Phase 4 pairing even starts.
-- **`--max-eapol-per-type` removed.** The hard per-type cap (default 2048) is replaced by the adaptive thinning pipeline above, which is domain-aware (session-window filtering preserves distinct handshake sessions) rather than a blind count cap.
-- **New runtime dependencies: `rayon` 1.x (173M+ downloads, parallel iteration) and `sysinfo` 0.33 (28M+ downloads, cross-platform memory queries).** Both pass `cargo deny` license checks (MIT/Apache-2.0). Dep count goes from 2 to 4.
+- **Cross-platform memory monitoring via `sysinfo`.** `current_rss_bytes()`, `current_rss_mib()`, `total_ram_bytes()`, and `ram_info()` replace Linux-only `/proc/self/status` and `/proc/meminfo` parsing. Works on Linux, macOS, and Windows. Process aborts with a clear "approaching OOM" message if RSS exceeds 80% of system RAM during Phase 1 ingestion or Phase 4 pairing.
+- **`--max-eapol-per-type` removed.** No per-type message cap; all messages flow into the pairing engine. Use `--per-file` to bound RSS on large corpora.
+- **New runtime dependencies: `rayon` 1.x (173M+ downloads, parallel iteration) and `sysinfo` 0.39 (cross-platform memory queries).** Both pass `cargo deny` license checks (MIT/Apache-2.0). Dep count goes from 2 to 4.
 - **Per-packet buffer recycling in pcap and pcapng readers.** `PcapReader` and `PcapngReader` reuse a single `Vec<u8>` across `next_packet()` calls via a new `PacketReader::recycle_buffer()` trait method. The caller returns the packet's data buffer after each iteration; the reader reuses the allocation for the next read. Eliminates ~32.5 million heap allocations on a 5.4 GB corpus (96.8M -> 64.3M total allocations, 34% reduction). The pcapng reader also eliminates a double `.to_vec()` in EPB parsing: the old code cloned the entire block body to free a borrow conflict, then cloned the packet data sub-slice; the new code inlines EPB field extraction into `read_next_block()` and copies only the packet data once into the recycled buffer.
 - **`EapolMessage`, `PairedHash`, and `PmkidEntry` box the cold `Option<FtFields>` field.** Changed from `Option<FtFields>` (58 bytes inline) to `Option<Box<FtFields>>` (8 bytes, null-pointer optimized). Over 99.9% of instances carry `None` (FT-PSK / 802.11r is rare in real-world captures); the boxed form saves 50 bytes per struct. `MessageStore` footprint drops from 280 MiB to 227 MiB on the test corpus (-19%). Combined with buffer recycling, peak RSS drops ~14% (726 -> 623 MiB).
-- 854 tests; `make check-all` passes clean.
+- `make check-all` passes clean.
 
 ### v0.3.10 -- 2026-05-16
 
@@ -222,7 +220,6 @@ Auxiliary outputs and runtime knobs.
 | `--nc-tolerance N`    | NC-dedup cluster span tolerance (default 8, matches hashcat `NONCE_ERROR_CORRECTIONS`) |
 | `--strict`            | shortcut: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --per-file --nc-dedup` |
 | `--per-file`          | pair + emit per input file, then clear per-file stores (bounded memory) |
-| `--max-eapol-per-type N` | per-(AP, STA) cap per EAPOL type (default 2048; 0 = unlimited) |
 | `--threads N`         | pairing thread count (default = CPU count) |
 | `--debug`             | timestamped Phase 1-4 diagnostic output to stdout |
 | `--quiet`             | suppress progress lines; closing banner still prints |
@@ -260,7 +257,7 @@ The parity test parses the oracle banner, refuses stale versions, and hard-fails
 
 ## Quality bar
 
-- 844 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
+- 904 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
 - Sibling workspace crate `tools/fixturegen` emits a deterministic pcap/pcapng corpus covering all 11 hash types, the 20 PMKID extraction sites, the 6 N#E# combos, and the link-layer / container variants. Crypto primitives anchored to KAT vectors
 - Strict clippy: `pedantic`, `nursery`, `cargo` enabled; `-D warnings`
 - `#![forbid(unsafe_code)]` at crate root
@@ -271,7 +268,7 @@ The parity test parses the oracle banner, refuses stale versions, and hard-fails
 ## Performance
 
 - Single-threaded throughput target: ~200 MB/s on a 250 MiB pcap
-- Phase 4 (pairing) parallelised via `std::thread::scope` with LPT round-robin group scheduling; `--threads=1` reproduces the serial path
+- Phase 4 (pairing) parallelised via rayon work-stealing across `--threads N` workers (defaults to available CPU count); `--threads=1` reproduces the serial path
 - `Arc<[u8]>` for `eapol_frame` storage avoids clone overhead on cross-combo reuse
 - Inline fingerprint dedup in `generate()` drops 50-90 % of retransmission duplicates at generation time
 - `HashSet<u64>` SipHash-1-3 fingerprints for global dedup -- no look-back window

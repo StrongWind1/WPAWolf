@@ -26,7 +26,7 @@ wpawolf/
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
 
-The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 746 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
+The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 904 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
 
 ## Before you open a PR
 

@@ -24,9 +24,9 @@ name: Security
 # Label each run with the workflow name so CI / Security / Release are easy
 # to tell apart in the Actions tab. Scheduled runs have no head_commit;
 # fall back to the ref name in that case.
-run-name: "Security -- ${{ github.event.head_commit.message || github.ref_name }}"
+run-name: Security -- ${{ github.event.head_commit.message || github.ref_name }}
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -34,7 +34,7 @@ on:
     # Cron uses UTC. 06:00 UTC roughly matches start-of-business in Europe,
     # late-evening in the Americas, so newly opened issues from an overnight
     # scan land on the maintainer's morning.
-    - cron: '0 6 * * *'
+    - cron: 0 6 * * *
   workflow_dispatch:
 
 concurrency:

@@ -11,71 +11,6 @@ pub mod collapse;
 pub mod combos;
 pub mod constraints;
 
-// --- Adaptive thinning ---
-
-/// Configuration for memory-pressure-driven group thinning.
-///
-/// Constructed from `--mem-limit` and `--eapoltimeout` CLI flags. Passed into
-/// the pair pipeline so `thin_group` can decide per-group whether to apply
-/// session-window filtering before pairing.
-#[derive(Debug, Clone)]
-pub struct ThinConfig {
-    /// RSS percentage of total RAM that triggers thinning (0-100). 0 = disabled.
-    pub mem_limit_pct: u8,
-    /// Total system RAM in bytes (from `sysinfo`).
-    pub total_ram_bytes: u64,
-    /// User's `--eapoltimeout` if set (microseconds), to avoid double-applying.
-    pub user_eapol_timeout_us: Option<u64>,
-}
-
-/// Which thinning stage was applied to a group (for stats/debug reporting).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinStage {
-    /// Cost within budget; no thinning applied.
-    None,
-    /// Applied 30-second session-window filter.
-    SessionWindow30s,
-    /// Applied 5-second session-window filter.
-    SessionWindow5s,
-    /// Kept only the best-quality N per type.
-    QualitySubset,
-}
-
-/// Result of thinning a single group.
-#[derive(Debug, Clone)]
-pub struct ThinResult {
-    /// Which stage was applied.
-    pub stage: ThinStage,
-    /// Messages before thinning.
-    pub before_count: usize,
-    /// Messages after thinning.
-    pub after_count: usize,
-}
-/// Aggregate thinning stats across all groups in a pairing run.
-#[derive(Debug, Default, Clone)]
-pub struct ThinAggregateStats {
-    /// Groups thinned with the 30-second session-window filter.
-    pub groups_thinned_30s: u64,
-    /// Groups thinned with the 5-second session-window filter.
-    pub groups_thinned_5s: u64,
-    /// Groups thinned to a quality-subset (max 64 per type).
-    pub groups_thinned_subset: u64,
-    /// Total messages removed by adaptive thinning.
-    pub messages_thinned: u64,
-}
-
-impl ThinAggregateStats {
-    const fn record(&mut self, result: &ThinResult) {
-        match result.stage {
-            ThinStage::None => {},
-            ThinStage::SessionWindow30s => self.groups_thinned_30s += 1,
-            ThinStage::SessionWindow5s => self.groups_thinned_5s += 1,
-            ThinStage::QualitySubset => self.groups_thinned_subset += 1,
-        }
-        self.messages_thinned += result.before_count.saturating_sub(result.after_count) as u64;
-    }
-}
-
 pub mod nc_dedup;
 
 use std::sync::Arc;
@@ -170,98 +105,8 @@ use crate::debug::{DebugPrinter, HEAVY_GROUP_COST, group_progress_interval};
 use crate::pair::collapse::collapse;
 use crate::pair::combos::{PairConfig, generate};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
-use crate::progress::current_rss_bytes;
-use crate::store::messages::{EapolMessage, MessageStore, session_window_filter};
+use crate::store::messages::{EapolMessage, MessageStore};
 use crate::types::{MacPair, MsgType};
-
-/// Cost threshold below which thinning is never applied (group too small to matter).
-const THIN_COST_THRESHOLD: u64 = 50_000;
-
-/// Groups whose pairing cost exceeds this are thinned unconditionally, regardless
-/// of current RSS. Prevents single-group O(n^2) blowups (e.g. rogue-AP
-/// captures with 20K+ M1/M2 per group) from attempting multi-GiB allocations
-/// while overall memory pressure is still low.
-const HARD_COST_CEILING: u64 = 25_000_000;
-
-/// Checks whether a group should be thinned, then applies staged session-window
-/// filters if needed.
-///
-/// Thinning fires on two independent triggers (either is sufficient):
-///   1. **Cost ceiling**: group cost >= `HARD_COST_CEILING` (unconditional).
-///   2. **Memory pressure**: group cost >= `THIN_COST_THRESHOLD` AND current RSS
-///      exceeds `--mem-limit` percent of system RAM.
-///
-/// Returns `None` when no thinning was applied (the caller should use the
-/// original slice as-is), or `Some((filtered, result))` when filtering ran.
-/// This avoids a heap clone on the common no-thinning path.
-#[must_use]
-pub fn thin_group(messages: &[EapolMessage], thin_config: &ThinConfig) -> Option<(Vec<EapolMessage>, ThinResult)> {
-    if thin_config.mem_limit_pct == 0 {
-        return None;
-    }
-    let cost = estimate_group_cost(messages);
-    if cost < THIN_COST_THRESHOLD {
-        return None;
-    }
-
-    let cost_forced = cost >= HARD_COST_CEILING;
-
-    if !cost_forced {
-        let rss = current_rss_bytes();
-        let threshold = u64::from(thin_config.mem_limit_pct) * thin_config.total_ram_bytes / 100;
-        if rss < threshold {
-            return None;
-        }
-    }
-
-    let before_count = messages.len();
-
-    if thin_config.user_eapol_timeout_us.is_none_or(|t| t > 30_000_000) {
-        let filtered = session_window_filter(messages, 30_000_000);
-        if estimate_group_cost(&filtered) < THIN_COST_THRESHOLD {
-            let after_count = filtered.len();
-            return Some((filtered, ThinResult { stage: ThinStage::SessionWindow30s, before_count, after_count }));
-        }
-    }
-
-    let filtered_5s = session_window_filter(messages, 5_000_000);
-    if thin_config.user_eapol_timeout_us.is_none_or(|t| t > 5_000_000)
-        && estimate_group_cost(&filtered_5s) < THIN_COST_THRESHOLD
-    {
-        let after_count = filtered_5s.len();
-        return Some((filtered_5s, ThinResult { stage: ThinStage::SessionWindow5s, before_count, after_count }));
-    }
-
-    let mut filtered = filtered_5s;
-    quality_subset_filter(&mut filtered);
-
-    let after_count = filtered.len();
-    Some((filtered, ThinResult { stage: ThinStage::QualitySubset, before_count, after_count }))
-}
-
-/// Keeps only the earliest 64 messages per type (M1/M2/M3/M4).
-fn quality_subset_filter(filtered: &mut Vec<EapolMessage>) {
-    for msg_type in [MsgType::M1, MsgType::M2, MsgType::M3, MsgType::M4] {
-        let typed_count = filtered.iter().filter(|m| m.msg_type == msg_type).count();
-        if typed_count > 64 {
-            let mut ts_pairs: Vec<(usize, u64)> = filtered
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.msg_type == msg_type)
-                .map(|(i, m)| (i, m.timestamp))
-                .collect();
-            ts_pairs.sort_unstable_by_key(|&(_, ts)| ts);
-            ts_pairs.truncate(64);
-            let keep_set: std::collections::HashSet<usize> = ts_pairs.into_iter().map(|(i, _)| i).collect();
-            let mut idx = 0;
-            filtered.retain(|m| {
-                let current = idx;
-                idx += 1;
-                m.msg_type != msg_type || keep_set.contains(&current)
-            });
-        }
-    }
-}
 
 /// Folds `other` into `acc` in place: `collapsed_lines` and `cluster_count`
 /// sum component-wise; `max_cluster_size` takes the larger of the two.
@@ -319,53 +164,45 @@ fn pair_one_group(
 pub fn pair_all_groups_streaming<F>(
     store: &MessageStore,
     config: &PairConfig,
-    thin_config: Option<&ThinConfig>,
     thread_count: usize,
     debug: &DebugPrinter,
     on_group: F,
-) -> (NcDedupStats, ThinAggregateStats)
+) -> NcDedupStats
 where
     F: Fn(Vec<PairedHash>) + Send + Sync,
 {
     let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
 
     if groups.is_empty() {
-        return (NcDedupStats::default(), ThinAggregateStats::default());
+        return NcDedupStats::default();
     }
 
     let total_groups = groups.len();
     let groups_done = AtomicUsize::new(0);
     let pairs_done = AtomicUsize::new(0);
     let all_nc = Mutex::new(NcDedupStats::default());
-    let all_thin = Mutex::new(ThinAggregateStats::default());
 
     let process_group = |mac_pair: &MacPair, messages: &[EapolMessage]| {
-        let pairing_messages: Vec<EapolMessage>;
-        #[allow(clippy::option_if_let_else, reason = "map_or cannot express the local-variable assignment")]
-        let msgs_ref: &[EapolMessage] = if let Some(tc) = thin_config {
-            if let Some((filtered, result)) = thin_group(messages, tc) {
-                debug.group_thinned(mac_pair.ap, mac_pair.sta, &result);
-                if let Ok(mut guard) = all_thin.lock() {
-                    guard.record(&result);
-                }
-                pairing_messages = filtered;
-                &pairing_messages
-            } else {
-                messages
-            }
-        } else {
-            messages
-        };
-        let (m1, m2, m3, m4, cost) = group_counts_and_cost(msgs_ref);
+        let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
         if cost >= HEAVY_GROUP_COST {
-            let _ = debug.memory_check(&format!(
+            let ctx = format!(
                 "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
                 mac_pair.ap, mac_pair.sta
-            ));
+            );
+            if let Some(pct_tenths) = debug.memory_check(&ctx)
+                && pct_tenths >= 800
+            {
+                let rss_mib = crate::progress::current_rss_mib().unwrap_or(0);
+                let total_mib = crate::progress::total_ram_bytes() / (1024 * 1024);
+                println!(
+                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size, use --per-file, or increase available RAM."
+                );
+                std::process::exit(1);
+            }
         }
         let t0 = Instant::now();
-        let (pairs, nc) = pair_one_group(mac_pair, msgs_ref, config);
+        let (pairs, nc) = pair_one_group(mac_pair, messages, config);
         let elapsed_us = t0.elapsed().as_micros();
         debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
         let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -394,9 +231,7 @@ where
         });
     }
 
-    let nc = all_nc.into_inner().unwrap_or_default();
-    let thin = all_thin.into_inner().unwrap_or_default();
-    (nc, thin)
+    all_nc.into_inner().unwrap_or_default()
 }
 
 /// Collects all pairs into a `Vec`. Prefer `pair_all_groups_streaming` when
@@ -409,7 +244,7 @@ pub fn pair_all_groups(
     debug: &DebugPrinter,
 ) -> (Vec<PairedHash>, NcDedupStats) {
     let all_pairs = Mutex::new(Vec::<PairedHash>::new());
-    let (nc, _thin) = pair_all_groups_streaming(store, config, None, thread_count, debug, |pairs| {
+    let nc = pair_all_groups_streaming(store, config, thread_count, debug, |pairs| {
         if let Ok(mut guard) = all_pairs.lock() {
             guard.extend(pairs);
         }
