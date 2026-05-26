@@ -10,8 +10,10 @@
 
 #![forbid(unsafe_code)]
 
-// flate2 is used by the library (wpawolf::input::gzip). The binary does not import it
-// directly, so suppress the unused_crate_dependencies lint with the `as _` form.
+// flate2 and crc32fast are used by the library (wpawolf::input::gzip and
+// wpawolf::link::fcs respectively). The binary does not import them directly,
+// so suppress the unused_crate_dependencies lint with the `as _` form.
+use crc32fast as _;
 use flate2 as _;
 
 use clap::Parser;
@@ -353,6 +355,65 @@ fn main() {
     }
 }
 
+// --- Link-layer strip + FCS resolve + recovery ---
+
+/// Strips the link-layer header, validates FCS via CRC-32, and attempts tiered
+/// recovery on failure. Returns `None` (and logs/counts the error) when the
+/// frame is unrecoverable.
+fn strip_and_resolve<'a>(
+    packet: &'a input::Packet,
+    dlt: u16,
+    stats: &mut Stats,
+    logger: &mut Logger,
+) -> Option<&'a [u8]> {
+    match link::strip(&packet.data, dlt) {
+        Ok((payload, header_says_fcs)) => {
+            if dlt == link::DLT_RADIOTAP {
+                if let Some(v) = link::radiotap::version_warning(&packet.data) {
+                    stats.radiotap_version_nonzero += 1;
+                    logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
+                }
+            }
+            let badfcs = dlt == link::DLT_RADIOTAP && link::radiotap::has_badfcs(&packet.data);
+            let outcome = link::fcs::resolve(payload, header_says_fcs, badfcs);
+            match outcome {
+                link::fcs::FcsOutcome::HeaderAndCrcAgree => stats.fcs_header_and_crc_agree += 1,
+                link::fcs::FcsOutcome::CrcDetected => {
+                    stats.fcs_detected_by_crc += 1;
+                    logger.log_fcs_detected_by_crc(packet.timestamp_us, packet.interface_id);
+                },
+                link::fcs::FcsOutcome::BadFcsFlagged => stats.fcs_badfcs_flagged += 1,
+                link::fcs::FcsOutcome::CrcMismatchNoFlag => {
+                    stats.fcs_crc_mismatch_no_flag += 1;
+                    logger.log_fcs_crc_mismatch(packet.timestamp_us, packet.interface_id);
+                },
+                link::fcs::FcsOutcome::Neither => stats.fcs_neither += 1,
+            }
+            Some(link::fcs::strip_fcs(payload, outcome))
+        },
+        Err(e) => {
+            if let Some(result) = link::recover::recover(&packet.data, dlt) {
+                match result.tier {
+                    link::recover::RecoveryTier::ComputedFromPresent => {
+                        stats.recovered_tier2 += 1;
+                        logger.log_recovered_tier2(packet.timestamp_us, packet.interface_id, result.offset);
+                    },
+                    link::recover::RecoveryTier::Crc32Scan => {
+                        stats.recovered_tier3 += 1;
+                        logger.log_recovered_tier3(packet.timestamp_us, packet.interface_id, result.offset, dlt);
+                    },
+                }
+                Some(result.frame)
+            } else {
+                stats.link_errors += 1;
+                logger.log_plcp_error(packet.timestamp_us, packet.interface_id, &format!("link strip failed: {e}"));
+                logger.log_recovery_exhausted(packet.timestamp_us, packet.interface_id, dlt, packet.data.len());
+                None
+            }
+        },
+    }
+}
+
 // --- Pipeline ---
 
 /// Runs the full two-phase (Collect + Output) pipeline.
@@ -559,28 +620,11 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     }
 
                     // Strip the link-layer radio header to expose the raw 802.11 frame.
-                    // Capture the underlying error (unsupported DLT vs truncated radiotap
-                    // header etc.) so `[plcp_error]` log entries are diagnostic, not
-                    // a generic "link strip failed".
                     if link::has_ampdu_status(&packet.data, dlt) {
                         stats.ampdu_status_frames += 1;
                     }
-                    let frame_data = match link::strip(&packet.data, dlt) {
-                        Ok((d, had_fcs)) => {
-                            if had_fcs {
-                                stats.fcs_stripped_frames += 1;
-                            }
-                            d
-                        },
-                        Err(e) => {
-                            stats.link_errors += 1;
-                            logger.log_plcp_error(
-                                packet.timestamp_us,
-                                packet.interface_id,
-                                &format!("link strip failed: {e}"),
-                            );
-                            continue;
-                        },
+                    let Some(frame_data) = strip_and_resolve(&packet, dlt, &mut stats, &mut logger) else {
+                        continue;
                     };
 
                     // Parse the 802.11 MAC header. The four-state classifier keeps

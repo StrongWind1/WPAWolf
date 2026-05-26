@@ -104,6 +104,36 @@ impl Logger {
         self.write_line(&format!("[plcp_error] {timestamp_us} {interface_id} {details}"));
     }
 
+    /// Logs a radiotap frame with non-zero `it_version` that was parsed anyway (Tier 1 recovery).
+    pub fn log_radiotap_version_nonzero(&mut self, timestamp_us: u64, interface_id: u32, version: u8) {
+        self.write_line(&format!("[radiotap_version_nonzero] {timestamp_us} {interface_id} version={version}"));
+    }
+
+    /// Logs FCS detected by CRC-32 but not announced by the link-layer header.
+    pub fn log_fcs_detected_by_crc(&mut self, timestamp_us: u64, interface_id: u32) {
+        self.write_line(&format!("[fcs_detected_by_crc] {timestamp_us} {interface_id}"));
+    }
+
+    /// Logs FCS announced by header but CRC-32 does not confirm (corrupt frame).
+    pub fn log_fcs_crc_mismatch(&mut self, timestamp_us: u64, interface_id: u32) {
+        self.write_line(&format!("[fcs_crc_mismatch] {timestamp_us} {interface_id}"));
+    }
+
+    /// Logs a frame recovered via Tier 2 (it_present-computed offset).
+    pub fn log_recovered_tier2(&mut self, timestamp_us: u64, interface_id: u32, offset: usize) {
+        self.write_line(&format!("[frame_recovered_tier2] {timestamp_us} {interface_id} offset={offset}"));
+    }
+
+    /// Logs a frame recovered via Tier 3 (CRC-32 offset scan).
+    pub fn log_recovered_tier3(&mut self, timestamp_us: u64, interface_id: u32, offset: usize, dlt: u16) {
+        self.write_line(&format!("[frame_recovered_crc32] {timestamp_us} {interface_id} offset={offset} dlt={dlt}"));
+    }
+
+    /// Logs exhausted recovery -- all tiers failed, frame dropped.
+    pub fn log_recovery_exhausted(&mut self, timestamp_us: u64, interface_id: u32, dlt: u16, data_len: usize) {
+        self.write_line(&format!("[frame_recovery_exhausted] {timestamp_us} {interface_id} dlt={dlt} len={data_len}"));
+    }
+
     /// Logs a packet whose `interface_id` has no IDB-registered DLT.
     ///
     /// In classic pcap there is exactly one interface (id 0) and the global header

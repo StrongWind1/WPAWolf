@@ -35,7 +35,7 @@ use crate::frame::ie::{FteInputs, ampe_with_pmkid, fte, mde, osen_ie, rsn_ie, ss
 use crate::frame::kde::pmkid as pmkid_kde;
 use crate::frame::probe::{probe_request, probe_request_broadcast_to_ap};
 use crate::handshake::{FT_MDID, FT_R0KH_ID, FT_R1KH_ID, Handshake, Inputs};
-use crate::linklayer::{LinkType, avs, ppi, prism, prism_wrapping_avs, radiotap};
+use crate::linklayer::{LinkType, avs, ppi, prism, prism_wrapping_avs, radiotap, sll, sll2};
 use crate::pcap_writer::{Packet, PcapMagic};
 
 /// One fixture file the generator will write.
@@ -648,7 +648,7 @@ fn combo_section() -> Result<Vec<Fixture>> {
 ///
 /// Each fixture carries the same minimal `Beacon + M1 + M2` payload so the
 /// emitted output should be identical across link-layer variants -- any
-/// drift is a regression in `src/link/{radiotap,ppi,prism,avs}.rs`. All 7
+/// drift is a regression in `src/link/{radiotap,ppi,prism,avs,sll}.rs`. All 11
 /// variants intentionally share the same AP/STA pair (`IDX_LINK_LAYERS`) so
 /// the cross-variant invariant test compares lines that differ only in the
 /// link-layer header bytes the parser strips.
@@ -678,6 +678,10 @@ fn link_layers_section() -> Result<Vec<Fixture>> {
             LinkType::Prism,
             LinkWrap::PrismWrappingAvs,
         ),
+        ("ll_sll_raw", "Linux SLL (DLT 113), ARPHRD 801 raw 802.11", LinkType::Sll, LinkWrap::SllRaw),
+        ("ll_sll_radiotap", "Linux SLL (DLT 113), ARPHRD 803 radiotap inner", LinkType::Sll, LinkWrap::SllRadiotap),
+        ("ll_sll2_raw", "Linux SLL2 (DLT 276), ARPHRD 801 raw 802.11", LinkType::Sll2, LinkWrap::Sll2Raw),
+        ("ll_sll2_radiotap", "Linux SLL2 (DLT 276), ARPHRD 803 radiotap inner", LinkType::Sll2, LinkWrap::Sll2Radiotap),
     ];
 
     let mut out = Vec::with_capacity(variants.len());
@@ -1416,6 +1420,10 @@ enum LinkWrap {
     Avs,
     Ppi,
     PrismWrappingAvs,
+    SllRaw,
+    SllRadiotap,
+    Sll2Raw,
+    Sll2Radiotap,
 }
 
 /// Wrap a sequence of 802.11 frames in radiotap headers and convert them to
@@ -1439,6 +1447,10 @@ fn wrap_with(frames: &[Vec<u8>], wrap: LinkWrap) -> Vec<Packet> {
                 LinkWrap::Avs => avs(frame),
                 LinkWrap::Ppi => ppi(frame),
                 LinkWrap::PrismWrappingAvs => prism_wrapping_avs(frame),
+                LinkWrap::SllRaw => sll(frame, 801),
+                LinkWrap::SllRadiotap => sll(&radiotap(frame, false), 803),
+                LinkWrap::Sll2Raw => sll2(frame, 801),
+                LinkWrap::Sll2Radiotap => sll2(&radiotap(frame, false), 803),
             };
             Packet { ts_sec: TS_BASE_SEC, ts_subsec: u32::try_from(i).unwrap_or(0), data }
         })

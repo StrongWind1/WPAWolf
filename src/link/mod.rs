@@ -2,13 +2,17 @@
 //!
 //! Matches on the DLT (Data Link Type) value from the pcap/pcapng interface descriptor
 //! and strips the appropriate radio/monitor-mode header to expose the raw IEEE 802.11
-//! frame payload. Supported DLTs: 105 (raw 802.11), 119 (Prism), 127 (Radiotap),
-//! 163 (AVS), 192 (PPI). Unknown DLTs are logged and the packet is skipped.
+//! frame payload. Supported DLTs: 105 (raw 802.11), 113 (Linux SLL), 119 (Prism),
+//! 127 (Radiotap), 163 (AVS), 192 (PPI), 276 (Linux SLL2). Unknown DLTs are logged
+//! and the packet is skipped.
 
 pub mod avs;
+pub mod fcs;
 pub mod ppi;
 pub mod prism;
 pub mod radiotap;
+pub mod recover;
+pub mod sll;
 
 use crate::types::{Error, Result};
 
@@ -23,21 +27,22 @@ pub const DLT_RADIOTAP: u16 = 127;
 pub const DLT_AVS: u16 = 163;
 /// Per-Packet Information header. [libpcap dlt.h: `DLT_PPI`]
 pub const DLT_PPI: u16 = 192;
+/// Linux cooked capture v1 (`any` device). [libpcap dlt.h: `DLT_LINUX_SLL`]
+pub const DLT_LINUX_SLL: u16 = 113;
+/// Linux cooked capture v2 (`any` device, with interface index). [libpcap dlt.h: `DLT_LINUX_SLL2`]
+pub const DLT_LINUX_SLL2: u16 = 276;
 
 /// Strips the link-layer header from `data` for the given `dlt` and returns
-/// `(payload, had_fcs)`.
+/// `(payload, header_says_fcs)`.
 ///
-/// `payload` is the raw IEEE 802.11 frame bytes with any trailing FCS already
-/// chopped off; `had_fcs` flags whether the strip happened.
+/// `payload` is the raw IEEE 802.11 frame bytes **including** any trailing FCS.
+/// FCS tail-strip is NOT performed here -- the caller is responsible for running
+/// `fcs::resolve()` to cross-check the header's FCS flag against CRC-32 and
+/// then calling `fcs::strip_fcs()` on the result.
 ///
-/// Each submodule computes the byte offset where the 802.11 payload begins.
-/// Some captures (radiotap with the Flags-FCS bit set) additionally append a
-/// 4-byte FCS at the end of every frame; if the radio metadata announces it,
-/// we slice the FCS off so IE walkers don't stumble into trailing checksum
-/// bytes near the frame end and emit garbage tag/length pairs.
-///
-/// FCS detection currently covers only `DLT_RADIOTAP`. Other DLTs lack a
-/// reliable per-frame FCS indicator, so they always return `had_fcs = false`.
+/// `header_says_fcs` is the link-layer header's FCS indicator: `true` when the
+/// radiotap Flags field has bit 4 set, `false` for all other DLTs (which lack
+/// a reliable per-frame FCS signal).
 ///
 /// # Errors
 ///
@@ -45,7 +50,7 @@ pub const DLT_PPI: u16 = 192;
 /// the end of `data`. Returns `Err(Error::UnknownFormat(...))` for unsupported
 /// DLTs.
 pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
-    let (offset, had_fcs) = match dlt {
+    let (offset, header_says_fcs) = match dlt {
         // Raw 802.11: no header to strip, no FCS metadata.
         DLT_IEEE802_11 => (0usize, false),
         // Radiotap: variable-length header, length in bytes 2-3 (u16 LE). FCS
@@ -60,6 +65,10 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
         // PPI's 802.11-Common field has an FCS-error bit but no spec-clean
         // FCS-at-end signal we can rely on; skip tail-strip.
         DLT_PPI => (ppi::ieee80211_offset(data)?, false),
+        // Linux cooked capture: meta-header wrapping another link-layer format.
+        // ARPHRD dispatch determines the inner parser (raw/prism/radiotap).
+        DLT_LINUX_SLL => sll::strip(data)?,
+        DLT_LINUX_SLL2 => sll::strip_v2(data)?,
 
         other => {
             return Err(Error::UnknownFormat(format!("unsupported DLT {other}")));
@@ -72,17 +81,7 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
         got: data.len(),
     })?;
 
-    // Chop the trailing 4-byte FCS when announced. Frames shorter than 4 bytes
-    // cannot have an FCS even if the bit is set (truncated radio); skip the
-    // strip in that case so we still hand the body to the parser.
-    let stripped = if had_fcs {
-        let cut = payload.len().saturating_sub(4);
-        payload.get(..cut).unwrap_or(payload)
-    } else {
-        payload
-    };
-
-    Ok((stripped, had_fcs))
+    Ok((payload, header_says_fcs))
 }
 
 /// Extracts the channel frequency (MHz) from the radio metadata in `data` for the given DLT.
@@ -94,7 +93,12 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
 /// Band mapping: 2412-2484 MHz = 2.4 GHz; 5180-5825 MHz = 5 GHz; 5925-7125 MHz = 6 GHz.
 #[must_use]
 pub fn channel_freq(data: &[u8], dlt: u16) -> Option<u16> {
-    if dlt == DLT_RADIOTAP { radiotap::channel_freq(data) } else { None }
+    match dlt {
+        DLT_RADIOTAP => radiotap::channel_freq(data),
+        DLT_LINUX_SLL => sll::channel_freq(data),
+        DLT_LINUX_SLL2 => sll::channel_freq_v2(data),
+        _ => None,
+    }
 }
 
 /// Returns true when the radio header advertises the radiotap A-MPDU Status field
@@ -106,5 +110,10 @@ pub fn channel_freq(data: &[u8], dlt: u16) -> Option<u16> {
 /// captures. See `ARCHITECTURE.md §3.3` transport-vector inventory item 6.
 #[must_use]
 pub fn has_ampdu_status(data: &[u8], dlt: u16) -> bool {
-    if dlt == DLT_RADIOTAP { radiotap::has_ampdu_status(data) } else { false }
+    match dlt {
+        DLT_RADIOTAP => radiotap::has_ampdu_status(data),
+        DLT_LINUX_SLL => sll::has_ampdu_status(data),
+        DLT_LINUX_SLL2 => sll::has_ampdu_status_v2(data),
+        _ => false,
+    }
 }
