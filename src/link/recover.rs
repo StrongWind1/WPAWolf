@@ -117,14 +117,6 @@ pub fn compute_offset_from_present(data: &[u8]) -> Option<usize> {
 
 // --- Tier 3: CRC-32 offset scan ---
 
-/// Candidate byte offsets to try when all header fields are corrupt.
-///
-/// Sorted ascending so the first CRC-32 match is the smallest (most plausible)
-/// offset. Covers: raw 802.11 (0), minimum radiotap (8), common radiotap sizes
-/// with various field combinations, AVS (64), Prism (144), SLL+raw (16),
-/// SLL2+raw (20).
-const CANDIDATE_OFFSETS: &[usize] = &[0, 8, 9, 12, 13, 14, 16, 18, 20, 24, 32, 36, 40, 48, 52, 56, 64, 144];
-
 /// Minimum candidate slice length for CRC-32 offset scan: 10-byte control frame
 /// (FC + Duration + RA) plus 4-byte FCS = 14 bytes. Shorter slices produce
 /// systematic false positives because `crc32([0x00]*4) == RESIDUE` (the
@@ -132,17 +124,23 @@ const CANDIDATE_OFFSETS: &[usize] = &[0, 8, 9, 12, 13, 14, 16, 18, 20, 24, 32, 3
 /// trailing bytes in short control frames trigger these.
 const MIN_SCAN_SLICE: usize = 14;
 
-/// Scans candidate offsets using CRC-32 FCS residue to find the 802.11 frame.
+/// Maximum link-layer header offset to scan. 144 = Prism header, the largest
+/// known header format. Beyond this, no standard link-layer encapsulation exists.
+const MAX_SCAN_OFFSET: usize = 144;
+
+/// Scans every byte offset from 0 through `MAX_SCAN_OFFSET` using CRC-32 FCS
+/// residue to find the 802.11 frame.
 ///
 /// Returns `Some((offset, payload_without_fcs))` on the first CRC-32 match.
-/// The FCS (4 trailing bytes) is already stripped from the returned slice.
-/// Returns `None` if no candidate offset produces a valid CRC-32.
+/// Ascending order ensures the smallest offset (most plausible header size) wins.
+/// Returns `None` if no offset produces a valid CRC-32.
 #[must_use]
 pub fn crc32_offset_scan(data: &[u8]) -> Option<(usize, &[u8])> {
-    for &offset in CANDIDATE_OFFSETS {
+    let max_off = data.len().saturating_sub(MIN_SCAN_SLICE).min(MAX_SCAN_OFFSET);
+    for offset in 0..=max_off {
         let candidate = data.get(offset..)?;
         if candidate.len() < MIN_SCAN_SLICE {
-            continue;
+            break;
         }
         if fcs::verify_crc32(candidate) {
             let stripped = candidate.get(..candidate.len() - 4).unwrap_or(candidate);
