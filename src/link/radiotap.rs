@@ -57,68 +57,61 @@ pub fn version_warning(data: &[u8]) -> Option<u8> {
     if v == 0 { None } else { Some(v) }
 }
 
-/// Returns `true` if the radiotap header announces a 4-byte FCS appended to
-/// the 802.11 frame body. The caller should chop the last 4 bytes from the
-/// payload before handing it to higher layers.
+/// Locates the radiotap Flags byte and returns it, or `None` if the Flags
+/// field is absent or the header is too short/corrupt to reach it.
 ///
-/// FCS presence is encoded in the Flags field (bit 4, mask `0x10`,
-/// `IEEE80211_RADIOTAP_F_FCS`). The Flags field is itself optional --
-/// `it_present` bit 1 tells us whether the variable-fields region contains a
-/// 1-byte Flags entry. When either signal is absent we conservatively return
-/// `false` (no tail-strip), matching the pre-FCS-aware behaviour. Per
-/// radiotap.org §3 (Defined Fields, "Flags").
-#[must_use]
-pub fn has_fcs(data: &[u8]) -> bool {
+/// Walks the `it_present` chain and skips TSFT (bit 0) to reach the Flags
+/// field (bit 1). Per radiotap.org §3 (Defined Fields, "Flags").
+fn read_flags_byte(data: &[u8]) -> Option<u8> {
     if data.len() < 8 {
-        return false;
+        return None;
     }
-    // it_version relaxed: non-zero values no longer block FCS detection.
-    let Some(len_bytes) = data.get(2..4).and_then(|s| <[u8; 2]>::try_from(s).ok()) else {
-        return false;
-    };
-    let it_len = u16::from_le_bytes(len_bytes) as usize;
+    let it_len = u16::from_le_bytes(data.get(2..4)?.try_into().ok()?) as usize;
     if it_len < 8 || it_len > data.len() {
-        return false;
+        return None;
     }
-    // First it_present word.
-    let Some(pw_bytes) = data.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
-        return false;
-    };
-    let first_pw = u32::from_le_bytes(pw_bytes);
-    // Flags is bit 1 of it_present -- absent means no FCS signal.
+    let first_pw = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?);
     if first_pw & (1 << 1) == 0 {
-        return false;
+        return None;
     }
-    // Walk past all chained present words (bit 31 = extended present follows).
     let mut pos = 4usize;
     loop {
-        let Some(pw_bytes) = data.get(pos..pos + 4).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
-            return false;
-        };
-        let pw = u32::from_le_bytes(pw_bytes);
+        let pw = u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?);
         pos += 4;
         if pw & (1 << 31) == 0 {
             break;
         }
         if pos + 4 > it_len {
-            return false;
+            return None;
         }
     }
-    // pos now indexes the first variable-length field.
-    // Bit 0: TSFT (u64, 8-byte aligned from byte 0). Skip if present.
     if first_pw & (1 << 0) != 0 {
         let pad = (8 - (pos % 8)) % 8;
         pos += pad + 8;
     }
-    // Bit 1: Flags (u8, no alignment) -- this is what we want.
     if pos >= it_len {
-        return false;
+        return None;
     }
-    let Some(&flags) = data.get(pos) else {
-        return false;
-    };
-    // Bit 4 of Flags = `IEEE80211_RADIOTAP_F_FCS` (radiotap.org).
-    (flags & 0x10) != 0
+    data.get(pos).copied()
+}
+
+/// Returns `true` if the radiotap Flags field has the FCS-at-end bit set.
+///
+/// Bit 4 (mask `0x10`, `IEEE80211_RADIOTAP_F_FCS`) indicates that a 4-byte
+/// FCS is appended to the 802.11 frame body. Per radiotap.org §3.
+#[must_use]
+pub fn has_fcs(data: &[u8]) -> bool {
+    read_flags_byte(data).is_some_and(|f| f & 0x10 != 0)
+}
+
+/// Returns `true` if the radiotap Flags field has the BADFCS bit set.
+///
+/// Bit 6 (mask `0x40`, `IEEE80211_RADIOTAP_F_BADFCS`) indicates the radio
+/// received this frame with a failed FCS check on the air. The FCS bytes are
+/// still present but corrupt. Per radiotap.org §3.
+#[must_use]
+pub fn has_badfcs(data: &[u8]) -> bool {
+    read_flags_byte(data).is_some_and(|f| f & 0x40 != 0)
 }
 
 /// Returns true when the radiotap header advertises the A-MPDU Status field

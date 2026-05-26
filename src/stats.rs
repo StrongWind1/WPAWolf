@@ -532,10 +532,14 @@ pub struct Stats {
     /// didn't announce it (common for Prism, AVS, PPI, SLL which lack a
     /// per-frame FCS flag).
     pub fcs_detected_by_crc: u64,
-    /// FCS outcome: header said FCS present, but CRC-32 does not confirm.
-    /// Still stripped (trust the header). Indicates a corrupt frame payload
-    /// or an incorrect FCS flag from the driver.
-    pub fcs_crc_mismatch: u64,
+    /// FCS outcome: header said FCS present, CRC-32 does not confirm, AND the
+    /// radiotap BADFCS flag (Flags bit 6, 0x40) is set. The radio received this
+    /// frame with a failed checksum on the air. FCS bytes are present but corrupt.
+    pub fcs_badfcs_flagged: u64,
+    /// FCS outcome: header said FCS present, CRC-32 does not confirm, but NO
+    /// BADFCS flag. Unexpected -- corruption during capture or processing, not
+    /// on the air.
+    pub fcs_crc_mismatch_no_flag: u64,
     /// FCS outcome: neither header nor CRC-32 indicates FCS. Not stripped.
     pub fcs_neither: u64,
 
@@ -1022,7 +1026,8 @@ impl Stats {
         nz!("frames recovered via CRC-32 offset scan (Tier 3)", self.recovered_tier3);
         nz!("FCS stripped (header + CRC-32 agree)", self.fcs_header_and_crc_agree);
         nz!("FCS stripped (CRC-32 detected, header silent)", self.fcs_detected_by_crc);
-        nz!("FCS stripped (header announced, CRC-32 mismatch)", self.fcs_crc_mismatch);
+        nz!("FCS stripped (BADFCS flagged; corrupt on air)", self.fcs_badfcs_flagged);
+        nz!("FCS stripped (header announced, CRC-32 mismatch, no BADFCS)", self.fcs_crc_mismatch_no_flag);
         nz!("radiotap A-MPDU Status field present (it_present bit 20)", self.ampdu_status_frames);
         nz!("fragments seen (non-final, buffered for reassembly)", self.fragment_stats.fragments_seen);
         nz!("  reassembled MSDUs (recovered)", self.fragment_stats.fragments_reassembled);

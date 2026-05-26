@@ -374,15 +374,17 @@ fn strip_and_resolve<'a>(
                     logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
                 }
             }
-            let outcome = link::fcs::resolve(payload, header_says_fcs);
+            let badfcs = dlt == link::DLT_RADIOTAP && link::radiotap::has_badfcs(&packet.data);
+            let outcome = link::fcs::resolve(payload, header_says_fcs, badfcs);
             match outcome {
                 link::fcs::FcsOutcome::HeaderAndCrcAgree => stats.fcs_header_and_crc_agree += 1,
                 link::fcs::FcsOutcome::CrcDetected => {
                     stats.fcs_detected_by_crc += 1;
                     logger.log_fcs_detected_by_crc(packet.timestamp_us, packet.interface_id);
                 },
-                link::fcs::FcsOutcome::CrcMismatch => {
-                    stats.fcs_crc_mismatch += 1;
+                link::fcs::FcsOutcome::BadFcsFlagged => stats.fcs_badfcs_flagged += 1,
+                link::fcs::FcsOutcome::CrcMismatchNoFlag => {
+                    stats.fcs_crc_mismatch_no_flag += 1;
                     logger.log_fcs_crc_mismatch(packet.timestamp_us, packet.interface_id);
                 },
                 link::fcs::FcsOutcome::Neither => stats.fcs_neither += 1,

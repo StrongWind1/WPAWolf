@@ -32,17 +32,19 @@ pub fn verify_crc32(frame: &[u8]) -> bool {
     frame.len() >= MIN_FCS_LEN && crc32fast::hash(frame) == CRC32_RESIDUE
 }
 
-/// Outcome of the 2x2 FCS decision matrix (header signal vs CRC-32 signal).
+/// Outcome of the FCS decision matrix (header signal vs CRC-32 signal vs BADFCS flag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FcsOutcome {
     /// Header said FCS, CRC-32 confirmed. Strip last 4 bytes.
     HeaderAndCrcAgree,
     /// Header said no FCS, CRC-32 confirmed FCS present. Strip last 4 bytes.
-    /// The header was wrong -- the capture driver included FCS but didn't announce it.
     CrcDetected,
-    /// Header said FCS, CRC-32 does not confirm. Strip last 4 bytes anyway
-    /// (trust the header -- the frame payload may be corrupt).
-    CrcMismatch,
+    /// Header said FCS, CRC-32 does not confirm, BADFCS flag set. The radio
+    /// received this frame with a failed checksum on the air. Strip anyway.
+    BadFcsFlagged,
+    /// Header said FCS, CRC-32 does not confirm, no BADFCS flag. Unexpected
+    /// corruption (during capture/processing, not on the air). Strip anyway.
+    CrcMismatchNoFlag,
     /// Neither header nor CRC-32 indicates FCS. No strip.
     Neither,
 }
@@ -51,22 +53,23 @@ impl FcsOutcome {
     /// Whether the trailing 4 bytes should be stripped from the frame.
     #[must_use]
     pub const fn should_strip(self) -> bool {
-        matches!(self, Self::HeaderAndCrcAgree | Self::CrcDetected | Self::CrcMismatch)
+        matches!(self, Self::HeaderAndCrcAgree | Self::CrcDetected | Self::BadFcsFlagged | Self::CrcMismatchNoFlag)
     }
 }
 
-/// Resolves FCS presence from both the header's flag and CRC-32 self-check.
+/// Resolves FCS presence from the header's flag, CRC-32 self-check, and BADFCS flag.
 ///
 /// `header_says_fcs` is the link-layer header's FCS indicator (e.g. radiotap
-/// Flags bit 4). `frame` is the 802.11 payload INCLUDING any trailing FCS bytes
-/// (i.e. before any tail-strip).
+/// Flags bit 4). `badfcs_flagged` is the radiotap BADFCS indicator (Flags bit 6).
+/// `frame` is the 802.11 payload INCLUDING any trailing FCS bytes.
 #[must_use]
-pub fn resolve(frame: &[u8], header_says_fcs: bool) -> FcsOutcome {
+pub fn resolve(frame: &[u8], header_says_fcs: bool, badfcs_flagged: bool) -> FcsOutcome {
     let crc_says_fcs = verify_crc32(frame);
     match (header_says_fcs, crc_says_fcs) {
         (true, true) => FcsOutcome::HeaderAndCrcAgree,
         (false, true) => FcsOutcome::CrcDetected,
-        (true, false) => FcsOutcome::CrcMismatch,
+        (true, false) if badfcs_flagged => FcsOutcome::BadFcsFlagged,
+        (true, false) => FcsOutcome::CrcMismatchNoFlag,
         (false, false) => FcsOutcome::Neither,
     }
 }
@@ -184,19 +187,25 @@ mod tests {
         let crc = crc32fast::hash(msg);
         let mut frame = msg.to_vec();
         frame.extend_from_slice(&crc.to_le_bytes());
-        assert_eq!(resolve(&frame, true), FcsOutcome::HeaderAndCrcAgree);
+        assert_eq!(resolve(&frame, true, false), FcsOutcome::HeaderAndCrcAgree);
     }
 
     #[test]
     fn resolve_both_agree_no_fcs() {
         let frame = b"frame without fcs";
-        assert_eq!(resolve(frame, false), FcsOutcome::Neither);
+        assert_eq!(resolve(frame, false, false), FcsOutcome::Neither);
     }
 
     #[test]
-    fn resolve_header_yes_crc_no() {
+    fn resolve_header_yes_crc_no_badfcs_flagged() {
         let frame = b"frame with bad trail\xDE\xAD\xBE\xEF";
-        assert_eq!(resolve(frame, true), FcsOutcome::CrcMismatch);
+        assert_eq!(resolve(frame, true, true), FcsOutcome::BadFcsFlagged);
+    }
+
+    #[test]
+    fn resolve_header_yes_crc_no_no_badfcs() {
+        let frame = b"frame with bad trail\xDE\xAD\xBE\xEF";
+        assert_eq!(resolve(frame, true, false), FcsOutcome::CrcMismatchNoFlag);
     }
 
     #[test]
@@ -205,7 +214,7 @@ mod tests {
         let crc = crc32fast::hash(msg);
         let mut frame = msg.to_vec();
         frame.extend_from_slice(&crc.to_le_bytes());
-        assert_eq!(resolve(&frame, false), FcsOutcome::CrcDetected);
+        assert_eq!(resolve(&frame, false, false), FcsOutcome::CrcDetected);
     }
 
     // --- strip_fcs ---
