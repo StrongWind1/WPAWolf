@@ -410,6 +410,7 @@ name = "wpawolf"
 version = "0.3.10"
 dependencies = [
  "clap",
+ "crc32fast",
  "flate2",
 ]
 

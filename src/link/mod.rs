@@ -7,6 +7,7 @@
 //! and the packet is skipped.
 
 pub mod avs;
+pub mod fcs;
 pub mod ppi;
 pub mod prism;
 pub mod radiotap;
@@ -31,19 +32,16 @@ pub const DLT_LINUX_SLL: u16 = 113;
 pub const DLT_LINUX_SLL2: u16 = 276;
 
 /// Strips the link-layer header from `data` for the given `dlt` and returns
-/// `(payload, had_fcs)`.
+/// `(payload, header_says_fcs)`.
 ///
-/// `payload` is the raw IEEE 802.11 frame bytes with any trailing FCS already
-/// chopped off; `had_fcs` flags whether the strip happened.
+/// `payload` is the raw IEEE 802.11 frame bytes **including** any trailing FCS.
+/// FCS tail-strip is NOT performed here -- the caller is responsible for running
+/// `fcs::resolve()` to cross-check the header's FCS flag against CRC-32 and
+/// then calling `fcs::strip_fcs()` on the result.
 ///
-/// Each submodule computes the byte offset where the 802.11 payload begins.
-/// Some captures (radiotap with the Flags-FCS bit set) additionally append a
-/// 4-byte FCS at the end of every frame; if the radio metadata announces it,
-/// we slice the FCS off so IE walkers don't stumble into trailing checksum
-/// bytes near the frame end and emit garbage tag/length pairs.
-///
-/// FCS detection currently covers only `DLT_RADIOTAP`. Other DLTs lack a
-/// reliable per-frame FCS indicator, so they always return `had_fcs = false`.
+/// `header_says_fcs` is the link-layer header's FCS indicator: `true` when the
+/// radiotap Flags field has bit 4 set, `false` for all other DLTs (which lack
+/// a reliable per-frame FCS signal).
 ///
 /// # Errors
 ///
@@ -51,7 +49,7 @@ pub const DLT_LINUX_SLL2: u16 = 276;
 /// the end of `data`. Returns `Err(Error::UnknownFormat(...))` for unsupported
 /// DLTs.
 pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
-    let (offset, had_fcs) = match dlt {
+    let (offset, header_says_fcs) = match dlt {
         // Raw 802.11: no header to strip, no FCS metadata.
         DLT_IEEE802_11 => (0usize, false),
         // Radiotap: variable-length header, length in bytes 2-3 (u16 LE). FCS
@@ -82,17 +80,7 @@ pub fn strip(data: &[u8], dlt: u16) -> Result<(&[u8], bool)> {
         got: data.len(),
     })?;
 
-    // Chop the trailing 4-byte FCS when announced. Frames shorter than 4 bytes
-    // cannot have an FCS even if the bit is set (truncated radio); skip the
-    // strip in that case so we still hand the body to the parser.
-    let stripped = if had_fcs {
-        let cut = payload.len().saturating_sub(4);
-        payload.get(..cut).unwrap_or(payload)
-    } else {
-        payload
-    };
-
-    Ok((stripped, had_fcs))
+    Ok((payload, header_says_fcs))
 }
 
 /// Extracts the channel frequency (MHz) from the radio metadata in `data` for the given DLT.

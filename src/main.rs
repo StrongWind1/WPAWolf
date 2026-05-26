@@ -10,8 +10,10 @@
 
 #![forbid(unsafe_code)]
 
-// flate2 is used by the library (wpawolf::input::gzip). The binary does not import it
-// directly, so suppress the unused_crate_dependencies lint with the `as _` form.
+// flate2 and crc32fast are used by the library (wpawolf::input::gzip and
+// wpawolf::link::fcs respectively). The binary does not import them directly,
+// so suppress the unused_crate_dependencies lint with the `as _` form.
+use crc32fast as _;
 use flate2 as _;
 
 use clap::Parser;
@@ -566,11 +568,31 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         stats.ampdu_status_frames += 1;
                     }
                     let frame_data = match link::strip(&packet.data, dlt) {
-                        Ok((d, had_fcs)) => {
-                            if had_fcs {
-                                stats.fcs_stripped_frames += 1;
+                        Ok((payload, header_says_fcs)) => {
+                            if dlt == link::DLT_RADIOTAP {
+                                if let Some(v) = link::radiotap::version_warning(&packet.data) {
+                                    stats.radiotap_version_nonzero += 1;
+                                    logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
+                                }
                             }
-                            d
+                            let outcome = link::fcs::resolve(payload, header_says_fcs);
+                            match outcome {
+                                link::fcs::FcsOutcome::HeaderAndCrcAgree => {
+                                    stats.fcs_header_and_crc_agree += 1;
+                                },
+                                link::fcs::FcsOutcome::CrcDetected => {
+                                    stats.fcs_detected_by_crc += 1;
+                                    logger.log_fcs_detected_by_crc(packet.timestamp_us, packet.interface_id);
+                                },
+                                link::fcs::FcsOutcome::CrcMismatch => {
+                                    stats.fcs_crc_mismatch += 1;
+                                    logger.log_fcs_crc_mismatch(packet.timestamp_us, packet.interface_id);
+                                },
+                                link::fcs::FcsOutcome::Neither => {
+                                    stats.fcs_neither += 1;
+                                },
+                            }
+                            link::fcs::strip_fcs(payload, outcome)
                         },
                         Err(e) => {
                             stats.link_errors += 1;

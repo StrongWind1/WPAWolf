@@ -517,12 +517,23 @@ pub struct Stats {
     pub amsdu_subframes_total: u64,
 
     /// Frames whose 4-byte 802.11 FCS was stripped before parsing because the
-    /// radiotap Flags field announced it (`it_present` bit 1, Flags bit `0x10`
-    /// = `IEEE80211_RADIOTAP_F_FCS`). Without tail-strip, IE walkers can
-    /// stumble into FCS bytes near the frame end and emit garbage tag/length
-    /// pairs; this counter surfaces how often the corpus actually relied on
-    /// the FCS-strip path.
-    pub fcs_stripped_frames: u64,
+    /// Radiotap frames where `it_version` was non-zero but parsing succeeded
+    /// via the relaxed version gate (Tier 1 recovery).
+    pub radiotap_version_nonzero: u64,
+
+    /// FCS outcome: header said FCS present, CRC-32 confirmed. Stripped.
+    pub fcs_header_and_crc_agree: u64,
+    /// FCS outcome: header said no FCS, but CRC-32 proved FCS present. Stripped.
+    /// Indicates the capture driver included FCS but the link-layer header
+    /// didn't announce it (common for Prism, AVS, PPI, SLL which lack a
+    /// per-frame FCS flag).
+    pub fcs_detected_by_crc: u64,
+    /// FCS outcome: header said FCS present, but CRC-32 does not confirm.
+    /// Still stripped (trust the header). Indicates a corrupt frame payload
+    /// or an incorrect FCS flag from the driver.
+    pub fcs_crc_mismatch: u64,
+    /// FCS outcome: neither header nor CRC-32 indicates FCS. Not stripped.
+    pub fcs_neither: u64,
 
     /// Radiotap-encapsulated frames whose header advertises the A-MPDU Status
     /// field (`it_present` bit 20). Surfaced for visibility of raw-aggregation
@@ -1002,7 +1013,10 @@ impl Stats {
         nz!("  Action body dropped (PMF-encrypted; FT/Mesh PMKIDs unavailable)", self.mgmt_protected_action_skipped);
         nz!("A-MSDU aggregated Data frames (802.11n)", self.amsdu_frames_seen);
         nz!("  subframes recovered for hidden EAPOL", self.amsdu_subframes_total);
-        nz!("frames with trailing FCS stripped (recovered; radiotap Flags 0x10)", self.fcs_stripped_frames);
+        nz!("radiotap it_version != 0 (Tier 1 recovered)", self.radiotap_version_nonzero);
+        nz!("FCS stripped (header + CRC-32 agree)", self.fcs_header_and_crc_agree);
+        nz!("FCS stripped (CRC-32 detected, header silent)", self.fcs_detected_by_crc);
+        nz!("FCS stripped (header announced, CRC-32 mismatch)", self.fcs_crc_mismatch);
         nz!("radiotap A-MPDU Status field present (it_present bit 20)", self.ampdu_status_frames);
         nz!("fragments seen (non-final, buffered for reassembly)", self.fragment_stats.fragments_seen);
         nz!("  reassembled MSDUs (recovered)", self.fragment_stats.fragments_reassembled);

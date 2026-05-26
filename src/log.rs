@@ -104,6 +104,21 @@ impl Logger {
         self.write_line(&format!("[plcp_error] {timestamp_us} {interface_id} {details}"));
     }
 
+    /// Logs a radiotap frame with non-zero `it_version` that was parsed anyway (Tier 1 recovery).
+    pub fn log_radiotap_version_nonzero(&mut self, timestamp_us: u64, interface_id: u32, version: u8) {
+        self.write_line(&format!("[radiotap_version_nonzero] {timestamp_us} {interface_id} version={version}"));
+    }
+
+    /// Logs FCS detected by CRC-32 but not announced by the link-layer header.
+    pub fn log_fcs_detected_by_crc(&mut self, timestamp_us: u64, interface_id: u32) {
+        self.write_line(&format!("[fcs_detected_by_crc] {timestamp_us} {interface_id}"));
+    }
+
+    /// Logs FCS announced by header but CRC-32 does not confirm (corrupt frame).
+    pub fn log_fcs_crc_mismatch(&mut self, timestamp_us: u64, interface_id: u32) {
+        self.write_line(&format!("[fcs_crc_mismatch] {timestamp_us} {interface_id}"));
+    }
+
     /// Logs a packet whose `interface_id` has no IDB-registered DLT.
     ///
     /// In classic pcap there is exactly one interface (id 0) and the global header

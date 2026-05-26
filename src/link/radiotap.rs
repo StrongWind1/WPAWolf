@@ -18,22 +18,19 @@ const MIN_HEADER_LEN: usize = 8;
 
 /// Returns the byte offset of the IEEE 802.11 frame within a radiotap-encapsulated packet.
 ///
-/// Validates `it_version == 0` and `it_len >= 8`. The 802.11 frame starts at
-/// byte `it_len`. Per the radiotap.org specification.
+/// `it_version` (byte 0) is checked but no longer a hard gate: non-zero values log a
+/// warning via the caller but parsing continues using `it_len`. Only `it_len` actually
+/// determines the 802.11 offset. Per the radiotap.org specification, `it_version` must
+/// be 0 -- but 1.57M frames in the wpa-sec corpus have `it_version = 43` (0x2B) from a
+/// specific firmware/driver while `it_len` remains valid.
 ///
 /// # Errors
 ///
 /// - `Error::Truncated` -- `data` is too short to contain the fixed 8-byte header.
-/// - `Error::UnknownFormat` -- `it_version != 0` or `it_len < 8`.
+/// - `Error::UnknownFormat` -- `it_len < 8` (truly corrupt header).
 pub fn ieee80211_offset(data: &[u8]) -> Result<usize> {
-    // Read it_version -- must be 0.
-    let version = data.get(OFFSET_VERSION).ok_or(Error::Truncated {
-        context: "radiotap header",
-        needed: MIN_HEADER_LEN,
-        got: data.len(),
-    })?;
-    if *version != 0 {
-        return Err(Error::UnknownFormat(format!("radiotap it_version {version} != 0")));
+    if data.len() < MIN_HEADER_LEN {
+        return Err(Error::Truncated { context: "radiotap header", needed: MIN_HEADER_LEN, got: data.len() });
     }
 
     // Read it_len (u16 LE at offset 2) -- total header length including the 8 fixed bytes.
@@ -48,10 +45,16 @@ pub fn ieee80211_offset(data: &[u8]) -> Result<usize> {
         return Err(Error::UnknownFormat(format!("radiotap it_len {it_len} < minimum {MIN_HEADER_LEN}")));
     }
 
-    // The 802.11 frame starts immediately after the radiotap header. Tail-side
-    // FCS detection lives in `has_fcs` (the caller calls both) so this function
-    // stays focused on the head-side offset.
     Ok(it_len)
+}
+
+/// Returns the `it_version` byte if it is non-zero, or `None` if the standard
+/// version 0 is present. Used by the caller to log `[radiotap_version_nonzero]`
+/// warnings without blocking parsing.
+#[must_use]
+pub fn version_warning(data: &[u8]) -> Option<u8> {
+    let v = *data.get(OFFSET_VERSION)?;
+    if v == 0 { None } else { Some(v) }
 }
 
 /// Returns `true` if the radiotap header announces a 4-byte FCS appended to
@@ -69,10 +72,7 @@ pub fn has_fcs(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;
     }
-    // it_version at byte 0 must be 0.
-    if data.first().copied() != Some(0) {
-        return false;
-    }
+    // it_version relaxed: non-zero values no longer block FCS detection.
     let Some(len_bytes) = data.get(2..4).and_then(|s| <[u8; 2]>::try_from(s).ok()) else {
         return false;
     };
@@ -140,9 +140,7 @@ pub fn has_ampdu_status(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;
     }
-    if data.first().copied() != Some(0) {
-        return false;
-    }
+    // it_version relaxed: non-zero values no longer block A-MPDU detection.
     let Some(len_bytes) = data.get(2..4).and_then(|s| <[u8; 2]>::try_from(s).ok()) else {
         return false;
     };
@@ -169,10 +167,7 @@ pub fn channel_freq(data: &[u8]) -> Option<u16> {
     if data.len() < 8 {
         return None;
     }
-    // it_version at byte 0 must be 0. [radiotap.org]
-    if data.first().copied()? != 0 {
-        return None;
-    }
+    // it_version relaxed: non-zero values no longer block channel extraction.
     // it_len (u16 LE at bytes 2-3): total header length. [radiotap.org]
     let it_len = u16::from_le_bytes(data.get(2..4)?.try_into().ok()?) as usize;
     if it_len < 8 || it_len > data.len() {
@@ -259,11 +254,22 @@ mod tests {
     }
 
     #[test]
-    fn version_nonzero_rejected() {
-        let buf = make_header(1, 8);
-        let err = ieee80211_offset(&buf).unwrap_err();
-        assert!(matches!(err, Error::UnknownFormat(_)));
-        assert!(err.to_string().contains("it_version 1 != 0"));
+    fn version_nonzero_accepted() {
+        // Tier 1 recovery: non-zero it_version no longer rejects. it_len is still used.
+        let buf = make_header(43, 8);
+        assert_eq!(ieee80211_offset(&buf).unwrap(), 8);
+    }
+
+    #[test]
+    fn version_warning_fires_for_nonzero() {
+        let buf = make_header(43, 8);
+        assert_eq!(version_warning(&buf), Some(43));
+    }
+
+    #[test]
+    fn version_warning_silent_for_zero() {
+        let buf = make_header(0, 8);
+        assert_eq!(version_warning(&buf), None);
     }
 
     #[test]
@@ -351,12 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn channel_freq_version_nonzero() {
-        // version != 0 -> None (invalid radiotap header)
+    fn channel_freq_version_nonzero_still_extracts() {
+        // Tier 1 relaxation: non-zero it_version no longer blocks channel extraction.
         let buf = make_channel_only_header(2437);
-        let mut bad = buf;
-        bad[0] = 1;
-        assert_eq!(channel_freq(&bad), None);
+        let mut relaxed = buf;
+        relaxed[0] = 43;
+        assert_eq!(channel_freq(&relaxed), Some(2437));
     }
 
     #[test]
@@ -490,10 +496,11 @@ mod tests {
     }
 
     #[test]
-    fn has_fcs_version_nonzero() {
+    fn has_fcs_version_nonzero_still_detects() {
+        // Tier 1 relaxation: non-zero it_version no longer blocks FCS detection.
         let mut buf = make_flags_only_header(0x10);
-        buf[0] = 1;
-        assert!(!has_fcs(&buf));
+        buf[0] = 43;
+        assert!(has_fcs(&buf));
     }
 
     #[test]
@@ -542,13 +549,13 @@ mod tests {
     }
 
     #[test]
-    fn has_ampdu_status_version_nonzero() {
-        // Reject mis-versioned headers regardless of bit 20.
+    fn has_ampdu_status_version_nonzero_still_detects() {
+        // Tier 1 relaxation: non-zero it_version no longer blocks A-MPDU detection.
         let mut buf = make_header(0, 8);
         let it_present: u32 = 1 << 20;
         buf[4..8].copy_from_slice(&it_present.to_le_bytes());
-        buf[0] = 1;
-        assert!(!has_ampdu_status(&buf));
+        buf[0] = 43;
+        assert!(has_ampdu_status(&buf));
     }
 
     #[test]

@@ -98,6 +98,10 @@ path = "tests/integration/mode_parity_strict_subset_wide.rs"
 # Gzip decompression for .pcap.gz / .pcapng.gz inputs. Pure-Rust backend so we
 # avoid a C dependency and keep the `cargo deny` supply-chain gate tight.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# IEEE 802.11 FCS verification. Standard CRC-32 (ISO 3309), same algorithm as
+# Ethernet and gzip. Already a transitive dep via flate2; promoted to direct for
+# SIMD-accelerated per-packet FCS validation (~20 GB/s vs ~3 GB/s lookup table).
+crc32fast = "1"
 # CLI argument parsing. Minimal feature set: no env, no yaml, no suggestions.
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
 
