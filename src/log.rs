@@ -133,7 +133,7 @@ impl Logger {
         let frame = self.current_frame;
         let bytes_hex = render_lower_hex(raw.get(..32).unwrap_or(raw));
         self.write_line(&format!(
-            "[eapol_key_rejected] file={file} frame={frame} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
+            "[eapol_key_rejected] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" reason=\"{reason}\" bytes=\"{bytes_hex}\""
         ));
     }
 
@@ -151,7 +151,7 @@ impl Logger {
         let nonce_hex = render_lower_hex(nonce);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_nonce] file={file} frame={frame} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
+            "[invalid_nonce] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" msg_type=\"{mt}\" kind=\"{kind}\" nonce_hex=\"{nonce_hex}\""
         ));
     }
 
@@ -169,7 +169,7 @@ impl Logger {
         let mic_hex = render_lower_hex(mic);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_mic] file={file} frame={frame} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
+            "[invalid_mic] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" msg_type=\"{mt}\" kind=\"{kind}\" mic_hex=\"{mic_hex}\""
         ));
     }
 
@@ -185,7 +185,7 @@ impl Logger {
         let frame = self.current_frame;
         let pmkid_hex = render_lower_hex(pmkid);
         self.write_line(&format!(
-            "[invalid_pmkid] file={file} frame={frame} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
+            "[invalid_pmkid] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" kind=\"{kind}\" pmkid_hex=\"{pmkid_hex}\""
         ));
     }
 
@@ -198,14 +198,14 @@ impl Logger {
         last_us: u64,
     ) {
         self.write_line(&format!(
-            "[essid_not_found_summary] ap={ap_hex} dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
+            "[essid_not_found_summary] ap=\"{ap_hex}\" dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
         ));
     }
 
     /// Logs a per-file capture read error.
     pub fn log_capture_read_error(&mut self, path: &std::path::Path, reason: &str) {
         self.write_line(&format!(
-            "[capture_read_error] file={} frame={} reason={reason}",
+            "[capture_read_error] file=\"{}\" frame={} reason=\"{reason}\"",
             path.display(),
             self.current_frame
         ));
@@ -213,14 +213,14 @@ impl Logger {
 
     /// Logs an input file that could not be classified.
     pub fn log_skipped_input(&mut self, path: &std::path::Path, reason: &str) {
-        self.write_line(&format!("[skipped_input] file={} reason={reason}", path.display()));
+        self.write_line(&format!("[skipped_input] file=\"{}\" reason=\"{reason}\"", path.display()));
     }
 
     /// Logs a packet whose `interface_id` has no IDB-registered DLT.
     pub fn log_unknown_linktype(&mut self, interface_id: u32) {
         let file = &self.current_file;
         let frame = self.current_frame;
-        self.write_line(&format!("[unknown_linktype] file={file} frame={frame} interface_id={interface_id}"));
+        self.write_line(&format!("[unknown_linktype] file=\"{file}\" frame={frame} interface_id={interface_id}"));
     }
 
     // --- Aggregated methods (accumulated, written at flush) ---
@@ -400,15 +400,15 @@ mod tests {
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
-            contents.contains("file=../cap/test.pcap frame=42 ap=aabbccddeeff"),
+            contents.contains("file=\"../cap/test.pcap\" frame=42 ap=\"aabbccddeeff\""),
             "eapol_key_rejected missing context; got: {contents}"
         );
         assert!(
-            contents.contains("[unknown_linktype] file=../cap/test.pcap frame=42"),
+            contents.contains("[unknown_linktype] file=\"../cap/test.pcap\" frame=42"),
             "unknown_linktype missing context; got: {contents}"
         );
         assert!(
-            contents.contains("[capture_read_error] file=../cap/test.pcap frame=100"),
+            contents.contains("[capture_read_error] file=\"../cap/test.pcap\" frame=100"),
             "capture_read_error missing frame; got: {contents}"
         );
         let _ = std::fs::remove_file(&tmp);
@@ -470,8 +470,8 @@ mod tests {
         }
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
-        assert!(contents.contains("bytes=aabb03"), "expected bare hex; got: {contents}");
-        assert!(!contents.contains("bytes=aa:"), "found colon-separated hex; got: {contents}");
+        assert!(contents.contains("bytes=\"aabb03\""), "expected quoted bare hex; got: {contents}");
+        assert!(!contents.contains("bytes=\"aa:"), "found colon-separated hex; got: {contents}");
         let _ = std::fs::remove_file(&tmp);
     }
 
