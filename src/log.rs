@@ -133,7 +133,7 @@ impl Logger {
         let frame = self.current_frame;
         let bytes_hex = render_lower_hex(raw.get(..32).unwrap_or(raw));
         self.write_line(&format!(
-            "[eapol_key_rejected] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" reason=\"{reason}\" bytes=\"{bytes_hex}\""
+            "[eapol_key_rejected] file=\"{file}\" frame={frame} ap={ap_hex} sta={sta_hex} reason=\"{reason}\" bytes={bytes_hex}"
         ));
     }
 
@@ -151,7 +151,7 @@ impl Logger {
         let nonce_hex = render_lower_hex(nonce);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_nonce] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" msg_type=\"{mt}\" kind=\"{kind}\" nonce_hex=\"{nonce_hex}\""
+            "[invalid_nonce] file=\"{file}\" frame={frame} ap={ap_hex} sta={sta_hex} msg_type=\"{mt}\" kind=\"{kind}\" nonce_hex={nonce_hex}"
         ));
     }
 
@@ -169,7 +169,7 @@ impl Logger {
         let mic_hex = render_lower_hex(mic);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_mic] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" msg_type=\"{mt}\" kind=\"{kind}\" mic_hex=\"{mic_hex}\""
+            "[invalid_mic] file=\"{file}\" frame={frame} ap={ap_hex} sta={sta_hex} msg_type=\"{mt}\" kind=\"{kind}\" mic_hex={mic_hex}"
         ));
     }
 
@@ -185,7 +185,7 @@ impl Logger {
         let frame = self.current_frame;
         let pmkid_hex = render_lower_hex(pmkid);
         self.write_line(&format!(
-            "[invalid_pmkid] file=\"{file}\" frame={frame} ap=\"{ap_hex}\" sta=\"{sta_hex}\" kind=\"{kind}\" pmkid_hex=\"{pmkid_hex}\""
+            "[invalid_pmkid] file=\"{file}\" frame={frame} ap={ap_hex} sta={sta_hex} kind=\"{kind}\" pmkid_hex={pmkid_hex}"
         ));
     }
 
@@ -198,7 +198,7 @@ impl Logger {
         last_us: u64,
     ) {
         self.write_line(&format!(
-            "[essid_not_found_summary] ap=\"{ap_hex}\" dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
+            "[essid_not_found_summary] ap={ap_hex} dropped={dropped} first_seen_us={first_us} last_seen_us={last_us}"
         ));
     }
 
@@ -400,7 +400,7 @@ mod tests {
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
-            contents.contains("file=\"../cap/test.pcap\" frame=42 ap=\"aabbccddeeff\""),
+            contents.contains("file=\"../cap/test.pcap\" frame=42 ap=aabbccddeeff"),
             "eapol_key_rejected missing context; got: {contents}"
         );
         assert!(
@@ -470,8 +470,8 @@ mod tests {
         }
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
-        assert!(contents.contains("bytes=\"aabb03\""), "expected quoted bare hex; got: {contents}");
-        assert!(!contents.contains("bytes=\"aa:"), "found colon-separated hex; got: {contents}");
+        assert!(contents.contains("bytes=aabb03"), "expected unquoted bare hex; got: {contents}");
+        assert!(!contents.contains("bytes=aa:"), "found colon-separated hex; got: {contents}");
         let _ = std::fs::remove_file(&tmp);
     }
 

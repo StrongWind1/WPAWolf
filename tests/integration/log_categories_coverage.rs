@@ -331,7 +331,7 @@ fn category_essid_not_found_summary_fires_on_orphan_pmkid() {
     let ap_hex = format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", ap[0], ap[1], ap[2], ap[3], ap[4], ap[5]);
     let lines = log_lines_for(log, "[essid_not_found_summary]");
     assert!(!lines.is_empty(), "expected at least one [essid_not_found_summary] line");
-    assert!(lines.iter().any(|l| l.contains(&format!("ap=\"{ap_hex}\""))), "expected ap=\"{ap_hex}\"; got {lines:?}");
+    assert!(lines.iter().any(|l| l.contains(&format!("ap={ap_hex}"))), "expected ap={ap_hex}; got {lines:?}");
     assert!(lines.iter().any(|l| l.contains("dropped=")), "expected dropped=N field; got {lines:?}");
     assert!(lines.iter().any(|l| l.contains("first_seen_us=")), "expected first_seen_us=N field; got {lines:?}");
     assert!(lines.iter().any(|l| l.contains("last_seen_us=")), "expected last_seen_us=N field; got {lines:?}");
