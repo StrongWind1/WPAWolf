@@ -1025,11 +1025,11 @@ impl Stats {
         nz!("FCS stripped (BADFCS flagged; corrupt on air)", self.fcs_badfcs_flagged);
         nz!("FCS stripped (header announced, CRC-32 mismatch, no BADFCS)", self.fcs_crc_mismatch_no_flag);
         nz!("radiotap A-MPDU Status field present (it_present bit 20)", self.ampdu_status_frames);
-        nz!("fragments seen (non-final, buffered for reassembly)", self.fragment_stats.fragments_seen);
-        nz!("  reassembled MSDUs (recovered)", self.fragment_stats.fragments_reassembled);
-        nz!("  fragments dropped (out of order; unrecoverable)", self.fragment_stats.fragments_dropped_disorder);
+        nz!("fragments buffered for reassembly", self.fragment_stats.fragments_seen);
+        nz!("  reassembled MSDUs (all fragments present)", self.fragment_stats.fragments_reassembled);
+        nz!("  incomplete MSDUs (missing fragments in capture)", self.fragment_stats.fragments_incomplete);
         nz!(
-            "  fragments dropped (safety cap; paranoid backstop, expect 0)",
+            "  fragments evicted (safety cap; paranoid backstop, expect 0)",
             self.fragment_stats.fragments_dropped_safety_cap
         );
         nz!("AWDL frames (Apple AWDL)", self.awdl_frames);
@@ -1418,7 +1418,7 @@ mod tests {
         assert_eq!(s.lenient_proto_version, 0);
         assert_eq!(s.fragment_stats.fragments_seen, 0);
         assert_eq!(s.fragment_stats.fragments_reassembled, 0);
-        assert_eq!(s.fragment_stats.fragments_dropped_disorder, 0);
+        assert_eq!(s.fragment_stats.fragments_incomplete, 0);
         assert_eq!(s.fragment_stats.fragments_dropped_safety_cap, 0);
         assert_eq!(s.truncated_capture_files, 0);
         assert_eq!(s.unreadable_packets, 0);

@@ -87,34 +87,22 @@ pub fn process_data(
     // reassembly later succeeds and the reconstructed MSDU parses too.
     let reassembled: Option<Vec<u8>> = if mac_hdr.fragment_number == 0 && !mac_hdr.more_fragments {
         None // unfragmented frame: nothing to reassemble
-    } else if mac_hdr.more_fragments {
-        // Non-final fragment: buffer for reassembly. The original body still
-        // flows through to the EAPOL parser so glitched-bit complete frames
-        // are preserved.
+    } else {
+        // Fragmented frame (MoreFrag=1 or FragNum>0): buffer for out-of-order
+        // reassembly. Returns Some(full_msdu) when all fragments 0..=N are
+        // present, None otherwise. The original body still flows through to
+        // the EAPOL parser on None so glitched-bit complete frames (MoreFrag
+        // set on a single-MPDU EAPOL) are preserved; SipHash dedup suppresses
+        // double-emit when reassembly later succeeds.
         let mut frag_stats = stats.fragment_stats;
-        fragment_store.push_fragment(
+        let full = fragment_store.insert_fragment(
             sa,
             ra,
             mac_hdr.sequence_number,
             mac_hdr.fragment_number,
+            mac_hdr.more_fragments,
             body,
             timestamp_us,
-            &mut frag_stats,
-        );
-        stats.fragment_stats = frag_stats;
-        None
-    } else {
-        // MoreFrag=0, FragNum>0: final fragment. Try to reassemble; on orphan
-        // the disorder counter is bumped inside take_completed and we fall
-        // through to processing the tail body alone (normally unparseable,
-        // recovers glitched frames).
-        let mut frag_stats = stats.fragment_stats;
-        let full = fragment_store.take_completed(
-            sa,
-            ra,
-            mac_hdr.sequence_number,
-            mac_hdr.fragment_number,
-            body,
             &mut frag_stats,
         );
         stats.fragment_stats = frag_stats;

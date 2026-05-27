@@ -1021,6 +1021,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     }
 
     logger.flush()?;
+    stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
     stats.print_summary();
 
     // Optional `--mem-stats` block: per-store byte-count table for OOM triage.

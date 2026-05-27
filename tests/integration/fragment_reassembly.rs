@@ -1,16 +1,9 @@
 //! Integration test: 802.11 MSDU fragmentation reassembly through the full binary.
 //!
-//! Builds a pcap containing two fragments of one Data MSDU sharing Sequence Number
-//! 42 (frag 0 with `MoreFrag=1`, frag 1 with `MoreFrag=0`). After running the
-//! binary, the Phase 2 stats summary must show:
-//!
-//! * `fragments seen (non-final, buffered): 1`
-//! * `reassembled MSDUs:                    1`
-//!
-//! This exercises the wiring in `extract::data::process_data` and the
+//! Exercises the wiring in `extract::data::process_data` and
 //! `store::fragments::FragmentStore`. Whether or not the reassembled body
-//! contained a valid EAPOL-Key is irrelevant for this test -- we are guarding
-//! the reassembly machinery itself, not the EAPOL parser.
+//! contains a valid EAPOL-Key is irrelevant -- we are guarding the reassembly
+//! machinery itself, not the EAPOL parser.
 
 #![allow(
     clippy::unwrap_used,
@@ -106,20 +99,19 @@ fn two_fragment_msdu_reassembles_through_binary() {
 
     let stderr = run_capture(pcap);
 
-    assert!(stderr.contains("fragments seen"), "expected fragment stats in Phase 2 summary; stderr:\n{stderr}");
+    assert!(stderr.contains("fragments buffered"), "expected fragment stats in Phase 2 summary; stderr:\n{stderr}");
     assert!(stderr.contains("reassembled MSDUs"), "expected reassembled MSDUs counter; stderr:\n{stderr}");
 
-    // Counts should be exactly 1 each.
-    let line = stderr.lines().find(|l| l.contains("fragments seen")).expect("fragments seen line");
-    assert!(line.contains(": 1"), "expected count=1 in: {line}");
+    let line = stderr.lines().find(|l| l.contains("fragments buffered")).expect("fragments buffered line");
+    assert!(line.contains(": 2"), "expected count=2 in: {line}");
     let line = stderr.lines().find(|l| l.contains("reassembled MSDUs")).expect("reassembled MSDUs line");
     assert!(line.contains(": 1"), "expected count=1 in: {line}");
 }
 
 #[test]
-fn orphan_final_fragment_does_not_reassemble() {
+fn orphan_final_fragment_stays_incomplete() {
     // A final fragment (FragNum=1, MoreFrag=0) arrives without a preceding FragNum=0.
-    // Reassembly must fail; counter `fragments dropped (out of order)` increments.
+    // Reassembly cannot complete; the entry stays buffered and shows as incomplete.
     let pcap = "/tmp/wpawolf_fragorphan.pcap";
 
     let ap = [0x02, 0, 0, 0, 0, 0xCC];
@@ -133,10 +125,8 @@ fn orphan_final_fragment_does_not_reassemble() {
 
     let stderr = run_capture(pcap);
 
-    // No reassembled MSDUs counter should appear (the line only prints when > 0).
     assert!(!stderr.contains("reassembled MSDUs"), "expected no reassembled MSDUs; stderr:\n{stderr}");
-    // But the disorder counter should fire.
-    assert!(stderr.contains("fragments dropped (out of order"), "expected disorder counter; stderr:\n{stderr}");
+    assert!(stderr.contains("incomplete MSDUs"), "expected incomplete counter; stderr:\n{stderr}");
 }
 
 #[test]
@@ -156,6 +146,33 @@ fn unfragmented_frames_do_not_touch_fragment_store() {
 
     let stderr = run_capture(pcap);
 
-    assert!(!stderr.contains("fragments seen"), "no fragment counters expected; stderr:\n{stderr}");
+    assert!(!stderr.contains("fragments buffered"), "no fragment counters expected; stderr:\n{stderr}");
     assert!(!stderr.contains("reassembled MSDUs"), "no reassembly expected; stderr:\n{stderr}");
+}
+
+#[test]
+fn out_of_order_fragments_reassemble_through_binary() {
+    // Fragment 1 (final, MoreFrag=0) arrives before fragment 0 (MoreFrag=1).
+    // The out-of-order reassembly buffer must still produce a complete MSDU.
+    let pcap = "/tmp/wpawolf_fragooo.pcap";
+
+    let ap = [0x02, 0, 0, 0, 0, 0xAA];
+    let sta = [0x02, 0, 0, 0, 0, 0xBB];
+    let part0 = b"AAAAAAAAAA";
+    let part1 = b"BBBBBBBBBB";
+    let f1 = data_frame_uplink(ap, sta, 42, 1, false, part1); // final arrives first
+    let f0 = data_frame_uplink(ap, sta, 42, 0, true, part0); // frag 0 arrives second
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&pcap_global_header(105));
+    bytes.extend_from_slice(&pcap_packet_record(1000, &f1));
+    bytes.extend_from_slice(&pcap_packet_record(1001, &f0));
+    fs::write(pcap, &bytes).unwrap();
+
+    let stderr = run_capture(pcap);
+
+    assert!(stderr.contains("reassembled MSDUs"), "expected reassembly from out-of-order fragments; stderr:\n{stderr}");
+    let line = stderr.lines().find(|l| l.contains("reassembled MSDUs")).expect("reassembled MSDUs line");
+    assert!(line.contains(": 1"), "expected count=1 in: {line}");
+    assert!(!stderr.contains("incomplete MSDUs"), "no incomplete entries expected; stderr:\n{stderr}");
 }
