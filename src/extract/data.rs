@@ -240,21 +240,13 @@ fn process_msdu_payload(
         if let Some((kind, nonce)) = t.nonce_garbage {
             stats.record_invalid_nonce(kind, t.msg_type);
             if kind != "null" {
-                logger.log_invalid_nonce(
-                    timestamp_us,
-                    mac_hdr.ap.hex_lower(),
-                    mac_hdr.sta.hex_lower(),
-                    t.msg_type,
-                    kind,
-                    &nonce,
-                );
+                logger.log_invalid_nonce(mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), t.msg_type, kind, &nonce);
             }
         }
         if let Some((kind, mic)) = t.mic_garbage {
             stats.record_invalid_mic(kind);
             if kind != "null" {
                 logger.log_invalid_mic(
-                    timestamp_us,
                     mac_hdr.ap.hex_lower(),
                     mac_hdr.sta.hex_lower(),
                     t.msg_type,
@@ -297,7 +289,7 @@ fn process_msdu_payload(
         // without noise from the already-explained garbage-pattern drops.
         let reason = eapol::parse_rejection_reason(body);
         if reason != "garbage_nonce" && reason != "garbage_mic" {
-            logger.log_eapol_key_rejected(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), reason, body);
+            logger.log_eapol_key_rejected(mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), reason, body);
         }
     }
 

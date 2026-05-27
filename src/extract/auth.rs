@@ -52,7 +52,7 @@ pub fn process_auth_ft(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
             && kind != "null"
         {
-            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: ft.clone() }) {
             stats.pmkids_found += 1;
@@ -95,7 +95,7 @@ pub fn process_auth_fils(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
             && kind != "null"
         {
-            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {
             stats.pmkids_found += 1;
@@ -141,7 +141,7 @@ pub fn process_auth_pasn(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
             && kind != "null"
         {
-            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {
             stats.pmkids_found += 1;

@@ -96,20 +96,13 @@ pub fn resolve_wds_eapol(
             if let Some((kind, nonce)) = t.nonce_garbage {
                 stats.record_invalid_nonce(kind, t.msg_type);
                 if kind != "null" {
-                    logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, &nonce);
+                    logger.log_invalid_nonce(ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, &nonce);
                 }
             }
             if let Some((kind, mic)) = t.mic_garbage {
                 stats.record_invalid_mic(kind);
                 if kind != "null" {
-                    logger.log_invalid_mic(
-                        p.timestamp,
-                        ap.hex_lower(),
-                        sta.hex_lower(),
-                        t.msg_type,
-                        kind,
-                        mic.as_slice(),
-                    );
+                    logger.log_invalid_mic(ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, mic.as_slice());
                 }
             }
         }

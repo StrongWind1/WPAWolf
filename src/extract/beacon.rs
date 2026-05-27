@@ -337,7 +337,7 @@ pub fn process_beacon_or_probe_resp(
             if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
                 && kind != "null"
             {
-                logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
+                logger.log_invalid_pmkid(mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
             if pmkid_store.add(PmkidEntry {
                 timestamp: timestamp_us,

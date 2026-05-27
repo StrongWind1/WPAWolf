@@ -140,7 +140,7 @@ pub fn process_action(
                 if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
                     && kind != "null"
                 {
-                    logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+                    logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                 }
                 if pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,
@@ -193,13 +193,7 @@ pub fn process_action(
                 if let Some(kind) = stats.check_pmkid_invalid(&pmkid_bytes)
                     && kind != "null"
                 {
-                    logger.log_invalid_pmkid(
-                        timestamp_us,
-                        mac_hdr.ap.hex_lower(),
-                        mac_hdr.sta.hex_lower(),
-                        kind,
-                        &pmkid_bytes,
-                    );
+                    logger.log_invalid_pmkid(mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid_bytes);
                 }
                 if pmkid_store.add(PmkidEntry {
                     timestamp: timestamp_us,

@@ -124,7 +124,6 @@ impl Logger {
     /// by the EAPOL-Key parser for a structural reason.
     pub fn log_eapol_key_rejected(
         &mut self,
-        timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         reason: &str,
@@ -134,14 +133,13 @@ impl Logger {
         let frame = self.current_frame;
         let bytes_hex = render_lower_hex(raw.get(..32).unwrap_or(raw));
         self.write_line(&format!(
-            "[eapol_key_rejected] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
+            "[eapol_key_rejected] file={file} frame={frame} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
         ));
     }
 
     /// Logs an EAPOL-Key frame whose Key Nonce was a non-obvious garbage pattern.
     pub fn log_invalid_nonce(
         &mut self,
-        timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         msg_type: Option<crate::types::MsgType>,
@@ -153,14 +151,13 @@ impl Logger {
         let nonce_hex = render_lower_hex(nonce);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_nonce] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
+            "[invalid_nonce] file={file} frame={frame} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
         ));
     }
 
     /// Logs an EAPOL-Key frame whose Key MIC was a non-obvious garbage pattern.
     pub fn log_invalid_mic(
         &mut self,
-        timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         msg_type: Option<crate::types::MsgType>,
@@ -172,14 +169,13 @@ impl Logger {
         let mic_hex = render_lower_hex(mic);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_mic] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
+            "[invalid_mic] file={file} frame={frame} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
         ));
     }
 
     /// Logs a PMKID rejected as a non-obvious garbage pattern.
     pub fn log_invalid_pmkid(
         &mut self,
-        timestamp_us: u64,
         ap_hex: impl std::fmt::Display,
         sta_hex: impl std::fmt::Display,
         kind: &str,
@@ -189,7 +185,7 @@ impl Logger {
         let frame = self.current_frame;
         let pmkid_hex = render_lower_hex(pmkid);
         self.write_line(&format!(
-            "[invalid_pmkid] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
+            "[invalid_pmkid] file={file} frame={frame} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
         ));
     }
 
@@ -368,7 +364,7 @@ mod tests {
     #[test]
     fn no_op_logger_does_not_write_or_panic() {
         let mut logger = Logger::new(None).unwrap();
-        logger.log_eapol_key_rejected(123, "aabbccddeeff", "112233445566", "truncated_short", b"test");
+        logger.log_eapol_key_rejected("aabbccddeeff", "112233445566", "truncated_short", b"test");
         logger.log_plcp_error("radiotap it_version 43", 127);
         logger.log_malformed_frame("truncated 802.11 MAC header");
         logger.log_unknown_linktype(0xDEAD_u32);
@@ -395,7 +391,7 @@ mod tests {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
             logger.set_file("../cap/test.pcap");
             logger.set_frame(42);
-            logger.log_eapol_key_rejected(1_000, "aabbccddeeff", "112233445566", "bad_kdv", b"\xaa\xbb");
+            logger.log_eapol_key_rejected("aabbccddeeff", "112233445566", "bad_kdv", b"\xaa\xbb");
             logger.log_unknown_linktype(7);
             logger.set_frame(100);
             logger.log_capture_read_error(std::path::Path::new("../cap/test.pcap"), "need 30 bytes, got 0");
@@ -404,7 +400,7 @@ mod tests {
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
-            contents.contains("file=../cap/test.pcap frame=42 ts=1000"),
+            contents.contains("file=../cap/test.pcap frame=42 ap=aabbccddeeff"),
             "eapol_key_rejected missing context; got: {contents}"
         );
         assert!(
@@ -469,7 +465,7 @@ mod tests {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
             logger.set_file("test.pcap");
             logger.set_frame(1);
-            logger.log_eapol_key_rejected(1_000, "aabbccddeeff", "112233445566", "bad_kdv", &[0xAA, 0xBB, 0x03]);
+            logger.log_eapol_key_rejected("aabbccddeeff", "112233445566", "bad_kdv", &[0xAA, 0xBB, 0x03]);
             logger.flush().unwrap();
         }
         let mut contents = String::new();

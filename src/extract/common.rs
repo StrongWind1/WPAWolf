@@ -314,7 +314,7 @@ pub fn store_eapol_key(
         if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
             && kind != "null"
         {
-            logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+            logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry {
             timestamp: timestamp_us,
@@ -345,7 +345,7 @@ pub fn store_eapol_key(
                     if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
                         && kind != "null"
                     {
-                        logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
+                        logger.log_invalid_pmkid(ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                     }
                     if pmkid_store.add(PmkidEntry {
                         timestamp: timestamp_us,
