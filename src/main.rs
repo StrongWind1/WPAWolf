@@ -539,11 +539,15 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         *stats.dlt_descs_seen.entry(meta.dlt_desc).or_insert(0) += 1;
 
         let mut prev_ts_us: u64 = 0;
+        let mut frame_in_file: u64 = 0;
+        logger.set_file(&path.display().to_string());
 
         loop {
             match reader.next_packet() {
                 Ok(Some(mut packet)) => {
                     stats.total_packets += 1;
+                    frame_in_file += 1;
+                    logger.set_frame(frame_in_file);
                     // Periodic stderr progress line (no-op when --quiet). Cheap on the
                     // hot path: most calls return after a single u64 comparison.
                     let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;

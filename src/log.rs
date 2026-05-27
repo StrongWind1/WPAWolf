@@ -52,8 +52,14 @@ use std::io::{BufWriter, Write as _};
 use crate::types::Result;
 
 /// Structured triage logger. No-ops silently when no log path is configured.
+///
+/// Per-frame log methods automatically include `file=` and `frame=` fields
+/// from the stored context. The main loop calls [`Self::set_file`] when
+/// starting a new input file and [`Self::set_frame`] for each packet.
 pub struct Logger {
     writer: Option<BufWriter<std::fs::File>>,
+    current_file: String,
+    current_frame: u64,
     plcp_counts: HashMap<PlcpKey, u64>,
     malformed_counts: HashMap<String, u64>,
     essid_control_count: u64,
@@ -87,11 +93,29 @@ impl Logger {
         };
         Ok(Self {
             writer,
+            current_file: String::new(),
+            current_frame: 0,
             plcp_counts: HashMap::new(),
             malformed_counts: HashMap::new(),
             essid_control_count: 0,
             unknown_akm_counts: HashMap::new(),
         })
+    }
+
+    // --- Context ---
+
+    /// Sets the current input file path. Called from the main loop when
+    /// starting a new file. Resets the frame counter to 0.
+    pub fn set_file(&mut self, path: &str) {
+        self.current_file.clear();
+        self.current_file.push_str(path);
+        self.current_frame = 0;
+    }
+
+    /// Sets the current frame number within the current file. Called from
+    /// the main loop for each packet.
+    pub const fn set_frame(&mut self, frame: u64) {
+        self.current_frame = frame;
     }
 
     // --- Per-event methods (written immediately) ---
@@ -106,9 +130,11 @@ impl Logger {
         reason: &str,
         raw: &[u8],
     ) {
+        let file = &self.current_file;
+        let frame = self.current_frame;
         let bytes_hex = render_lower_hex(raw.get(..32).unwrap_or(raw));
         self.write_line(&format!(
-            "[eapol_key_rejected] {timestamp_us} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
+            "[eapol_key_rejected] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} reason={reason} bytes={bytes_hex}"
         ));
     }
 
@@ -122,10 +148,12 @@ impl Logger {
         kind: &str,
         nonce: &[u8],
     ) {
+        let file = &self.current_file;
+        let frame = self.current_frame;
         let nonce_hex = render_lower_hex(nonce);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_nonce] {timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
+            "[invalid_nonce] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} nonce_hex={nonce_hex}"
         ));
     }
 
@@ -139,10 +167,12 @@ impl Logger {
         kind: &str,
         mic: &[u8],
     ) {
+        let file = &self.current_file;
+        let frame = self.current_frame;
         let mic_hex = render_lower_hex(mic);
         let mt = msg_type_label(msg_type);
         self.write_line(&format!(
-            "[invalid_mic] {timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
+            "[invalid_mic] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} msg_type={mt} kind={kind} mic_hex={mic_hex}"
         ));
     }
 
@@ -155,13 +185,15 @@ impl Logger {
         kind: &str,
         pmkid: &[u8],
     ) {
+        let file = &self.current_file;
+        let frame = self.current_frame;
         let pmkid_hex = render_lower_hex(pmkid);
         self.write_line(&format!(
-            "[invalid_pmkid] {timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
+            "[invalid_pmkid] file={file} frame={frame} ts={timestamp_us} ap={ap_hex} sta={sta_hex} kind={kind} pmkid_hex={pmkid_hex}"
         ));
     }
 
-    /// Logs a per-AP summary for hashes dropped due to a missing ESSID.
+    /// Logs a per-AP summary for hashes dropped due to a missing ESSID (end-of-run).
     pub fn log_essid_not_found_summary(
         &mut self,
         ap_hex: impl std::fmt::Display,
@@ -176,17 +208,23 @@ impl Logger {
 
     /// Logs a per-file capture read error.
     pub fn log_capture_read_error(&mut self, path: &std::path::Path, reason: &str) {
-        self.write_line(&format!("[capture_read_error] path={} reason={reason}", path.display()));
+        self.write_line(&format!(
+            "[capture_read_error] file={} frame={} reason={reason}",
+            path.display(),
+            self.current_frame
+        ));
     }
 
     /// Logs an input file that could not be classified.
     pub fn log_skipped_input(&mut self, path: &std::path::Path, reason: &str) {
-        self.write_line(&format!("[skipped_input] path={} reason={reason}", path.display()));
+        self.write_line(&format!("[skipped_input] file={} reason={reason}", path.display()));
     }
 
     /// Logs a packet whose `interface_id` has no IDB-registered DLT.
     pub fn log_unknown_linktype(&mut self, interface_id: u32) {
-        self.write_line(&format!("[unknown_linktype] interface_id={interface_id}"));
+        let file = &self.current_file;
+        let frame = self.current_frame;
+        self.write_line(&format!("[unknown_linktype] file={file} frame={frame} interface_id={interface_id}"));
     }
 
     // --- Aggregated methods (accumulated, written at flush) ---
@@ -350,23 +388,33 @@ mod tests {
     }
 
     #[test]
-    fn per_event_writes_to_file() {
+    fn per_event_includes_file_and_frame_context() {
         use std::io::Read as _;
         let tmp = std::env::temp_dir().join("wpawolf_log_per_event.log");
         {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
+            logger.set_file("../cap/test.pcap");
+            logger.set_frame(42);
             logger.log_eapol_key_rejected(1_000, "aabbccddeeff", "112233445566", "bad_kdv", b"\xaa\xbb");
-            logger.log_capture_read_error(std::path::Path::new("/captures/304.pcap"), "need 30 bytes, got 0");
             logger.log_unknown_linktype(7);
+            logger.set_frame(100);
+            logger.log_capture_read_error(std::path::Path::new("../cap/test.pcap"), "need 30 bytes, got 0");
             logger.flush().unwrap();
         }
         let mut contents = String::new();
         std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
         assert!(
-            contents.contains("[eapol_key_rejected] 1000 ap=aabbccddeeff sta=112233445566 reason=bad_kdv bytes=aabb")
+            contents.contains("file=../cap/test.pcap frame=42 ts=1000"),
+            "eapol_key_rejected missing context; got: {contents}"
         );
-        assert!(contents.contains("[capture_read_error] path=/captures/304.pcap reason=need 30 bytes, got 0"));
-        assert!(contents.contains("[unknown_linktype] interface_id=7"));
+        assert!(
+            contents.contains("[unknown_linktype] file=../cap/test.pcap frame=42"),
+            "unknown_linktype missing context; got: {contents}"
+        );
+        assert!(
+            contents.contains("[capture_read_error] file=../cap/test.pcap frame=100"),
+            "capture_read_error missing frame; got: {contents}"
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -419,6 +467,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("wpawolf_log_eapol_bare_hex.log");
         {
             let mut logger = Logger::new(Some(&tmp)).unwrap();
+            logger.set_file("test.pcap");
+            logger.set_frame(1);
             logger.log_eapol_key_rejected(1_000, "aabbccddeeff", "112233445566", "bad_kdv", &[0xAA, 0xBB, 0x03]);
             logger.flush().unwrap();
         }

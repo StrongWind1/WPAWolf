@@ -229,7 +229,7 @@ fn category_capture_read_error_fires_on_truncated_trailing_record() {
 
     let lines = log_lines_for(log, "[capture_read_error]");
     assert_eq!(lines.len(), 1, "expected exactly one [capture_read_error] line; got {lines:?}");
-    assert!(lines[0].contains("path="), "missing path= field: {}", lines[0]);
+    assert!(lines[0].contains("file="), "missing file= field: {}", lines[0]);
     assert!(lines[0].contains("reason="), "missing reason= field: {}", lines[0]);
 }
 
