@@ -334,7 +334,9 @@ pub fn process_beacon_or_probe_resp(
         let source =
             if mac_hdr.subtype == SUBTYPE_BEACON { PmkidSource::BeaconRsnIe } else { PmkidSource::ProbeRespRsnIe };
         for pmkid in pmkids {
-            if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+            if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+                && kind != "null"
+            {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
             if pmkid_store.add(PmkidEntry {

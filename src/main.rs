@@ -253,11 +253,6 @@ struct Cli {
     debug: bool,
 }
 
-/// Maximum `[out_of_sequence_timestamp]` lines logged per input file. Beyond this
-/// the run-wide counter still ticks but the log file stays quiet to avoid
-/// flooding on tampered captures.
-const OOS_LOG_CAP_PER_FILE: u32 = 10;
-
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
@@ -364,25 +359,16 @@ fn strip_and_resolve<'a>(
 ) -> Option<&'a [u8]> {
     match link::strip(&packet.data, dlt) {
         Ok((payload, header_says_fcs)) => {
-            if dlt == link::DLT_RADIOTAP
-                && let Some(v) = link::radiotap::version_warning(&packet.data)
-            {
+            if dlt == link::DLT_RADIOTAP && link::radiotap::version_warning(&packet.data).is_some() {
                 stats.radiotap_version_nonzero += 1;
-                logger.log_radiotap_version_nonzero(packet.timestamp_us, packet.interface_id, v);
             }
             let badfcs = dlt == link::DLT_RADIOTAP && link::radiotap::has_badfcs(&packet.data);
             let outcome = link::fcs::resolve(payload, header_says_fcs, badfcs);
             match outcome {
                 link::fcs::FcsOutcome::HeaderAndCrcAgree => stats.fcs_header_and_crc_agree += 1,
-                link::fcs::FcsOutcome::CrcDetected => {
-                    stats.fcs_detected_by_crc += 1;
-                    logger.log_fcs_detected_by_crc(packet.timestamp_us, packet.interface_id);
-                },
+                link::fcs::FcsOutcome::CrcDetected => stats.fcs_detected_by_crc += 1,
                 link::fcs::FcsOutcome::BadFcsFlagged => stats.fcs_badfcs_flagged += 1,
-                link::fcs::FcsOutcome::CrcMismatchNoFlag => {
-                    stats.fcs_crc_mismatch_no_flag += 1;
-                    logger.log_fcs_crc_mismatch(packet.timestamp_us, packet.interface_id);
-                },
+                link::fcs::FcsOutcome::CrcMismatchNoFlag => stats.fcs_crc_mismatch_no_flag += 1,
                 link::fcs::FcsOutcome::Neither => stats.fcs_neither += 1,
             }
             Some(link::fcs::strip_fcs(payload, outcome))
@@ -390,20 +376,13 @@ fn strip_and_resolve<'a>(
         Err(e) => {
             if let Some(result) = link::recover::recover(&packet.data, dlt) {
                 match result.tier {
-                    link::recover::RecoveryTier::ComputedFromPresent => {
-                        stats.recovered_tier2 += 1;
-                        logger.log_recovered_tier2(packet.timestamp_us, packet.interface_id, result.offset);
-                    },
-                    link::recover::RecoveryTier::Crc32Scan => {
-                        stats.recovered_tier3 += 1;
-                        logger.log_recovered_tier3(packet.timestamp_us, packet.interface_id, result.offset, dlt);
-                    },
+                    link::recover::RecoveryTier::ComputedFromPresent => stats.recovered_tier2 += 1,
+                    link::recover::RecoveryTier::Crc32Scan => stats.recovered_tier3 += 1,
                 }
                 Some(result.frame)
             } else {
                 stats.link_errors += 1;
-                logger.log_plcp_error(packet.timestamp_us, packet.interface_id, &format!("link strip failed: {e}"));
-                logger.log_recovery_exhausted(packet.timestamp_us, packet.interface_id, dlt, packet.data.len());
+                logger.log_plcp_error(&format!("link strip failed: {e}"), dlt);
                 None
             }
         },
@@ -559,17 +538,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         *stats.endians_seen.entry(meta.endian.to_owned()).or_insert(0) += 1;
         *stats.dlt_descs_seen.entry(meta.dlt_desc).or_insert(0) += 1;
 
-        // Per-file timestamp sequence tracker. A monotonic increase is what any
-        // well-behaved capture tool produces; inversions almost always indicate
-        // post-processed input (aircrack-ng deadly-clean, mergecap with
-        // --strict-time-stamps=false, hand edit). wpawolf processes the packet
-        // normally either way; the counter + log line exist only so an operator
-        // triaging a corpus can identify which captures have been touched.
-        // Matches hcxpcapngtool 7.1.2's "Warning: out of sequence timestamps!".
-        // `OOS_LOG_CAP_PER_FILE` is declared at module scope (see below) to
-        // satisfy `clippy::items_after_statements`.
         let mut prev_ts_us: u64 = 0;
-        let mut oos_logged_this_file: u32 = 0;
 
         loop {
             match reader.next_packet() {
@@ -593,10 +562,6 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     // triggers the counter.
                     if prev_ts_us != 0 && packet.timestamp_us < prev_ts_us {
                         stats.out_of_sequence_timestamps += 1;
-                        if oos_logged_this_file < OOS_LOG_CAP_PER_FILE {
-                            logger.log_out_of_sequence_timestamp(path, prev_ts_us, packet.timestamp_us);
-                            oos_logged_this_file += 1;
-                        }
                     }
                     prev_ts_us = packet.timestamp_us;
 
@@ -643,11 +608,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         },
                         frame::ParseResult::Malformed(reason) => {
                             stats.malformed_mac_hdr += 1;
-                            logger.log_malformed_frame(
-                                packet.timestamp_us,
-                                packet.interface_id,
-                                &format!("{reason} (len={})", frame_data.len()),
-                            );
+                            logger.log_malformed_frame(reason);
                             continue;
                         },
                     };

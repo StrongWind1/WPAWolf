@@ -72,13 +72,12 @@ fn malformed_frame_logged_on_truncated_mac_header() {
     assert_eq!(
         malformed_lines.len(),
         1,
-        "expected exactly one [malformed_frame] log line; got {}:\n{log_contents}",
+        "expected exactly one [malformed_frame] summary line; got {}:\n{log_contents}",
         malformed_lines.len(),
     );
-    // Sanity-check that the line contains the expected details substring.
     assert!(
-        malformed_lines[0].contains("truncated 802.11 MAC header"),
-        "log line missing expected detail substring: {}",
+        malformed_lines[0].contains("truncated 802.11 MAC header") && malformed_lines[0].contains("count=1"),
+        "summary line missing expected reason or count: {}",
         malformed_lines[0],
     );
 }

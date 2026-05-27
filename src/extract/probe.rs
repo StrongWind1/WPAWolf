@@ -117,7 +117,9 @@ pub fn process_probe_req(
         let akm = akm_map.get(&mac_hdr.ap);
         let ft = extract_ft_fields(body).map(Box::new);
         for pmkid in pmkids {
-            if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+            if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+                && kind != "null"
+            {
                 logger.log_invalid_pmkid(timestamp_us, mac_hdr.ap.hex_lower(), mac_hdr.sta.hex_lower(), kind, &pmkid);
             }
             if pmkid_store.add(PmkidEntry {

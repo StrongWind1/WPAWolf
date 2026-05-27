@@ -239,25 +239,29 @@ fn process_msdu_payload(
         // logger.
         if let Some((kind, nonce)) = t.nonce_garbage {
             stats.record_invalid_nonce(kind, t.msg_type);
-            logger.log_invalid_nonce(
-                timestamp_us,
-                mac_hdr.ap.hex_lower(),
-                mac_hdr.sta.hex_lower(),
-                t.msg_type,
-                kind,
-                &nonce,
-            );
+            if kind != "null" {
+                logger.log_invalid_nonce(
+                    timestamp_us,
+                    mac_hdr.ap.hex_lower(),
+                    mac_hdr.sta.hex_lower(),
+                    t.msg_type,
+                    kind,
+                    &nonce,
+                );
+            }
         }
         if let Some((kind, mic)) = t.mic_garbage {
             stats.record_invalid_mic(kind);
-            logger.log_invalid_mic(
-                timestamp_us,
-                mac_hdr.ap.hex_lower(),
-                mac_hdr.sta.hex_lower(),
-                t.msg_type,
-                kind,
-                mic.as_slice(),
-            );
+            if kind != "null" {
+                logger.log_invalid_mic(
+                    timestamp_us,
+                    mac_hdr.ap.hex_lower(),
+                    mac_hdr.sta.hex_lower(),
+                    t.msg_type,
+                    kind,
+                    mic.as_slice(),
+                );
+            }
         }
     }
     // Surface the preauth EtherType (0x88C7) separately from regular EAPOL (0x888E)

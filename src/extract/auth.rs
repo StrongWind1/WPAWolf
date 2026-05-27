@@ -49,7 +49,9 @@ pub fn process_auth_ft(
         if a == AkmType::Unknown { AkmType::FtPsk } else { a }
     };
     for pmkid in pmkids {
-        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+        if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+            && kind != "null"
+        {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: ft.clone() }) {
@@ -90,7 +92,9 @@ pub fn process_auth_fils(
     };
     let akm = akm_map.get(&ap);
     for pmkid in pmkids {
-        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+        if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+            && kind != "null"
+        {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {
@@ -134,7 +138,9 @@ pub fn process_auth_pasn(
     };
     let akm = akm_map.get(&ap);
     for pmkid in pmkids {
-        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+        if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+            && kind != "null"
+        {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry { timestamp: timestamp_us, ap, sta, pmkid, source, akm, ft: None }) {

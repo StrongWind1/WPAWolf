@@ -56,7 +56,7 @@ pub fn insert_essid(
     let passes_gate = !essid.is_empty() && essid.len() <= 32 && essid.first() != Some(&0);
     if passes_gate && essid.iter().any(|&b| b <= 0x1F) {
         stats.essid_control_bytes_warned = stats.essid_control_bytes_warned.saturating_add(1);
-        logger.log_essid_control_bytes(timestamp_us, ap.hex_lower(), essid);
+        logger.log_essid_control_bytes();
     }
     essid_map.insert(ap, essid, timestamp_us);
 }
@@ -311,7 +311,9 @@ pub fn store_eapol_key(
 
     // M1 PMKID from Key Data KDE. [IEEE 802.11-2024] §12.7.2
     if let Some(pmkid) = key.pmkid {
-        if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+        if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+            && kind != "null"
+        {
             logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
         }
         if pmkid_store.add(PmkidEntry {
@@ -340,7 +342,9 @@ pub fn store_eapol_key(
                 && let Some(rsn) = parse_rsn_ie(ie.value)
             {
                 for pmkid in rsn.pmkids {
-                    if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+                    if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+                        && kind != "null"
+                    {
                         logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                     }
                     if pmkid_store.add(PmkidEntry {

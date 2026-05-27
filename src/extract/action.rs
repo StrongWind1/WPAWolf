@@ -137,7 +137,9 @@ pub fn process_action(
                 _ /* ACTION_FT_CONFIRM */ => (target_ap, sta_addr, PmkidSource::FtActionConfirm),
             };
             for pmkid in pmkids {
-                if let Some(kind) = stats.check_pmkid_invalid(&pmkid) {
+                if let Some(kind) = stats.check_pmkid_invalid(&pmkid)
+                    && kind != "null"
+                {
                     logger.log_invalid_pmkid(timestamp_us, ap.hex_lower(), sta.hex_lower(), kind, &pmkid);
                 }
                 if pmkid_store.add(PmkidEntry {
@@ -188,7 +190,9 @@ pub fn process_action(
                 } else {
                     PmkidSource::MeshPeeringConfirm
                 };
-                if let Some(kind) = stats.check_pmkid_invalid(&pmkid_bytes) {
+                if let Some(kind) = stats.check_pmkid_invalid(&pmkid_bytes)
+                    && kind != "null"
+                {
                     logger.log_invalid_pmkid(
                         timestamp_us,
                         mac_hdr.ap.hex_lower(),

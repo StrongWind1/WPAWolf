@@ -95,11 +95,22 @@ pub fn resolve_wds_eapol(
             let t = eapol::check_invalid_fields(&p.body);
             if let Some((kind, nonce)) = t.nonce_garbage {
                 stats.record_invalid_nonce(kind, t.msg_type);
-                logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, &nonce);
+                if kind != "null" {
+                    logger.log_invalid_nonce(p.timestamp, ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, &nonce);
+                }
             }
             if let Some((kind, mic)) = t.mic_garbage {
                 stats.record_invalid_mic(kind);
-                logger.log_invalid_mic(p.timestamp, ap.hex_lower(), sta.hex_lower(), t.msg_type, kind, mic.as_slice());
+                if kind != "null" {
+                    logger.log_invalid_mic(
+                        p.timestamp,
+                        ap.hex_lower(),
+                        sta.hex_lower(),
+                        t.msg_type,
+                        kind,
+                        mic.as_slice(),
+                    );
+                }
             }
         }
         if let Some(key) = eapol::parse(&p.body, resolved_dir) {
