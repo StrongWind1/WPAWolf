@@ -26,6 +26,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
+    mem_monitor::MemMonitor,
     output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
@@ -161,9 +162,9 @@ struct Cli {
     log: Option<std::path::PathBuf>,
 
     // ---- Output filters ----
-    /// Narrow output like hcxpcapngtool (bundle of 5 filters)
+    /// Narrow output like hcxpcapngtool (bundle of 4 filters)
     ///
-    /// Enables: --eapoltimeout=5, --rc-drift=8, --dedup-hash-combos, --per-file, --nc-dedup. Later flags override these defaults.
+    /// Enables: --eapoltimeout=5, --rc-drift=8, --dedup-hash-combos, --nc-dedup. Later flags override these defaults.
     #[arg(short = 's', long, help_heading = "Output filters", display_order = 20)]
     strict: bool,
 
@@ -234,12 +235,6 @@ struct Cli {
     #[arg(short = 'q', long, help_heading = "Runtime", display_order = 31)]
     quiet: bool,
 
-    /// Flush stores after each input file (no cross-file pairing)
-    ///
-    /// MessageStore and PmkidStore clear per file. Bounds RSS for large corpora at the cost of cross-file pairing (< 1% hash yield drop on per-session captures).
-    #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
-    per_file: bool,
-
     /// Print per-store memory footprint at end of run
     ///
     /// Approximate byte counts for every long-lived store (MessageStore, PmkidStore, EssidMap, etc.), sorted descending. For OOM triage.
@@ -256,10 +251,10 @@ struct Cli {
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
-/// turns on the five output filters that together close the volume gap against
+/// turns on the four output filters that together close the volume gap against
 /// hcxpcapngtool default (`--eapoltimeout=5`, `--rc-drift=8`,
-/// `--dedup-hash-combos`, `--per-file`, `--nc-dedup`), but uses later-flag-wins
-/// precedence so an explicit `--eapoltimeout=30` survives past `--strict`. The three boolean
+/// `--dedup-hash-combos`, `--nc-dedup`), but uses later-flag-wins precedence so
+/// an explicit `--eapoltimeout=30` survives past `--strict`. The two boolean
 /// flags can only be turned on, never off, so `--strict` always sets them.
 const fn apply_strict_defaults(cli: &mut Cli) {
     if !cli.strict {
@@ -272,7 +267,6 @@ const fn apply_strict_defaults(cli: &mut Cli) {
         cli.rc_drift = Some(8);
     }
     cli.dedup_hash_combos = true;
-    cli.per_file = true;
     cli.nc_dedup = true;
 }
 
@@ -446,8 +440,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         )));
     }
 
-    // OOM guard: abort if RSS exceeds 80% of system RAM.
-    let oom_threshold_bytes = wpawolf::progress::total_ram_bytes() * 80 / 100;
+    let mut mem_monitor = MemMonitor::new();
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
     let pair_config = PairConfig {
@@ -548,10 +541,22 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.total_packets += 1;
                     frame_in_file += 1;
                     logger.set_frame(frame_in_file);
-                    // Periodic stderr progress line (no-op when --quiet). Cheap on the
-                    // hot path: most calls return after a single u64 comparison.
                     let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
                     progress.tick(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
+                    if mem_monitor.tick_packet() {
+                        if !message_store.disk_mode()
+                            && let Err(e) = message_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush MessageStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                        if !pmkid_store.disk_mode()
+                            && let Err(e) = pmkid_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush PmkidStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                    }
                     // Timestamp range (epoch microseconds). Initialise first_us on the very first packet.
                     if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
                         stats.timestamp_first_us = packet.timestamp_us;
@@ -710,63 +715,20 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
 
-            // OOM guard: every 1000 files, check RSS and abort if approaching OOM.
-            if (file_idx + 1) % 1000 == 0 {
-                let rss = wpawolf::progress::current_rss_bytes();
-                if rss > oom_threshold_bytes {
-                    let rss_mib = rss / (1024 * 1024);
-                    let total_mib = wpawolf::progress::total_ram_bytes() / (1024 * 1024);
-                    println!(
-                        "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 1 ingestion (file {}/{total_inputs}). Reduce input size, use --per-file, or increase available RAM.",
-                        file_idx + 1
-                    );
+            if mem_monitor.check() {
+                if !message_store.disk_mode()
+                    && let Err(e) = message_store.flush_to_disk()
+                {
+                    println!("error: failed to flush MessageStore to disk: {e}");
+                    std::process::exit(1);
+                }
+                if !pmkid_store.disk_mode()
+                    && let Err(e) = pmkid_store.flush_to_disk()
+                {
+                    println!("error: failed to flush PmkidStore to disk: {e}");
                     std::process::exit(1);
                 }
             }
-        }
-
-        // --- Per-file emit (--per-file mode only) ---
-        //
-        // Resolve any deferred WDS frames seen this file (they need an ESSID
-        // context; `essid_map` accumulates across files so even cross-file
-        // ESSID-based resolution still works), MLD-canonicalize the per-file
-        // stores, emit hashes for what we have, then drop the per-file EAPOL
-        // and PMKID state. Auxiliaries (`-E`/`-W`/...), `essid_map`,
-        // `akm_map`, `mld_store`, and the dedup state inside `output_ctx`
-        // accumulate across files. See `ARCHITECTURE.md §3` for the
-        // cross-file pairing tradeoff.
-        if cli.per_file {
-            if !pending_eapol.is_empty() {
-                resolve_wds_eapol(
-                    &pending_eapol,
-                    &essid_map,
-                    &mut akm_map,
-                    &mut message_store,
-                    &mut pmkid_store,
-                    &mut stats,
-                    &mut logger,
-                );
-                pending_eapol.clear();
-            }
-            if !mld_store.is_empty() {
-                let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-                stats.mld_groups_merged = stats.mld_groups_merged.saturating_add(merged);
-                pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            }
-            stats.anonce_m1_m3_mismatch_sessions =
-                stats.anonce_m1_m3_mismatch_sessions.saturating_add(message_store.count_anonce_m1_m3_mismatches());
-            output_ctx.emit(
-                &message_store,
-                &pmkid_store,
-                &essid_map,
-                &akm_map,
-                &pair_config,
-                thread_count,
-                essid_filter,
-                &debug,
-            )?;
-            message_store.clear();
-            pmkid_store.clear();
         }
     }
 
@@ -778,11 +740,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         progress.print_now(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
     }
 
-    // --- Phase 1.5: Resolve deferred WDS EAPOL frames (non-per-file mode only) ---
+    // --- Phase 1.5: Resolve deferred WDS EAPOL frames ---
     // WDS relay frames had ambiguous direction during Phase 1. Now that essid_map is fully
     // populated, resolve them using essid_map lookup, ACK-based AP discovery, or flag fallback.
-    // In `--per-file` mode the resolve already ran per-file inside the ingest loop.
-    if !cli.per_file && !pending_eapol.is_empty() {
+    if !pending_eapol.is_empty() {
         let wds_count = pending_eapol.len();
         resolve_wds_eapol(
             &pending_eapol,
@@ -820,15 +781,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     stats.username_list_path = path_str(&cli.username_output);
     stats.device_info_path = path_str(&cli.device_output);
 
-    if cli.per_file {
-        // Per-file mode also re-canonicalizes essid_map at end of run because
-        // some link-MAC SSIDs may have been filed under their pre-MLD address
-        // before the corresponding MLE was learned. Cheap because it only
-        // touches the AP-keyed map.
-        if !mld_store.is_empty() {
-            stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
-        }
-    } else {
+    {
         // 802.11be MLD canonicalization: if any Multi-Link Element was seen, rewrite all
         // MessageStore and PmkidStore keys so link addresses collapse onto the MLD identity.
         // When no MLE was observed, this is a no-op and byte-identical to pre-MLE behavior.
@@ -837,15 +790,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
             stats.mld_groups_merged = merged;
             pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            // Fold link-MAC SSIDs into the canonical MLD MAC so essid_map lookups by
-            // canonical AP key (post-canonicalization on the pair side) actually find
-            // them. Without this, hidden-SSID resolution silently fails for any MLD
-            // AP whose SSID was advertised under a band-specific link MAC.
             stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
         }
 
-        // Capture-quality diagnostic: count sessions whose M1 and M3 ANonce disagree.
-        // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
         stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
 
         // Phase 1 complete; log the full store state and the top heavy groups before Phase 4.
@@ -864,9 +811,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check("Phase 1 complete");
 
-            if debug.enabled {
+            if debug.enabled && !message_store.disk_mode() {
                 // Build group summaries for the top-25 survey and cost-tier breakdown.
-                // Both come from the same single pass over the store.
+                // Both come from the same single pass over the store. Skipped in disk
+                // mode to avoid loading all groups back into memory.
                 let mut summaries: Vec<GroupSummary> = message_store
                     .groups()
                     .map(|(pair, msgs)| GroupSummary::from_messages(pair.ap, pair.sta, msgs))
@@ -903,7 +851,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             debug.phase_start(4, "Emit");
         }
 
-        // Single-pass emit over the fully populated stores.
+        message_store.flush_disk_writer();
+        pmkid_store.flush_disk_writer();
+
         output_ctx.emit(
             &message_store,
             &pmkid_store,
@@ -913,6 +863,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             thread_count,
             essid_filter,
             &debug,
+            &mut mem_monitor,
         )?;
 
         debug.phase_done(4, "Emit", "");
@@ -986,6 +937,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     }
 
     logger.flush()?;
+    message_store.cleanup_disk();
+    pmkid_store.cleanup_disk();
     stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
     stats.print_summary();
 
@@ -1039,7 +992,6 @@ mod tests {
         assert_eq!(cli.eapoltimeout, None, "no --strict -> eapoltimeout stays None (unlimited)");
         assert_eq!(cli.rc_drift, None, "no --strict -> rc_drift stays None (off)");
         assert!(!cli.dedup_hash_combos, "no --strict -> dedup_hash_combos stays off");
-        assert!(!cli.per_file, "no --strict -> per_file stays off");
         assert!(!cli.nc_dedup, "no --strict -> nc_dedup stays off");
     }
 
@@ -1050,7 +1002,6 @@ mod tests {
         assert_eq!(cli.eapoltimeout, Some(5), "--strict -> 5 s session window");
         assert_eq!(cli.rc_drift, Some(8), "--strict -> RC drift tolerance 8");
         assert!(cli.dedup_hash_combos, "--strict -> dedup_hash_combos on");
-        assert!(cli.per_file, "--strict -> per_file on");
         assert!(cli.nc_dedup, "--strict -> nc_dedup on");
     }
 
@@ -1062,7 +1013,6 @@ mod tests {
         assert_eq!(cli.eapoltimeout, Some(30), "explicit user value must override --strict default");
         assert_eq!(cli.rc_drift, Some(8), "untouched filters still take strict defaults");
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 
@@ -1072,7 +1022,6 @@ mod tests {
         assert_eq!(cli.rc_drift, Some(4), "explicit --rc-drift=4 wins over strict's 8");
         assert_eq!(cli.eapoltimeout, Some(5));
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 
@@ -1082,18 +1031,15 @@ mod tests {
         assert_eq!(cli.eapoltimeout, Some(60));
         assert_eq!(cli.rc_drift, Some(2));
         assert!(cli.dedup_hash_combos, "strict still enables the three boolean filters");
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 
     #[test]
     fn strict_idempotent_with_already_set_bools() {
-        // --strict --per-file --dedup-hash-combos --nc-dedup is the same as --strict alone.
-        let cli = parse_with_strict(&["--strict", "--per-file", "--dedup-hash-combos", "--nc-dedup"]);
+        let cli = parse_with_strict(&["--strict", "--dedup-hash-combos", "--nc-dedup"]);
         assert_eq!(cli.eapoltimeout, Some(5));
         assert_eq!(cli.rc_drift, Some(8));
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 

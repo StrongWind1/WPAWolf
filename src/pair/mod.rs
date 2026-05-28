@@ -130,8 +130,13 @@ pub fn estimate_group_cost(messages: &[EapolMessage]) -> u64 {
 /// Estimates the total pairing cost across all groups in a `MessageStore`.
 ///
 /// Used to pre-size the dedup `HashSet` so hashbrown never resizes mid-run.
+/// In disk mode, returns 0 -- dedup pre-sizing is skipped (disk-backed dedup
+/// handles it without pre-allocation).
 #[must_use]
 pub fn estimate_total_cost(store: &MessageStore) -> u64 {
+    if store.disk_mode() {
+        return 0;
+    }
     store.groups().map(|(_, msgs)| estimate_group_cost(msgs)).sum()
 }
 
@@ -155,10 +160,13 @@ fn pair_one_group(
 /// can process and drop pairs immediately, bounding peak memory to one group's
 /// output at a time.
 ///
-/// When `thread_count > 1`, uses rayon's work-stealing `par_iter` for parallel
-/// pairing. The `on_group` callback is serialized via a `Mutex` so I/O-bound
-/// fan-out (writing to `BufWriter`s) does not need to be thread-safe. Pairing
-/// itself runs fully parallel across cores.
+/// When `thread_count > 1` and memory mode is active, uses rayon's work-stealing
+/// `par_iter` for parallel pairing. The `on_group` callback is serialized via a
+/// `Mutex` so I/O-bound fan-out (writing to `BufWriter`s) does not need to be
+/// thread-safe. Pairing itself runs fully parallel across cores.
+///
+/// In disk mode, iterates group keys single-threaded and loads each group lazily
+/// from the temp file. Only one group's messages are in memory at a time.
 ///
 /// Returns the aggregate `NcDedupStats` across all groups.
 pub fn pair_all_groups_streaming<F>(
@@ -171,6 +179,10 @@ pub fn pair_all_groups_streaming<F>(
 where
     F: Fn(Vec<PairedHash>) + Send + Sync,
 {
+    if store.disk_mode() {
+        return pair_all_groups_disk(store, config, debug, on_group);
+    }
+
     let groups: Vec<(&MacPair, &Vec<EapolMessage>)> = store.groups().collect();
 
     if groups.is_empty() {
@@ -196,7 +208,7 @@ where
                 let rss_mib = crate::progress::current_rss_mib().unwrap_or(0);
                 let total_mib = crate::progress::total_ram_bytes() / (1024 * 1024);
                 println!(
-                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size, use --per-file, or increase available RAM."
+                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size or increase available RAM."
                 );
                 std::process::exit(1);
             }
@@ -232,6 +244,45 @@ where
     }
 
     all_nc.into_inner().unwrap_or_default()
+}
+
+/// Disk-mode pairing: iterates group keys single-threaded, loading one group at a time.
+fn pair_all_groups_disk<F>(store: &MessageStore, config: &PairConfig, debug: &DebugPrinter, on_group: F) -> NcDedupStats
+where
+    F: Fn(Vec<PairedHash>),
+{
+    let keys: Vec<MacPair> = store.group_keys().collect();
+    if keys.is_empty() {
+        return NcDedupStats::default();
+    }
+
+    let total_groups = keys.len();
+    let mut groups_done: usize = 0;
+    let mut pairs_done: usize = 0;
+    let mut all_nc = NcDedupStats::default();
+
+    for mac_pair in &keys {
+        let messages = store.load_group(mac_pair);
+        if messages.is_empty() {
+            continue;
+        }
+        let (m1, m2, m3, m4, cost) = group_counts_and_cost(&messages);
+        debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
+        let t0 = Instant::now();
+        let (pairs, nc) = pair_one_group(mac_pair, &messages, config);
+        let elapsed_us = t0.elapsed().as_micros();
+        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+        groups_done += 1;
+        pairs_done += pairs.len();
+        if groups_done.is_multiple_of(group_progress_interval()) || groups_done == total_groups {
+            debug.group_progress(groups_done, total_groups, pairs_done);
+        }
+        merge_nc_stats(&mut all_nc, nc);
+        on_group(pairs);
+        // `messages` dropped here -- memory freed before next group loads
+    }
+
+    all_nc
 }
 
 /// Collects all pairs into a `Vec`. Prefer `pair_all_groups_streaming` when
