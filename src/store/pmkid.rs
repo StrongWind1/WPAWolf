@@ -14,7 +14,7 @@
 //! observed in M1 and M2 is stored only once. See `ARCHITECTURE.md §6` for the 20-location
 //! catalogue.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write as _};
 
 use crate::store::disk_messages::{read_pmkid_entry, write_pmkid_entry};
@@ -63,6 +63,11 @@ struct PmkidRef {
 pub struct PmkidStore {
     groups: HashMap<MacPair, Vec<PmkidEntry>>,
     disk_index: HashMap<MacPair, Vec<PmkidRef>>,
+    /// Per-pair seen-PMKID set for disk mode dedup. Kept in memory because
+    /// the 16-byte PMKID values are small (~20 bytes per entry with `HashSet`
+    /// overhead) and the total count is bounded by the number of unique PMKIDs
+    /// in the capture (typically <100K).
+    disk_seen: HashMap<MacPair, HashSet<[u8; 16]>>,
     disk_writer: Option<BufWriter<std::fs::File>>,
     disk_path: Option<std::path::PathBuf>,
     disk_offset: u64,
@@ -115,13 +120,16 @@ impl PmkidStore {
     }
 
     fn add_to_disk(&mut self, entry: &PmkidEntry) -> bool {
+        let pair = MacPair::new(entry.ap, entry.sta);
+        if !self.disk_seen.entry(pair).or_default().insert(entry.pmkid) {
+            return false;
+        }
         let Some(writer) = &mut self.disk_writer else {
             return false;
         };
         let Ok(written) = write_pmkid_entry(writer, entry) else {
             return false;
         };
-        let pair = MacPair::new(entry.ap, entry.sta);
         let refs = self.disk_index.entry(pair).or_default();
         refs.push(PmkidRef { offset: self.disk_offset });
         self.disk_offset += u64::from(written);
@@ -141,6 +149,14 @@ impl PmkidStore {
             return Box::new(all.into_iter());
         }
         Box::new(self.groups.values().flatten().cloned())
+    }
+
+    /// Flushes the disk writer buffer. Must be called before `iter()` in disk
+    /// mode to ensure all records written via `add_to_disk()` are readable.
+    pub fn flush_disk_writer(&mut self) {
+        if let Some(w) = &mut self.disk_writer {
+            let _ = w.flush();
+        }
     }
 
     fn load_all_entries(&self) -> Vec<PmkidEntry> {
@@ -188,7 +204,9 @@ impl PmkidStore {
         let old_groups = std::mem::take(&mut self.groups);
         for (pair, entries) in old_groups {
             let mut refs = Vec::with_capacity(entries.len());
+            let seen = self.disk_seen.entry(pair).or_default();
             for entry in &entries {
+                seen.insert(entry.pmkid);
                 let written = write_pmkid_entry(&mut writer, entry).map_err(crate::types::Error::Io)?;
                 refs.push(PmkidRef { offset });
                 offset += u64::from(written);
@@ -256,6 +274,7 @@ impl PmkidStore {
     pub fn clear(&mut self) {
         self.groups.clear();
         self.disk_index.clear();
+        self.disk_seen.clear();
     }
 
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.

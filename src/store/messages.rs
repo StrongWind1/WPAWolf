@@ -305,6 +305,14 @@ impl MessageStore {
         messages
     }
 
+    /// Flushes the disk writer buffer. Must be called before `load_group()` to
+    /// ensure all records written via `add_to_disk()` are readable.
+    pub fn flush_disk_writer(&mut self) {
+        if let Some(w) = &mut self.disk_writer {
+            let _ = w.flush();
+        }
+    }
+
     /// Cleans up the temp file. Called on shutdown.
     pub fn cleanup_disk(&mut self) {
         if let Some(path) = self.disk_path.take() {

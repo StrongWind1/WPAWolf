@@ -35,10 +35,17 @@ pub struct MemMonitor {
 
 impl MemMonitor {
     /// Creates a new monitor. Probes total system RAM once at init.
+    ///
+    /// Override the 80% threshold via `WPAWOLF_MEM_THRESHOLD` (integer percent,
+    /// e.g. `WPAWOLF_MEM_THRESHOLD=1` triggers at 1% for testing).
     #[must_use]
     pub fn new() -> Self {
         let total_ram = progress::total_ram_bytes();
-        let threshold_bytes = total_ram / 1000 * THRESHOLD_TENTHS;
+        let tenths = std::env::var("WPAWOLF_MEM_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map_or(THRESHOLD_TENTHS, |pct| pct.min(100) * 10);
+        let threshold_bytes = total_ram / 1000 * tenths;
         Self { total_ram, threshold_bytes, last_rss: 0, disk_mode: false, packets_since_check: 0 }
     }
 

@@ -768,6 +768,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             }
             stats.anonce_m1_m3_mismatch_sessions =
                 stats.anonce_m1_m3_mismatch_sessions.saturating_add(message_store.count_anonce_m1_m3_mismatches());
+            message_store.flush_disk_writer();
+            pmkid_store.flush_disk_writer();
             output_ctx.emit(
                 &message_store,
                 &pmkid_store,
@@ -918,7 +920,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             debug.phase_start(4, "Emit");
         }
 
-        // Single-pass emit over the fully populated stores.
+        message_store.flush_disk_writer();
+        pmkid_store.flush_disk_writer();
+
         output_ctx.emit(
             &message_store,
             &pmkid_store,
