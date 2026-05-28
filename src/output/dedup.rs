@@ -126,6 +126,23 @@ impl SinkId {
     pub const fn as_index(self) -> usize {
         self as usize
     }
+
+    /// Converts a numeric index back to a `SinkId`, or `None` if out of range.
+    #[must_use]
+    pub const fn from_index(idx: usize) -> Option<Self> {
+        match idx {
+            0 => Some(Self::Out22000),
+            1 => Some(Self::Out37100),
+            2 => Some(Self::OutCombined),
+            3 => Some(Self::OutWpa1),
+            4 => Some(Self::OutWpa2),
+            5 => Some(Self::OutPskSha256),
+            6 => Some(Self::OutFt),
+            7 => Some(Self::OutPskSha384),
+            8 => Some(Self::OutFtPskSha384),
+            _ => None,
+        }
+    }
 }
 
 /// Per-sink deduplication filter.
@@ -164,6 +181,32 @@ impl PerSinkDedup {
                 set.reserve(capacity);
             }
         }
+    }
+
+    /// Flushes all in-memory fingerprints to a `DiskDedup`'s bucket files.
+    ///
+    /// Each fingerprint is recorded with `line_number = u64::MAX` (sentinel)
+    /// so the cleaning pass knows these were already deduped in memory and
+    /// don't correspond to output lines that need removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on I/O failure writing to bucket files.
+    pub fn flush_to_buckets(&self, disk_dedup: &mut super::disk_dedup::DiskDedup) -> crate::types::Result<()> {
+        for (idx, set) in self.sets.iter().enumerate() {
+            if set.is_empty() {
+                continue;
+            }
+            let Some(sink) = SinkId::from_index(idx) else { continue };
+            disk_dedup.flush_hashset(sink, set)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces all internal `HashSet`s with empty ones, freeing memory.
+    /// Called after `flush_to_buckets` during mid-emission switchover.
+    pub fn drain(&mut self) {
+        self.sets = Default::default();
     }
 
     /// Returns `true` if this PMKID entry is new for `sink` and records the fingerprint.

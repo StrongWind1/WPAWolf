@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod device_info;
+pub mod disk_dedup;
 pub mod hashcat;
 pub mod wordlists;
 
@@ -284,6 +285,11 @@ impl HashSinks {
         }
         Ok(())
     }
+
+    /// Returns the output path for a given sink, if configured.
+    fn path(&self, sink: SinkId) -> Option<PathBuf> {
+        self.sinks.get(sink.as_index()).and_then(Option::as_ref).map(|s| s.path.clone())
+    }
 }
 
 /// Returns the per-AKM extended sink that accepts a given `HashType`, if any.
@@ -373,11 +379,13 @@ fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sin
 fn fan_out(
     sinks: &mut HashSinks,
     dedup: &mut PerSinkDedup,
+    dd: &mut Option<disk_dedup::DiskDedup>,
     stats: &mut OutputStats,
     ht: HashType,
     item: FanItem<'_>,
 ) -> Result<bool> {
     let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
+    let disk_mode = dd.is_some();
 
     // Pre-build the EAPOL body once (prefix-independent) if any sink will accept it.
     let eapol_body: Option<Vec<u8>> = match item {
@@ -400,9 +408,16 @@ fn fan_out(
         let idx = sink.as_index();
         let Some(slot) = sinks.sinks.get_mut(idx) else { continue };
         let Some(lazy) = slot.as_mut() else { continue };
-        let accepted = match item {
-            FanItem::Pmkid { entry, essid, .. } => dedup.check_pmkid(sink, entry, essid),
-            FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
+
+        // In disk mode: always accept (write-through), record fingerprint to buckets.
+        // In memory mode: use in-memory HashSet dedup gate.
+        let accepted = if disk_mode {
+            true
+        } else {
+            match item {
+                FanItem::Pmkid { entry, essid, .. } => dedup.check_pmkid(sink, entry, essid),
+                FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
+            }
         };
         if accepted {
             let writer = lazy.writer()?;
@@ -422,6 +437,13 @@ fn fan_out(
             }
             if let Some(c) = stats.lines_per_sink.get_mut(idx) {
                 *c += 1;
+            }
+            if let Some(disk) = dd.as_mut() {
+                let fp = match item {
+                    FanItem::Pmkid { entry, essid, .. } => dedup::pmkid_fingerprint(entry, essid),
+                    FanItem::Eapol { pair, essid, .. } => dedup::eapol_fingerprint(pair, essid),
+                };
+                disk.record(sink, fp)?;
             }
             any_written = true;
         } else if let Some(c) = stats.dropped_per_sink.get_mut(idx) {
@@ -512,6 +534,7 @@ pub struct OutputContext {
     stats: OutputStats,
     dedup: PerSinkDedup,
     sinks: HashSinks,
+    disk_dedup: Option<disk_dedup::DiskDedup>,
     /// APs whose hash lines we declined to emit because no ESSID was ever
     /// observed for them. Such lines are not crackable (hashcat needs the
     /// ESSID to derive the PMK), so they go to `--log` only -- nothing
@@ -546,6 +569,7 @@ impl OutputContext {
             stats: OutputStats::default(),
             dedup: PerSinkDedup::new(),
             sinks: HashSinks::open(paths),
+            disk_dedup: None,
             unresolved_drops: HashMap::new(),
             timestamp_ranges: HashMap::new(),
         }
@@ -612,6 +636,9 @@ impl OutputContext {
             let estimated_bytes = estimated_hashes.saturating_mul(12).saturating_mul(active_count);
             if mem_monitor.would_exceed(estimated_bytes) {
                 mem_monitor.force_disk_mode();
+                if self.disk_dedup.is_none() {
+                    self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+                }
             } else {
                 #[allow(
                     clippy::cast_possible_truncation,
@@ -651,6 +678,7 @@ impl OutputContext {
         let stats = &mut self.stats;
         let dedup = &mut self.dedup;
         let sinks = &mut self.sinks;
+        let disk_dedup = &mut self.disk_dedup;
         let unresolved_drops = &mut self.unresolved_drops;
 
         // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
@@ -690,7 +718,7 @@ impl OutputContext {
 
                 for essid in ssids {
                     let item = FanItem::Pmkid { entry: &entry, ft: ft_ctx, essid };
-                    let written = fan_out(sinks, dedup, stats, ht, item)?;
+                    let written = fan_out(sinks, dedup, disk_dedup, stats, ht, item)?;
                     if written {
                         stats.pmkids_written += 1;
                         *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
@@ -713,12 +741,14 @@ impl OutputContext {
         struct EmitState<'a> {
             sinks: &'a mut HashSinks,
             dedup: &'a mut PerSinkDedup,
+            disk_dedup: &'a mut Option<disk_dedup::DiskDedup>,
             stats: &'a mut OutputStats,
             unresolved_drops: &'a mut HashMap<crate::types::MacAddr, u64>,
             first_error: Option<crate::types::Error>,
         }
 
-        let emit_state = std::sync::Mutex::new(EmitState { sinks, dedup, stats, unresolved_drops, first_error: None });
+        let emit_state =
+            std::sync::Mutex::new(EmitState { sinks, dedup, disk_dedup, stats, unresolved_drops, first_error: None });
         let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
 
         let nc_stats =
@@ -734,7 +764,8 @@ impl OutputContext {
                 }
 
                 if any_sink {
-                    let EmitState { sinks: s, dedup: d, stats: st, unresolved_drops: ud, first_error } = &mut *guard;
+                    let EmitState { sinks: s, dedup: d, disk_dedup: dd, stats: st, unresolved_drops: ud, first_error } =
+                        &mut *guard;
                     for pair in &pairs {
                         let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
                         let ssids =
@@ -758,7 +789,7 @@ impl OutputContext {
 
                         for essid in ssids {
                             let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
-                            match fan_out(s, d, st, ht, item) {
+                            match fan_out(s, d, dd, st, ht, item) {
                                 Ok(written) => {
                                     if written {
                                         st.pairs_written += 1;
@@ -848,8 +879,15 @@ impl OutputContext {
         device_store: &DeviceInfoStore,
         logger: &mut Logger,
     ) -> Result<OutputStats> {
-        // Flush hash writers before opening auxiliary outputs.
+        // Flush hash writers before the cleaning pass.
         self.sinks.flush_all()?;
+
+        // Run the disk dedup cleaning pass if active. This rewrites each output
+        // file to remove duplicate lines that were accepted in write-through mode.
+        if let Some(mut dd) = self.disk_dedup.take() {
+            let sinks_ref = &self.sinks;
+            dd.clean_all(|sink| sinks_ref.path(sink))?;
+        }
 
         // --- Per-AP unresolved-SSID summary ---
         //
