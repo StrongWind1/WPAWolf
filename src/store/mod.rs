@@ -10,6 +10,7 @@
 //! memory budget estimates.
 
 pub mod auxiliary;
+pub mod disk_messages;
 pub mod essid;
 pub mod fragments;
 pub mod messages;

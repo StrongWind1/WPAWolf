@@ -26,6 +26,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
+    mem_monitor::MemMonitor,
     output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
@@ -446,8 +447,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         )));
     }
 
-    // OOM guard: abort if RSS exceeds 80% of system RAM.
-    let oom_threshold_bytes = wpawolf::progress::total_ram_bytes() * 80 / 100;
+    let mut mem_monitor = MemMonitor::new();
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
     let pair_config = PairConfig {
@@ -548,10 +548,22 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.total_packets += 1;
                     frame_in_file += 1;
                     logger.set_frame(frame_in_file);
-                    // Periodic stderr progress line (no-op when --quiet). Cheap on the
-                    // hot path: most calls return after a single u64 comparison.
                     let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
                     progress.tick(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
+                    if mem_monitor.tick_packet() {
+                        if !message_store.disk_mode()
+                            && let Err(e) = message_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush MessageStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                        if !pmkid_store.disk_mode()
+                            && let Err(e) = pmkid_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush PmkidStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                    }
                     // Timestamp range (epoch microseconds). Initialise first_us on the very first packet.
                     if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
                         stats.timestamp_first_us = packet.timestamp_us;
@@ -710,16 +722,17 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
 
-            // OOM guard: every 1000 files, check RSS and abort if approaching OOM.
-            if (file_idx + 1) % 1000 == 0 {
-                let rss = wpawolf::progress::current_rss_bytes();
-                if rss > oom_threshold_bytes {
-                    let rss_mib = rss / (1024 * 1024);
-                    let total_mib = wpawolf::progress::total_ram_bytes() / (1024 * 1024);
-                    println!(
-                        "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 1 ingestion (file {}/{total_inputs}). Reduce input size, use --per-file, or increase available RAM.",
-                        file_idx + 1
-                    );
+            if mem_monitor.check() {
+                if !message_store.disk_mode()
+                    && let Err(e) = message_store.flush_to_disk()
+                {
+                    println!("error: failed to flush MessageStore to disk: {e}");
+                    std::process::exit(1);
+                }
+                if !pmkid_store.disk_mode()
+                    && let Err(e) = pmkid_store.flush_to_disk()
+                {
+                    println!("error: failed to flush PmkidStore to disk: {e}");
                     std::process::exit(1);
                 }
             }
@@ -864,9 +877,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check("Phase 1 complete");
 
-            if debug.enabled {
+            if debug.enabled && !message_store.disk_mode() {
                 // Build group summaries for the top-25 survey and cost-tier breakdown.
-                // Both come from the same single pass over the store.
+                // Both come from the same single pass over the store. Skipped in disk
+                // mode to avoid loading all groups back into memory.
                 let mut summaries: Vec<GroupSummary> = message_store
                     .groups()
                     .map(|(pair, msgs)| GroupSummary::from_messages(pair.ap, pair.sta, msgs))
@@ -986,6 +1000,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     }
 
     logger.flush()?;
+    message_store.cleanup_disk();
+    pmkid_store.cleanup_disk();
     stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
     stats.print_summary();
 

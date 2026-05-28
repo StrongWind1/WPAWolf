@@ -182,6 +182,34 @@ impl AkmType {
     pub const fn is_psk_sha256(self) -> bool {
         matches!(self, Self::PskSha256)
     }
+
+    /// Encodes as a `u8` for binary serialization.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Wpa1 => 0,
+            Self::Wpa2Psk => 1,
+            Self::FtPsk => 2,
+            Self::FtPskSha384 => 3,
+            Self::PskSha256 => 4,
+            Self::PskSha384 => 5,
+            Self::Unknown => 255,
+        }
+    }
+
+    /// Decodes from a `u8` produced by [`Self::to_byte`].
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Wpa1,
+            1 => Self::Wpa2Psk,
+            2 => Self::FtPsk,
+            3 => Self::FtPskSha384,
+            4 => Self::PskSha256,
+            5 => Self::PskSha384,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 // --- Hash type (11-type classification) ---
@@ -432,6 +460,60 @@ pub enum PmkidSource {
     MeshPeeringConfirm,
     /// S20: PMKID from OSEN IE in Association Request. [Hotspot 2.0 OSEN spec]
     OsenIe,
+}
+
+impl PmkidSource {
+    /// Encodes as a `u8` for binary serialization.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::M1KeyData => 0,
+            Self::M2RsnIe => 1,
+            Self::AssocRequest => 2,
+            Self::ReassocRequest => 3,
+            Self::FtAuthStaToAp => 4,
+            Self::FtAuthApToSta => 5,
+            Self::FilsAuthStaToAp => 6,
+            Self::FilsAuthApToSta => 7,
+            Self::PasnAuthStaToAp => 8,
+            Self::PasnAuthApToSta => 9,
+            Self::FtActionRequest => 10,
+            Self::FtActionResponse => 11,
+            Self::FtActionConfirm => 12,
+            Self::ProbeRequest => 13,
+            Self::BeaconRsnIe => 14,
+            Self::ProbeRespRsnIe => 15,
+            Self::MeshPeeringOpen => 16,
+            Self::MeshPeeringConfirm => 17,
+            Self::OsenIe => 18,
+        }
+    }
+
+    /// Decodes from a `u8` produced by [`Self::to_byte`].
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::M2RsnIe,
+            2 => Self::AssocRequest,
+            3 => Self::ReassocRequest,
+            4 => Self::FtAuthStaToAp,
+            5 => Self::FtAuthApToSta,
+            6 => Self::FilsAuthStaToAp,
+            7 => Self::FilsAuthApToSta,
+            8 => Self::PasnAuthStaToAp,
+            9 => Self::PasnAuthApToSta,
+            10 => Self::FtActionRequest,
+            11 => Self::FtActionResponse,
+            12 => Self::FtActionConfirm,
+            13 => Self::ProbeRequest,
+            14 => Self::BeaconRsnIe,
+            15 => Self::ProbeRespRsnIe,
+            16 => Self::MeshPeeringOpen,
+            17 => Self::MeshPeeringConfirm,
+            18 => Self::OsenIe,
+            _ => Self::M1KeyData, // fallback for unknown bytes
+        }
+    }
 }
 
 // --- Error type ---

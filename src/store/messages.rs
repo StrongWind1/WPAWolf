@@ -8,9 +8,11 @@
 //! buffer shared across all pairs. See `ARCHITECTURE.md §3.3` and `§4` (invariant 2).
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write as _};
 use std::sync::Arc;
 
 use crate::ieee80211::eapol::EapolKey;
+use crate::store::disk_messages::{read_eapol_message, write_eapol_message};
 use crate::types::{AkmType, FtFields, MacAddr, MacPair, MicBytes, MsgType};
 
 // --- EapolMessage ---
@@ -94,16 +96,39 @@ pub enum Admission {
 
 // --- MessageStore ---
 
+/// Lightweight reference to a serialized message on disk.
+#[derive(Debug, Clone, Copy)]
+struct MessageRef {
+    offset: u64,
+}
+
 /// Primary storage for EAPOL messages grouped by (AP, STA) pair.
 ///
-/// Uses `HashMap<MacPair, Vec<EapolMessage>>` -- each (AP, STA) pair gets its own
-/// append-only vector. Messages are never evicted by timestamp or replay counter.
-/// The pairing engine (Phase 4) reads from this store after all packets are collected.
-/// See `ARCHITECTURE.md §3.3` and `§5.1`.
-#[derive(Debug, Default)]
+/// Uses `HashMap<MacPair, Vec<EapolMessage>>` in memory mode. When disk mode
+/// activates (memory pressure), messages are flushed to a temp file and replaced
+/// with lightweight `MessageRef` offsets. New messages go directly to disk.
+/// The pairing engine reads groups lazily from disk during Phase 4.
+#[derive(Default)]
 pub struct MessageStore {
     groups: HashMap<MacPair, Vec<EapolMessage>>,
     total_count: usize,
+    disk_index: HashMap<MacPair, Vec<MessageRef>>,
+    disk_writer: Option<BufWriter<std::fs::File>>,
+    disk_path: Option<std::path::PathBuf>,
+    disk_offset: u64,
+    disk_mode: bool,
+}
+
+// Default is derived via #[derive(Default)] on the struct.
+
+impl std::fmt::Debug for MessageStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageStore")
+            .field("total_count", &self.total_count)
+            .field("group_count", &self.group_count())
+            .field("disk_mode", &self.disk_mode)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MessageStore {
@@ -139,6 +164,9 @@ impl MessageStore {
     /// principle be tagged with a different `AkmType` if the surrounding
     /// RSN-IE context advanced between two observations.
     pub fn add(&mut self, ap: MacAddr, sta: MacAddr, msg: EapolMessage) -> Admission {
+        if self.disk_mode {
+            return self.add_to_disk(ap, sta, &msg);
+        }
         let pair = MacPair::new(ap, sta);
         let entries = self.groups.entry(pair).or_default();
 
@@ -150,7 +178,24 @@ impl MessageStore {
         Admission::Stored
     }
 
+    /// Appends a message directly to the disk file (disk mode only).
+    fn add_to_disk(&mut self, ap: MacAddr, sta: MacAddr, msg: &EapolMessage) -> Admission {
+        let Some(writer) = &mut self.disk_writer else {
+            return Admission::Duplicate;
+        };
+        let Ok(written) = write_eapol_message(writer, msg) else {
+            return Admission::Duplicate;
+        };
+        let pair = MacPair::new(ap, sta);
+        let refs = self.disk_index.entry(pair).or_default();
+        refs.push(MessageRef { offset: self.disk_offset });
+        self.disk_offset += u64::from(written);
+        self.total_count += 1;
+        Admission::Stored
+    }
+
     /// Iterates over all (AP, STA) groups and their message vectors.
+    /// Only valid in memory mode. In disk mode, use `group_keys()` + `load_group()`.
     pub fn groups(&self) -> impl Iterator<Item = (&MacPair, &Vec<EapolMessage>)> {
         self.groups.iter()
     }
@@ -164,7 +209,7 @@ impl MessageStore {
     /// Returns the number of distinct (AP, STA) groups.
     #[must_use]
     pub fn group_count(&self) -> usize {
-        self.groups.len()
+        if self.disk_mode { self.disk_index.len() } else { self.groups.len() }
     }
 
     /// Drops every group and resets the total-message counter.
@@ -175,7 +220,97 @@ impl MessageStore {
     /// per-file pair count is similar across files).
     pub fn clear(&mut self) {
         self.groups.clear();
+        self.disk_index.clear();
         self.total_count = 0;
+    }
+
+    /// Returns `true` if the store is operating in disk-backed mode.
+    #[must_use]
+    pub const fn disk_mode(&self) -> bool {
+        self.disk_mode
+    }
+
+    /// Flushes all in-memory messages to a temp file and switches to disk mode.
+    ///
+    /// After this call, `groups` is empty and `disk_index` holds lightweight
+    /// references into the temp file. New messages arriving via `add()` are
+    /// serialized directly to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the temp file cannot be created or written.
+    pub fn flush_to_disk(&mut self) -> crate::types::Result<()> {
+        if self.disk_mode {
+            return Ok(());
+        }
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("wpawolf_messages_{}.bin", std::process::id()));
+        let file = std::fs::File::create(&path)?;
+        let mut writer = BufWriter::new(file);
+        let mut offset: u64 = 0;
+
+        let old_groups = std::mem::take(&mut self.groups);
+        for (pair, msgs) in old_groups {
+            let mut refs = Vec::with_capacity(msgs.len());
+            for msg in &msgs {
+                let written = write_eapol_message(&mut writer, msg).map_err(crate::types::Error::Io)?;
+                refs.push(MessageRef { offset });
+                offset += u64::from(written);
+            }
+            self.disk_index.insert(pair, refs);
+        }
+        writer.flush().map_err(crate::types::Error::Io)?;
+        self.disk_writer = Some(writer);
+        self.disk_path = Some(path);
+        self.disk_offset = offset;
+        self.disk_mode = true;
+        Ok(())
+    }
+
+    /// Returns an iterator over group keys. In disk mode, iterates the disk
+    /// index keys (cheap -- no messages loaded). In memory mode, iterates the
+    /// in-memory `HashMap` keys.
+    #[must_use]
+    #[allow(clippy::type_complexity, reason = "single return site; a type alias adds indirection without clarity")]
+    pub fn group_keys(&self) -> Box<dyn Iterator<Item = MacPair> + '_> {
+        if self.disk_mode { Box::new(self.disk_index.keys().copied()) } else { Box::new(self.groups.keys().copied()) }
+    }
+
+    /// Loads all messages for a single group from disk. Only valid in disk mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called when not in disk mode.
+    #[must_use]
+    pub fn load_group(&self, key: &MacPair) -> Vec<EapolMessage> {
+        assert!(self.disk_mode, "load_group called in memory mode");
+        let Some(refs) = self.disk_index.get(key) else {
+            return Vec::new();
+        };
+        let Some(path) = &self.disk_path else {
+            return Vec::new();
+        };
+        let Ok(file) = std::fs::File::open(path) else {
+            return Vec::new();
+        };
+        let mut reader = BufReader::new(file);
+        let mut messages = Vec::with_capacity(refs.len());
+        for mref in refs {
+            if reader.seek(SeekFrom::Start(mref.offset)).is_ok()
+                && let Ok(msg) = read_eapol_message(&mut reader)
+            {
+                messages.push(msg);
+            }
+        }
+        messages
+    }
+
+    /// Cleans up the temp file. Called on shutdown.
+    pub fn cleanup_disk(&mut self) {
+        if let Some(path) = self.disk_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        self.disk_writer = None;
     }
 
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
@@ -188,11 +323,15 @@ impl MessageStore {
     /// upper-bound on the EAPOL-store footprint.
     #[must_use]
     pub fn approx_bytes(&self) -> usize {
+        if self.disk_mode {
+            let index_bytes = self.disk_index.capacity() * (size_of::<MacPair>() + size_of::<Vec<MessageRef>>() + 8);
+            let refs_bytes: usize = self.disk_index.values().map(|v| v.capacity() * size_of::<MessageRef>()).sum();
+            return size_of::<Self>() + index_bytes + refs_bytes;
+        }
         let groups_cap_bytes = self.groups.capacity() * (size_of::<MacPair>() + size_of::<Vec<EapolMessage>>() + 8);
         let mut msgs_bytes = 0usize;
         for v in self.groups.values() {
             msgs_bytes += v.capacity() * size_of::<EapolMessage>();
-            // Arc<[u8]> heap payload per message: 16-byte ArcInner header + bytes.
             for m in v {
                 msgs_bytes = msgs_bytes.saturating_add(m.eapol_frame.len() + 16);
             }
@@ -213,6 +352,9 @@ impl MessageStore {
     where
         F: FnMut(MacAddr) -> MacAddr,
     {
+        if self.disk_mode {
+            return self.canonicalize_pairs_disk(&mut canonicalize);
+        }
         let old = std::mem::take(&mut self.groups);
         let old_group_count = old.len();
         let old_total = self.total_count;
@@ -220,17 +362,28 @@ impl MessageStore {
         for (pair, mut msgs) in old {
             let canon_ap = canonicalize(pair.ap);
             let canon_sta = canonicalize(pair.sta);
-            // Nothing changed for this pair if both addresses already equal the canonical form.
             let canon_pair = MacPair::new(canon_ap, canon_sta);
             self.total_count += msgs.len();
-            // Messages may carry any addresses in their frame-level fields; the EapolMessage
-            // struct does not store ap/sta per-message (they live in the store key), so we
-            // only need to rewrite the key.
             self.groups.entry(canon_pair).or_default().append(&mut msgs);
         }
         debug_assert_eq!(self.total_count, old_total, "canonicalization must not drop messages");
-        // Merged groups = (old distinct keys) - (new distinct keys).
         (old_group_count as u64).saturating_sub(self.groups.len() as u64)
+    }
+
+    /// Disk-mode canonicalization: rewrite index keys without loading message data.
+    fn canonicalize_pairs_disk<F>(&mut self, canonicalize: &mut F) -> u64
+    where
+        F: FnMut(MacAddr) -> MacAddr,
+    {
+        let old_index = std::mem::take(&mut self.disk_index);
+        let old_group_count = old_index.len();
+        for (pair, refs) in old_index {
+            let canon_ap = canonicalize(pair.ap);
+            let canon_sta = canonicalize(pair.sta);
+            let canon_pair = MacPair::new(canon_ap, canon_sta);
+            self.disk_index.entry(canon_pair).or_default().extend(refs);
+        }
+        (old_group_count as u64).saturating_sub(self.disk_index.len() as u64)
     }
 
     /// Folds the earliest and latest message timestamps for every AP MAC in
@@ -245,6 +398,20 @@ impl MessageStore {
     /// "`essid_not_found`" APs so the operator can locate the source frames in
     /// the original capture without having to grep the whole `MessageStore`.
     pub fn fold_timestamp_range_into(&self, wanted: &HashSet<MacAddr>, out: &mut HashMap<MacAddr, (u64, u64)>) {
+        if self.disk_mode {
+            for key in self.disk_index.keys() {
+                if !wanted.contains(&key.ap) {
+                    continue;
+                }
+                let msgs = self.load_group(key);
+                for msg in &msgs {
+                    let entry = out.entry(key.ap).or_insert((u64::MAX, 0));
+                    entry.0 = entry.0.min(msg.timestamp);
+                    entry.1 = entry.1.max(msg.timestamp);
+                }
+            }
+            return;
+        }
         for (mac_pair, msgs) in &self.groups {
             if !wanted.contains(&mac_pair.ap) {
                 continue;
@@ -273,6 +440,9 @@ impl MessageStore {
     /// `--eapoltimeout` filter would be worthwhile.
     #[must_use]
     pub fn count_anonce_m1_m3_mismatches(&self) -> u64 {
+        if self.disk_mode {
+            return self.count_anonce_m1_m3_mismatches_disk();
+        }
         let mut mismatches: u64 = 0;
         for msgs in self.groups.values() {
             // Collect all distinct M1 and M3 ANonces in this group.
@@ -303,6 +473,36 @@ impl MessageStore {
                 false
             };
 
+            if multi_m1 || multi_m3 || cross_mismatch {
+                mismatches += 1;
+            }
+        }
+        mismatches
+    }
+
+    fn count_anonce_m1_m3_mismatches_disk(&self) -> u64 {
+        let mut mismatches: u64 = 0;
+        for key in self.disk_index.keys() {
+            let msgs = self.load_group(key);
+            let mut m1_nonces: Vec<[u8; 32]> = Vec::new();
+            let mut m3_nonces: Vec<[u8; 32]> = Vec::new();
+            for msg in &msgs {
+                let bucket = match msg.msg_type {
+                    MsgType::M1 => &mut m1_nonces,
+                    MsgType::M3 => &mut m3_nonces,
+                    MsgType::M2 | MsgType::M4 => continue,
+                };
+                if !bucket.contains(&msg.nonce) {
+                    bucket.push(msg.nonce);
+                }
+            }
+            let multi_m1 = m1_nonces.len() > 1;
+            let multi_m3 = m3_nonces.len() > 1;
+            let cross_mismatch = if !m1_nonces.is_empty() && !m3_nonces.is_empty() {
+                m1_nonces.iter().any(|n1| m3_nonces.iter().any(|n3| n1 != n3))
+            } else {
+                false
+            };
             if multi_m1 || multi_m3 || cross_mismatch {
                 mismatches += 1;
             }

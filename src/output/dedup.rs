@@ -153,13 +153,16 @@ impl PerSinkDedup {
         Self::default()
     }
 
-    /// Pre-sizes every per-sink `HashSet` to hold at least `capacity` entries
-    /// without reallocating. Eliminates the transient memory spike from
-    /// hashbrown's power-of-2 resize doubling, where both old and new tables
-    /// are alive simultaneously during the copy.
-    pub fn reserve(&mut self, capacity: usize) {
-        for set in &mut self.sets {
-            set.reserve(capacity);
+    /// Pre-sizes per-sink `HashSet`s to hold at least `capacity` entries
+    /// without reallocating. Only reserves for sinks whose index appears in
+    /// `active_sinks`. Eliminates the transient memory spike from hashbrown's
+    /// power-of-2 resize doubling, where both old and new tables are alive
+    /// simultaneously during the copy.
+    pub fn reserve(&mut self, capacity: usize, active_sinks: &[bool; SinkId::COUNT]) {
+        for (idx, set) in self.sets.iter_mut().enumerate() {
+            if active_sinks.get(idx).copied().unwrap_or(false) {
+                set.reserve(capacity);
+            }
         }
     }
 
