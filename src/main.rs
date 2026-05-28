@@ -777,6 +777,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 thread_count,
                 essid_filter,
                 &debug,
+                &mut mem_monitor,
             )?;
             message_store.clear();
             pmkid_store.clear();
@@ -927,6 +928,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             thread_count,
             essid_filter,
             &debug,
+            &mut mem_monitor,
         )?;
 
         debug.phase_done(4, "Emit", "");

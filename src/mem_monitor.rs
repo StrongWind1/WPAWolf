@@ -71,7 +71,7 @@ impl MemMonitor {
     }
 
     /// Predicts whether allocating `additional_bytes` would exceed the threshold.
-    /// Does NOT activate disk mode — the caller decides what to do.
+    /// Does NOT activate disk mode -- the caller decides what to do.
     #[must_use]
     pub fn would_exceed(&mut self, additional_bytes: u64) -> bool {
         let rss = progress::current_rss_bytes();
@@ -183,7 +183,7 @@ mod tests {
         let mut m = MemMonitor::new();
         m.force_disk_mode();
         assert!(m.disk_mode());
-        m.check(); // check again — should stay true
+        m.check(); // check again -- should stay true
         assert!(m.disk_mode());
     }
 }

@@ -1,7 +1,7 @@
 //! Disk-backed binary serialization for [`EapolMessage`] and [`PmkidEntry`].
 //!
 //! Used by the disk fallback to spill messages to a temp file during Phase 1
-//! and read them back one group at a time during Phase 4. No serde — the
+//! and read them back one group at a time during Phase 4. No serde -- the
 //! format is a fixed header followed by variable-length frame bytes.
 //!
 //! # Wire format (`EapolMessage`)

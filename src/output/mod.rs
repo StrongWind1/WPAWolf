@@ -467,9 +467,20 @@ pub fn run_output(
     essid_filter: EssidFilterConfig,
     logger: &mut Logger,
     debug: &DebugPrinter,
+    mem_monitor: &mut crate::mem_monitor::MemMonitor,
 ) -> Result<OutputStats> {
     let mut ctx = OutputContext::new(paths);
-    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter, debug)?;
+    ctx.emit(
+        message_store,
+        pmkid_store,
+        essid_map,
+        akm_map,
+        pair_config,
+        thread_count,
+        essid_filter,
+        debug,
+        mem_monitor,
+    )?;
     ctx.finalize(
         paths,
         essid_set,
@@ -584,22 +595,31 @@ impl OutputContext {
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
+        mem_monitor: &mut crate::mem_monitor::MemMonitor,
     ) -> Result<()> {
         // Pre-size the dedup sets so hashbrown never resizes mid-run. Without
         // this, a resize from 2^31 to 2^32 slots requires both tables to be
         // alive simultaneously (54 GiB transient spike at ~2B entries).
         // Only reserve for sinks that have a configured output path (fixes the
         // 9x over-allocation when only 1-2 sinks are active).
+        // Skip pre-sizing entirely if the allocation would exceed the memory
+        // threshold -- the sets will grow incrementally instead.
         let estimated_pairs = crate::pair::estimate_total_cost(message_store);
         let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
         if estimated_hashes > 0 {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
-            )]
-            let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
             let active = self.sinks.active_mask();
-            self.dedup.reserve(cap, &active);
+            let active_count = active.iter().filter(|&&a| a).count() as u64;
+            let estimated_bytes = estimated_hashes.saturating_mul(12).saturating_mul(active_count);
+            if mem_monitor.would_exceed(estimated_bytes) {
+                mem_monitor.force_disk_mode();
+            } else {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
+                )]
+                let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
+                self.dedup.reserve(cap, &active);
+            }
         }
 
         self.emit_inner(
@@ -936,6 +956,7 @@ mod tests {
         let paths = OutputPaths::default();
         let mut logger = Logger::new(None).unwrap();
 
+        let mut mem_monitor = crate::mem_monitor::MemMonitor::new();
         let stats = run_output(
             &msg_store,
             &pmkid_store,
@@ -954,6 +975,7 @@ mod tests {
             EssidFilterConfig::default(),
             &mut logger,
             &DebugPrinter::new(false),
+            &mut mem_monitor,
         )
         .unwrap();
 
