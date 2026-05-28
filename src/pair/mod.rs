@@ -208,7 +208,7 @@ where
                 let rss_mib = crate::progress::current_rss_mib().unwrap_or(0);
                 let total_mib = crate::progress::total_ram_bytes() / (1024 * 1024);
                 println!(
-                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size, use --per-file, or increase available RAM."
+                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size or increase available RAM."
                 );
                 std::process::exit(1);
             }
