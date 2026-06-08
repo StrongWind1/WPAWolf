@@ -80,6 +80,10 @@ dev:
 build:
 	$(CARGO) build --profile release --all-features
 
+# Alias so `make release` builds the native release binary.
+.PHONY: release
+release: build
+
 # Fast type-check, no codegen.
 check:
 	$(CARGO) check --all-targets --all-features
