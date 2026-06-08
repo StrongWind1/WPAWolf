@@ -6,28 +6,35 @@
 
 <p align="center">
   <a href="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/edition-2024-informational" alt="Edition 2024"></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.85-informational" alt="MSRV 1.85"></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+</p>
+
+<p align="center">
+  <a href="#example">Example</a> &bull;
+  <a href="#installation">Installation</a> &bull;
+  <a href="#cli-reference">CLI reference</a> &bull;
+  <a href="#further-reading">Further reading</a>
 </p>
 
 ---
 
 ## Features
 
-- **Pure safe Rust** -- `#![forbid(unsafe_code)]`, four runtime crates (`flate2` + `clap` + `rayon` + `sysinfo`)
-- **Parallel pairing** -- rayon work-stealing across CPU cores with streaming per-group fan-out
-- **Wide defaults** -- emits every valid handshake; you filter at the end
-- **Cross-file pairing** -- M1 in file A pairs with M2 in file B
-- **20 PMKID extraction sites** -- every spec-defined location wired and counted
-- **Deep frame walking** -- A-MSDU subframes, MSDU fragment reassembly, radiotap FCS strip
-- **Garbage-pattern rejection** -- nonces / MICs / PMKIDs checked against five pattern classes
-- **Fast** -- >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
+- **Pure safe Rust** - `#![forbid(unsafe_code)]`, four runtime crates (`flate2` + `clap` + `rayon` + `sysinfo`)
+- **Parallel pairing** - rayon work-stealing across CPU cores with streaming per-group fan-out
+- **Wide defaults** - emits every valid handshake; you filter at the end
+- **Cross-file pairing** - M1 in file A pairs with M2 in file B
+- **20 PMKID extraction sites** - every spec-defined location wired and counted
+- **Deep frame walking** - A-MSDU subframes, MSDU fragment reassembly, radiotap FCS strip
+- **Garbage-pattern rejection** - nonces / MICs / PMKIDs checked against five pattern classes
+- **Fast** - >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
 - **904 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 
-## Quick start
+## Example
 
 ```sh
 wpawolf --22000-out hashes.22000 --37100-out hashes.37100 capture.pcap
@@ -61,8 +68,9 @@ Download from [GitHub Releases](https://github.com/StrongWind1/WPAWolf/releases)
 ### From source
 
 ```sh
-git clone https://github.com/StrongWind1/WPAWolf && cd WPAWolf
-make build        # release binary at target/release/wpawolf
+git clone https://github.com/StrongWind1/WPAWolf
+cd WPAWolf
+make release      # optimised native build -> target/release/wpawolf
 ```
 
 Requires a stable Rust toolchain (see `rust-toolchain.toml`). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow.
@@ -97,9 +105,9 @@ wpawolf --22000-out hashes.22000 --eapoltimeout 3 --rc-drift 4 \
 
 ---
 
-## How wpawolf compares to hcxpcapngtool
+## How WPAWolf compares to hcxpcapngtool
 
-Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default policy: `hcxpcapngtool` filters hard at extraction time; `wpawolf` emits everything and leaves filtering to you.
+Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default policy: `hcxpcapngtool` filters hard at extraction time; WPAWolf emits everything and leaves filtering to you.
 
 | Behaviour | `hcxpcapngtool` (default) | `wpawolf` (default) |
 |---|---|---|
@@ -123,9 +131,9 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 
 | Flag | Categories | Cracks in hashcat today? |
 |---|---|---|
-| `--22000-out FILE` | every non-FT hash (`WPA*01*`/`WPA*02*`) | yes -- mode 22000 |
-| `--37100-out FILE` | every FT hash (`WPA*03*`/`WPA*04*`) | yes -- mode 37100 |
-| `-o`, `--out FILE` | every emitted hash (`WPA*01*..*11*`, per-AKM format) | no -- needs proposed mode 22002/22003 |
+| `--22000-out FILE` | every non-FT hash (`WPA*01*`/`WPA*02*`) | yes - mode 22000 |
+| `--37100-out FILE` | every FT hash (`WPA*03*`/`WPA*04*`) | yes - mode 37100 |
+| `-o`, `--out FILE` | every emitted hash (`WPA*01*..*11*`, per-AKM format) | no - needs proposed mode 22002/22003 |
 | `--wpa1-out FILE` | category 1 | no |
 | `--wpa2-out FILE` | categories 2 + 3 | no |
 | `--psk-sha256-out FILE` | categories 4 + 5 | no |
@@ -198,13 +206,25 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow, parity or
 
 ## Credits
 
-wpawolf is a ground-up rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool`. The reference C implementation and its two custom variants informed every design decision in this project.
+WPAWolf is a ground-up rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool`. The reference C implementation and its two custom variants informed every design decision in this project.
+
+---
+
+## Related tools
+
+Other projects in this collection:
+
+- [WiFi_Cracking](https://github.com/StrongWind1/WiFi_Cracking) - IEEE 802.11 security reference and attack guide
+- [NFSWolf](https://github.com/StrongWind1/NFSWolf) - native NFS security toolkit
+
+---
+
+## Disclaimer
+
+WPAWolf operates on pcap files you already have on disk. It does not capture traffic, inject frames, or touch a radio. It is intended for authorized security research only; running it on captures you do not own or lack written authorization to analyze is illegal in most jurisdictions. The authors are not responsible for any misuse or damage caused by this tool.
 
 ---
 
 ## License
 
-Apache 2.0. See [`LICENSE`](LICENSE).
-
-> [!IMPORTANT]
-> `wpawolf` operates on pcap files you already have on disk. It does not capture traffic, inject frames, or touch a radio. Running it on captures you don't own or lack written authorization to analyse is illegal in most jurisdictions.
+[Apache License 2.0](LICENSE)
