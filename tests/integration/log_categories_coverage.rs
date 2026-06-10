@@ -404,8 +404,8 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     // A frame with FC bit B0 set has Protocol Version = 1 (reserved per §9.2.4.1.1).
     // We forgive the version anomaly (every 802.11 amendment through 2024 reuses
     // the v=0 MAC layout) and do NOT emit a [malformed_frame] entry; the operator
-    // sees the count via the Phase 1 summary line "frames with non-zero Protocol
-    // Version (forgiven)". This matches tshark / wireshark's lenient dissection.
+    // sees the count via the Phase 1 summary line "non-zero Protocol Version
+    // (forgiven; processed)". This matches tshark / wireshark's lenient dissection.
     let pcap = "/tmp/wpawolf_logcov_protover.pcap";
     let log = "/tmp/wpawolf_logcov_protover.log";
 
@@ -440,7 +440,7 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     // Phase 1 stats summary must include the forgiven count.
     let stdout_contents = fs::read_to_string(&stdout_path).unwrap();
     assert!(
-        stdout_contents.contains("frames with non-zero Protocol Version (forgiven"),
+        stdout_contents.contains("non-zero Protocol Version (forgiven"),
         "expected stats line in stdout; got:\n{stdout_contents}"
     );
 }

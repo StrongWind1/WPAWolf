@@ -67,6 +67,11 @@ pub struct Stats {
     /// reach the inner LLC/SNAP. Each increment corresponds to one MSDU recovered
     /// for downstream EAPOL/EAP processing. [IEEE 802.11-2024] §9.2.4.8.3
     pub mesh_control_frames: u64,
+    /// Mesh Data frames dropped because the Mesh Control header could not be
+    /// skipped: the Address Extension Mode field was the reserved value `11`, or
+    /// the body was shorter than the header it claimed. [IEEE 802.11-2024]
+    /// §9.2.4.8.3. The inner MSDU (and any EAPOL it carried) is lost.
+    pub mesh_control_malformed: u64,
     /// EAP-Success frames (Code 3) seen in EAPOL EAP-Packet payloads. RFC 3748 §4.2.
     /// Stats-only; carries no identity data so it never affects hash extraction. A
     /// non-zero count alongside zero EAP-Failure indicates a successful enterprise
@@ -137,12 +142,42 @@ pub struct Stats {
     /// inversions per file so a deeply-shuffled capture does not flood the
     /// log.
     pub out_of_sequence_timestamps: u64,
-    /// Hash lines written to output file(s).
-    pub hashes_written: u64,
-    /// Hash lines dropped by the dedup filter.
+    /// Packets whose capture timestamp was zero (capture-tool artifact; the
+    /// frame is still processed). Counterpart of `out_of_sequence_timestamps`.
+    pub packets_zeroed_timestamp: u64,
+    /// Packets dropped because their pcapng `interface_id` had no IDB-registered
+    /// DLT (a missing-interface reference); also logged via `[unknown_linktype]`.
+    /// [draft-ietf-opsawg-pcapng-05 §4.2]
+    pub packets_unknown_linktype: u64,
+    /// Frames dropped after a successful MAC-header parse because the header's
+    /// `body_offset` ran past the captured frame length (snaplen-truncated or
+    /// corrupt length). The header parsed but the body slice was unavailable.
+    pub truncated_after_header: u64,
+    /// Total bytes of capture files opened by the ingest loop (file sizes, not
+    /// decompressed payload). Feeds the Phase 5 throughput row.
+    pub bytes_ingested: u64,
+    /// Logical PMKID hashes written (post-dedup), from `OutputStats::pmkids_written`.
+    pub pmkids_written: u64,
+    /// Hash lines dropped by the dedup filter (pairs + PMKIDs).
     pub dedup_dropped: u64,
+    /// EAPOL-pair share of `dedup_dropped`.
+    pub dedup_dropped_pairs: u64,
+    /// PMKID share of `dedup_dropped`.
+    pub dedup_dropped_pmkids: u64,
+    /// Hashes dropped at emit because the AKM could not be mapped to one of the
+    /// 11 types (`HashType::from_akm_and_attack` returned None even after AKM-map
+    /// inference for PMKIDs). Crack material we extracted but cannot format.
+    pub emit_dropped_unclassified_akm: u64,
+    /// FT hashes (types 6/7/10/11) dropped at emit because the FT context was
+    /// incomplete (no R0KH-ID), so the `WPA*03*`/`WPA*04*` FT line could not be
+    /// built. [ARCHITECTURE.md §7 FT line format]
+    pub emit_dropped_ft_no_context: u64,
     /// Unique AP ESSIDs seen.
     pub essid_count: u64,
+    /// Largest number of SSID changes recorded for any single AP (distinct
+    /// SSID variants minus the initial one). Capture-quality signal: a high
+    /// value on one AP usually means RF-rotted duplicate beacons.
+    pub essid_changes_max: u64,
 
     // --- Per-subtype management frame counters ---
     // [IEEE 802.11-2024] §9.2.4.1.3, Table 9-1
@@ -150,6 +185,12 @@ pub struct Stats {
     pub beacon_frames: u64,
     /// Probe Response frames (subtype 5).
     pub probe_resp_frames: u64,
+    /// Probe Responses whose SSID IE was zero-length (unset). A Probe Response
+    /// answering a directed probe should carry the SSID; an empty one is a
+    /// capture-quality signal. Mirrors hcxpcapngtool's `PROBERESPONSE (SSID unset)`.
+    pub probe_resp_ssid_unset: u64,
+    /// Probe Responses whose SSID IE bytes were all `0x00` (zeroed).
+    pub probe_resp_ssid_zeroed: u64,
     /// Probe Request frames -- directed (unicast DA, subtype 4).
     pub probe_req_directed: u64,
     /// Probe Request frames -- undirected (broadcast DA, subtype 4).
@@ -166,12 +207,20 @@ pub struct Stats {
     pub auth_frames: u64,
     /// Deauthentication frames (subtype 12).
     pub deauth_frames: u64,
+    /// Deauthentication frames carrying Reason Code 14 ("Message integrity
+    /// code (MIC) failure"). [IEEE 802.11-2024] §9.4.1.7 Table 9-90. The
+    /// canonical "this handshake will never pair cleanly" signal.
+    pub mic_failure_deauths: u64,
     /// Disassociation frames (subtype 10).
     pub disassoc_frames: u64,
     /// Action frames (subtype 13).
     pub action_frames: u64,
     /// Action No Ack frames (subtype 14).
     pub action_no_ack_frames: u64,
+    /// Management frames whose subtype is reserved (7, 15) per Table 9-1 -- counted
+    /// in `mgmt_frames` but not in any named subtype counter. Diagnostic; lets the
+    /// management subtype children reconcile against the management total.
+    pub mgmt_reserved_subtype: u64,
     /// ATIM frames (subtype 9).
     pub atim_frames: u64,
     /// Measurement Pilot frames (subtype 6).
@@ -258,6 +307,11 @@ pub struct Stats {
     pub band_5ghz: u64,
     /// Packets with channel frequency in the 6 GHz band (5925-7125 MHz).
     pub band_6ghz: u64,
+    /// Packets carrying a radiotap Channel frequency that fell outside the three
+    /// known Wi-Fi bands above (sub-GHz 802.11ah, 60 GHz DMG, or a corrupt field).
+    /// Informational only -- the frame is processed normally; this just makes the
+    /// per-band split account for every channel-bearing packet.
+    pub band_other: u64,
 
     // --- Beacon channel distribution (from DS Parameter Set IE, tag 3) ---
     // Populated only for Beacon frames. Key = channel number (1 byte from the IE).
@@ -344,6 +398,16 @@ pub struct Stats {
     /// N3E4 pairs written (`ANonce` from M3, EAPOL from M4 -- authorized).
     pub pairs_written_n3e4: u64,
 
+    // --- Pairing output-filter drops (opt-in; zero in WIDE mode) ---
+    /// Candidate pairs discarded by the `--eapoltimeout` session-window filter
+    /// (the two messages fell more than the window apart). Off by default; only
+    /// nonzero when `--eapoltimeout` / `--strict` is set. [ARCHITECTURE.md §8 FR-PAIR-3]
+    pub pairs_time_filtered: u64,
+    /// Candidate pairs discarded by the `--rc-drift` replay-counter filter (the
+    /// per-combo RC relationship exceeded the tolerance). Off by default; only
+    /// nonzero when `--rc-drift` / `--strict` is set. [ARCHITECTURE.md §8 FR-PAIR-4]
+    pub pairs_rc_filtered: u64,
+
     // --- RC / NC / endianness stats ---
     /// Maximum actual RC gap magnitude seen across useful pairs written to output.
     pub rc_gap_max: u64,
@@ -398,6 +462,16 @@ pub struct Stats {
     /// dispatch through `process_auth_pasn` and increment this single
     /// counter.
     pub auth_pasn: u64,
+    /// Authentication responses with Status Code 52 ("R0KH unreachable").
+    /// [IEEE 802.11-2024] §9.4.1.9 Table 9-92. Each one explains a missing
+    /// FT-PSK handshake: the AP refused the FT authentication.
+    pub ft_status_r0kh_unreachable: u64,
+    /// Authentication responses with Status Code 53 ("Invalid PMKID"). Table 9-92.
+    pub ft_status_invalid_pmkid: u64,
+    /// Authentication responses with Status Code 54 ("Invalid MDE"). Table 9-92.
+    pub ft_status_invalid_mde: u64,
+    /// Authentication responses with Status Code 55 ("Invalid FTE"). Table 9-92.
+    pub ft_status_invalid_fte: u64,
 
     // EAPOL descriptor type breakdown.
     /// EAPOL-Key frames with RSN descriptor type (0x02). [IEEE 802.11-2024] §12.7.2
@@ -411,7 +485,11 @@ pub struct Stats {
     pub eapol_kdv2: u64,
     /// EAPOL-Key frames with Key Descriptor Version 3 (AES-128-CMAC; PSK-SHA256 / FT-PSK).
     pub eapol_kdv3: u64,
-    /// EAPOL-Key frames with Key Descriptor Version 0 or 4-7 (reserved / non-standard).
+    /// EAPOL-Key frames with Key Descriptor Version 0 ("AKM-defined"). Spec-legitimate
+    /// for the SHA-384 AKM families (19/20) and other post-KDV suites, NOT an anomaly.
+    /// [IEEE 802.11-2024] §12.7.2 Table 12-11.
+    pub eapol_kdv0: u64,
+    /// EAPOL-Key frames with Key Descriptor Version 4-7 (reserved / non-standard).
     pub eapol_kdv_other: u64,
     /// EAPOL frames rejected because the Key Nonce was all-NULL (`0x00...00`). Applies to
     /// every message type including M4. M4 NULL nonce is spec-valid on the wire per
@@ -484,9 +562,13 @@ pub struct Stats {
     /// Diagnostic only -- output correctness is unaffected. [ARCHITECTURE.md §4]
     pub anonce_m1_m3_mismatch_sessions: u64,
     // WPA/WEP encrypted data frame counts.
-    /// Data frames with the Protected Frame bit set (WPA/WEP encrypted payload).
-    /// [IEEE 802.11-2024] §9.2.4.1.1 bit B14
+    /// Data frames with the Protected Frame bit set whose `KeyID` octet carries
+    /// ExtIV=1 (TKIP/CCMP/GCMP -- the WPA family), or whose body is too short
+    /// to expose the `KeyID` octet. [IEEE 802.11-2024] §9.2.4.1.1 bit B14, §12.5.2.2.
     pub wpa_encrypted_data: u64,
+    /// Data frames with the Protected Frame bit set and ExtIV=0 in the `KeyID`
+    /// octet (legacy WEP encapsulation). [IEEE 802.11-2024] §12.3.4.2.
+    pub wep_encrypted_data: u64,
 
     /// Management frames with the Protected Frame bit set (PMF / 802.11w).
     /// [IEEE 802.11-2024] §11.13. Covers Disassoc, Deauth, and Robust Action frames
@@ -586,12 +668,13 @@ pub struct Stats {
     pub mle_basic_seen: u64,
     /// Distinct link -> MLD MAC mappings learned from MLE bodies.
     pub mle_mld_addrs_learned: u64,
-    /// `(AP, STA)` groups merged during MLD canonicalization in `message_store`.
+    /// `(AP, STA)` groups that received an additional MLD-keyed copy during MLD
+    /// canonicalization in `message_store` (the original link-keyed group is kept).
     pub mld_groups_merged: u64,
-    /// Link-MAC SSID entries folded into the MLD canonical key during
-    /// `essid_map` canonicalization. Each merged entry was an AP advertising
-    /// under a band link MAC whose SSID would otherwise have been unreachable
-    /// via the MLD-keyed pair lookup at output time.
+    /// Link-MAC SSID entries that received an MLD-keyed copy during `essid_map`
+    /// canonicalization (the original link entry is kept). The copy lets a
+    /// handshake emitted under the MLD key resolve its SSID; the original lets a
+    /// single-link handshake emitted under the link key resolve its SSID.
     pub essid_link_macs_merged: u64,
     /// Hash lines suppressed because no Beacon, Probe Response, `AssocReq` /
     /// `ReassocReq`, directed Probe Request, nor MLD link-MAC fallback yielded
@@ -678,7 +761,7 @@ pub struct Stats {
     // and were written to the configured file. `dropped_<sink>` is the count of lines
     // suppressed by that sink's dedup. A single logical hash fans out to up to three
     // sinks (legacy + per-AKM-family + combined), so the per-sink counters do not sum
-    // to `hashes_written`. See `ARCHITECTURE.md §7`.
+    // to the Phase 5 logical hash total. See `ARCHITECTURE.md §7`.
     /// `--22000-out` lines written.
     pub lines_22000: u64,
     /// `--37100-out` lines written.
@@ -748,6 +831,8 @@ pub struct Stats {
     pub username_list_path: String,
     /// Path for device info output, or empty when -D was not given.
     pub device_info_path: String,
+    /// Path for the `--wordlist-scan` IE-scan output, or empty when not given.
+    pub wordlist_scan_path: String,
 
     // --- Per-hash-type breakdown (the 11-row per-AKM) ---
     // Counts the number of hash lines emitted for each row of the table in
@@ -757,6 +842,44 @@ pub struct Stats {
     // currently share a hashcat mode.
     /// Hash lines written, keyed by `HashType`.
     pub hash_type_emitted: HashMap<HashType, u64>,
+
+    // --- Extraction-side identity tallies ---
+    /// Unique EAP identity strings extracted (RFC 3748 §5.1). Printed in Phase 3
+    /// even when the `-I` sink is not configured.
+    pub identities_extracted: u64,
+    /// Unique EAP peer-identity (username) strings extracted. Printed in Phase 3
+    /// even when the `-U` sink is not configured.
+    pub usernames_extracted: u64,
+
+    // --- Auxiliary sink entry counts (lines actually written by `finalize`) ---
+    /// Entries written to the `-E` ESSID list.
+    pub entries_essid_list: u64,
+    /// Entries written to the `-R` probe-ESSID list.
+    pub entries_probe_list: u64,
+    /// Entries written to the `-W` combined wordlist.
+    pub entries_wordlist: u64,
+    /// Entries written to the `--wordlist-scan` IE-scan wordlist.
+    pub entries_wordlist_scan: u64,
+    /// Entries written to the `-I` identity list.
+    pub entries_identity_list: u64,
+    /// Entries written to the `-U` username list.
+    pub entries_username_list: u64,
+    /// Entries written to the `-D` device-info table.
+    pub entries_device_info: u64,
+
+    // --- Phase 4 run context + Phase 5 cost block ---
+    /// Echo of the resolved output-filter state ("none (WIDE mode)" or the
+    /// active flag list), so a WIDE run and a --strict run are distinguishable
+    /// from the banner alone.
+    pub filters_active: String,
+    /// Wallclock of the Phase 1-3 streaming pass in milliseconds.
+    pub wallclock_p13_ms: u64,
+    /// Wallclock of the Phase 4 pairing + emit pass in milliseconds.
+    pub wallclock_p4_ms: u64,
+    /// Peak RSS sample in MiB (lower bound; sampled at the `MemMonitor` cadence).
+    pub peak_rss_mib: u64,
+    /// True when the disk-backed fallback engaged at any point during the run.
+    pub disk_mode_engaged: bool,
 
     // --- Scratch / derived state (not printed directly) ---
     /// Per-(AP,STA) timestamp of the most recently stored EAPOL message.
@@ -844,11 +967,14 @@ impl Stats {
     /// Records an EAPOL-Key frame's Key Descriptor Version into the appropriate counter.
     ///
     /// Called once per stored EAPOL-Key message. KDV 1 = HMAC-MD5 (WPA legacy),
-    /// KDV 2 = HMAC-SHA1 (WPA2-PSK), KDV 3 = AES-CMAC (PSK-SHA256 / FT-PSK);
-    /// all other values are reserved and counted under `eapol_kdv_other`.
-    /// [IEEE 802.11-2024] §12.7.2, Key Information bits 0-2.
+    /// KDV 2 = HMAC-SHA1 (WPA2-PSK), KDV 3 = AES-CMAC (PSK-SHA256 / FT-PSK),
+    /// KDV 0 = "AKM-defined" (spec-legitimate for the SHA-384 AKM families,
+    /// counted separately so the banner does not flag it as an anomaly);
+    /// 4-7 are reserved and counted under `eapol_kdv_other`.
+    /// [IEEE 802.11-2024] §12.7.2, Key Information bits 0-2, Table 12-11.
     pub const fn record_key_descriptor_version(&mut self, key_version: u8) {
         match key_version {
+            0 => self.eapol_kdv0 += 1,
             1 => self.eapol_kdv1 += 1,
             2 => self.eapol_kdv2 += 1,
             3 => self.eapol_kdv3 += 1,
@@ -906,33 +1032,72 @@ impl Stats {
         entries.iter().map(|(k, n)| format!("{k} ({n})")).collect::<Vec<_>>().join(", ")
     }
 
-    /// Prints the four-section summary to stderr.
+    /// Sum of the eight terminal per-packet dispositions from Phase 1 + 2.
     ///
-    /// Sections:
-    ///   1. General  -- capture file metadata and all 802.11 frame-type counts.
-    ///   2. EAPOL    -- message counts, classification, pair analysis.
-    ///   3. PMKID    -- per-source and per-AKM breakdown of all extracted PMKIDs.
-    ///   4. Output   -- what was available per hashcat mode and what was written.
+    /// Every packet counted in `total_packets` follows the main loop to exactly
+    /// one of these outcomes: dropped for an unknown link type, dropped when the
+    /// link strip failed all recovery tiers, counted as a control frame, dropped
+    /// as a malformed MAC header, dropped when truncated past the header, counted
+    /// as an extension frame, or handed to extraction as a management or data
+    /// frame. This therefore must equal `total_packets` -- STATS.md reconciliation
+    /// identity 1. The banner surfaces any discrepancy as a "packets unaccounted"
+    /// / "frames multi-counted" BUG row, and `run()` debug-asserts the equality so
+    /// a future silent `continue` cannot pass the test suite.
+    #[must_use]
+    pub const fn packets_accounted(&self) -> u64 {
+        self.packets_unknown_linktype
+            + self.link_errors
+            + self.ctrl_frames
+            + self.malformed_mac_hdr
+            + self.truncated_after_header
+            + self.extension_frames
+            + self.mgmt_frames
+            + self.data_frames
+    }
+
+    /// Prints the five-section closing banner to stdout.
     ///
-    /// Called unconditionally at the end of every run.
+    /// Called unconditionally at the end of every run. The banner layout is the
+    /// contract documented in `ARCHITECTURE.md §9`: one section per pipeline
+    /// phase, dotted-leader rows at a fixed value column, `nz!` suppression for
+    /// quiet runs, and a drop/recovered/diagnostic/informational suffix on every
+    /// issue row.
     pub fn print_summary(&self) {
+        print!("{}", self.summary_string());
+    }
+
+    /// Renders the closing banner as a string.
+    ///
+    /// Separated from [`Self::print_summary`] so tests can assert on the rendered
+    /// rows (label width, row presence, parent/child sums) without capturing stdout.
+    #[must_use]
+    #[allow(clippy::too_many_lines, reason = "linear banner layout in pipeline order; splitting hurts auditability")]
+    pub fn summary_string(&self) -> String {
         // W: dot-padding width for the label column. Longest label is 45 chars;
-        // W must exceed that so every row gets at least several dots before ": ".
-        const W: usize = 52;
+        // W must exceed every label so each row gets at least two dots before ": ".
+        const W: usize = 60;
+        // Hard cap on label width (W minus the two-dot minimum). Enforced by the
+        // debug_assert in the row macros and the `banner_labels_fit_column` test.
+        const LABEL_MAX: usize = W - 2;
         // Section header total width (header text + fill dashes).
-        const SW: usize = 62;
+        const SW: usize = 70;
         // EAPOL header overhead shown in auth-length display (matches hcxpcapngtool).
         const EAPAUTH_SIZE: u16 = 4;
 
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(8 * 1024);
+
         macro_rules! stat {
-            ($label:expr, $val:expr) => {
-                println!("{:.<W$}: {}", $label, $val);
-            };
+            ($label:expr, $val:expr) => {{
+                let label = $label;
+                debug_assert!(label.chars().count() <= LABEL_MAX, "banner label exceeds {LABEL_MAX} chars: {label}");
+                let _ = writeln!(out, "{:.<W$}: {}", label, $val);
+            }};
         }
         macro_rules! nz {
             ($label:expr, $val:expr) => {
                 if $val > 0 {
-                    println!("{:.<W$}: {}", $label, $val);
+                    stat!($label, $val);
                 }
             };
         }
@@ -940,13 +1105,13 @@ impl Stats {
             ($num:expr, $name:expr) => {{
                 let hdr = format!("=== Phase {} -- {} ", $num, $name);
                 let fill = "=".repeat(SW.saturating_sub(hdr.len()).max(4));
-                println!("{hdr}{fill}");
+                let _ = writeln!(out, "{hdr}{fill}");
             }};
         }
 
-        println!("---");
-        println!("wpawolf {} ({})", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"));
-        println!("---");
+        let _ = writeln!(out, "---");
+        let _ = writeln!(out, "wpawolf {} ({})", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"));
+        let _ = writeln!(out, "---");
 
         // ======================================================================
         // Phase 1 -- Ingest: file metadata + raw packet/byte ingestion
@@ -992,14 +1157,18 @@ impl Stats {
             let dur_s = self.timestamp_last_us.saturating_sub(self.timestamp_first_us) / 1_000_000;
             stat!("duration (s)", dur_s);
         }
+        nz!("bytes ingested (MiB)", self.bytes_ingested / (1024 * 1024));
         stat!("packets total", self.total_packets);
         nz!("link/parse errors (frames dropped)", self.link_errors);
         nz!("  MAC header malformed (frame dropped)", self.malformed_mac_hdr);
-        nz!("frames with non-zero Protocol Version (forgiven; processed)", self.lenient_proto_version);
-        nz!("capture files with truncated trailing record (earlier records kept)", self.truncated_capture_files);
+        nz!("non-zero Protocol Version (forgiven; processed)", self.lenient_proto_version);
+        nz!("files with truncated trailing record (earlier kept)", self.truncated_capture_files);
         nz!("  trailing packets unread (dropped; see --log)", self.unreadable_packets);
         nz!("input files skipped (magic unrecognised; see --log)", self.files_skipped_unknown_format);
-        nz!("pcap timestamps out of sequence (capture-tool artifact; informational)", self.out_of_sequence_timestamps);
+        nz!("packets dropped (unknown link type; no IDB)", self.packets_unknown_linktype);
+        nz!("packets dropped (truncated past MAC header)", self.truncated_after_header);
+        nz!("packets with zeroed timestamps (informational)", self.packets_zeroed_timestamp);
+        nz!("timestamps out of sequence (informational)", self.out_of_sequence_timestamps);
 
         // ======================================================================
         // Phase 2 -- Decode: link/802.11 frame classification, per-band
@@ -1011,10 +1180,19 @@ impl Stats {
         stat!("data frames", self.data_frames);
         stat!("control frames", self.ctrl_frames);
         nz!("extension frames (802.11 amendments)", self.extension_frames);
+        // Packet-accounting self-check (STATS.md identity 1). By this point all
+        // eight terminal per-packet dispositions are final, so the two rows below
+        // are 0 on every correct run -- they only ever appear if a future change
+        // drops a packet without a counter (unaccounted) or counts one twice
+        // (multi-counted). `run()` debug-asserts the same equality.
+        let accounted = self.packets_accounted();
+        nz!("packets unaccounted (BUG; report this)", self.total_packets.saturating_sub(accounted));
+        nz!("frames multi-counted (BUG; report this)", accounted.saturating_sub(self.total_packets));
         nz!("relay (WDS) frames", self.relay_frames);
         nz!("WPA encrypted data frames", self.wpa_encrypted_data);
+        nz!("WEP encrypted data frames", self.wep_encrypted_data);
         nz!("PMF-encrypted management frames (802.11w)", self.mgmt_protected_frames);
-        nz!("  Action body dropped (PMF-encrypted; FT/Mesh PMKIDs unavailable)", self.mgmt_protected_action_skipped);
+        nz!("  Action body dropped (PMF; FT/Mesh PMKIDs unavailable)", self.mgmt_protected_action_skipped);
         nz!("A-MSDU aggregated Data frames (802.11n)", self.amsdu_frames_seen);
         nz!("  subframes recovered for hidden EAPOL", self.amsdu_subframes_total);
         nz!("radiotap it_version != 0 (Tier 1 recovered)", self.radiotap_version_nonzero);
@@ -1023,19 +1201,18 @@ impl Stats {
         nz!("FCS stripped (header + CRC-32 agree)", self.fcs_header_and_crc_agree);
         nz!("FCS stripped (CRC-32 detected, header silent)", self.fcs_detected_by_crc);
         nz!("FCS stripped (BADFCS flagged; corrupt on air)", self.fcs_badfcs_flagged);
-        nz!("FCS stripped (header announced, CRC-32 mismatch, no BADFCS)", self.fcs_crc_mismatch_no_flag);
+        nz!("FCS stripped (CRC-32 mismatch; no BADFCS flag)", self.fcs_crc_mismatch_no_flag);
+        nz!("no FCS present (frame left untouched)", self.fcs_neither);
         nz!("radiotap A-MPDU Status field present (it_present bit 20)", self.ampdu_status_frames);
         nz!("fragments buffered for reassembly", self.fragment_stats.fragments_seen);
         nz!("  reassembled MSDUs (all fragments present)", self.fragment_stats.fragments_reassembled);
         nz!("  incomplete MSDUs (missing fragments in capture)", self.fragment_stats.fragments_incomplete);
-        nz!(
-            "  fragments evicted (safety cap; paranoid backstop, expect 0)",
-            self.fragment_stats.fragments_dropped_safety_cap
-        );
+        nz!("  fragments evicted (safety cap; expect 0)", self.fragment_stats.fragments_dropped_safety_cap);
         nz!("AWDL frames (Apple AWDL)", self.awdl_frames);
         nz!("on 2.4 GHz band (from radiotap)", self.band_24ghz);
         nz!("on 5 GHz band (from radiotap)", self.band_5ghz);
         nz!("on 6 GHz band (from radiotap)", self.band_6ghz);
+        nz!("on other/unknown band (from radiotap)", self.band_other);
         // Beacon channel distribution from DS Parameter Set IE (tag 3). [§9.4.2.4]
         let (ch24_str, ch56_str) = self.format_beacon_channels();
         if let Some(s) = ch24_str {
@@ -1045,10 +1222,13 @@ impl Stats {
             stat!("beacon channels 5/6 GHz (DS Parameter Set)", s);
         }
         // EAPOL Key Descriptor Version mix is a decode-time classification.
+        // KDV 0 is split from the reserved bucket: it is the spec-legitimate
+        // "AKM-defined" value for the SHA-384 families, not an anomaly.
         nz!("EAPOL KDV 1 (HMAC-MD5 / ARC4; WPA legacy)", self.eapol_kdv1);
         nz!("EAPOL KDV 2 (HMAC-SHA1 / AES; WPA2-PSK)", self.eapol_kdv2);
         nz!("EAPOL KDV 3 (AES-CMAC; PSK-SHA256 / FT-PSK)", self.eapol_kdv3);
-        nz!("EAPOL KDV other (reserved / non-standard)", self.eapol_kdv_other);
+        nz!("EAPOL KDV 0 (AKM-defined; SHA-384 families)", self.eapol_kdv0);
+        nz!("EAPOL KDV reserved (4-7; non-standard)", self.eapol_kdv_other);
         nz!("EAPOL RSN descriptor", self.eapol_rsn);
         nz!("EAPOL WPA (legacy) descriptor", self.eapol_wpa);
 
@@ -1071,9 +1251,11 @@ impl Stats {
         nz!("    6 GHz co-located BSSIDs (RNR)", self.rnr_6ghz_colocated);
         nz!("  Multi-Link Elements observed (11be)", self.mle_basic_seen);
         nz!("    MLD addresses learned", self.mle_mld_addrs_learned);
-        nz!("    (AP,STA) groups merged via MLD", self.mld_groups_merged);
-        nz!("    SSID link-MAC entries merged via MLD", self.essid_link_macs_merged);
+        nz!("    (AP,STA) groups also keyed under MLD (link kept)", self.mld_groups_merged);
+        nz!("    SSID entries also keyed under MLD (link kept)", self.essid_link_macs_merged);
         nz!("PROBE RESPONSE (total)", self.probe_resp_frames);
+        nz!("  SSID unset (probe response retained)", self.probe_resp_ssid_unset);
+        nz!("  SSID zeroed (probe response retained)", self.probe_resp_ssid_zeroed);
         nz!("PROBE REQUEST (undirected)", self.probe_req_undirected);
         nz!("PROBE REQUEST (directed)", self.probe_req_directed);
         nz!("ASSOCIATION REQUEST (total)", self.assoc_req_frames);
@@ -1116,11 +1298,16 @@ impl Stats {
         nz!("  OPEN SYSTEM", self.auth_open_system);
         nz!("  SHARED KEY (WEP)", self.auth_shared_key);
         nz!("  FAST BSS TRANSITION", self.auth_fbt);
+        nz!("    FT status 52 R0KH unreachable (diagnostic)", self.ft_status_r0kh_unreachable);
+        nz!("    FT status 53 invalid PMKID (diagnostic)", self.ft_status_invalid_pmkid);
+        nz!("    FT status 54 invalid MDE (diagnostic)", self.ft_status_invalid_mde);
+        nz!("    FT status 55 invalid FTE (diagnostic)", self.ft_status_invalid_fte);
         nz!("  SAE (WPA3)", self.auth_sae);
         nz!("  FILS", self.auth_fils);
         nz!("  NETWORK EAP (Cisco LEAP)", self.auth_network_eap);
         nz!("  PASN (unknown algo)", self.auth_pasn);
         nz!("DEAUTHENTICATION (total)", self.deauth_frames);
+        nz!("  MIC failure, reason 14 (handshake-quality signal)", self.mic_failure_deauths);
         nz!("DISASSOCIATION (total)", self.disassoc_frames);
         nz!("ACTION (total)", self.action_frames);
         nz!("  NR REQUEST (containing ESSID)", self.action_nr_req_ssids);
@@ -1138,11 +1325,13 @@ impl Stats {
         nz!("ATIM (total)", self.atim_frames);
         nz!("MEASUREMENT PILOT (total)", self.measurement_pilot_frames);
         nz!("TIMING ADVERTISEMENT (total)", self.timing_advert_frames);
+        nz!("RESERVED subtype (7/15; counted, not extracted)", self.mgmt_reserved_subtype);
 
         // Auxiliary extracted metadata.
         stat!("ESSID (unique APs seen)", self.essid_count);
+        nz!("  ESSID changes (per-AP maximum)", self.essid_changes_max);
         nz!("  hash lines dropped (no SSID resolved; not crackable)", self.essid_unresolved_emissions);
-        nz!("    distinct APs dropped (see [essid_not_found_summary] in --log)", self.essid_unresolved_aps);
+        nz!("    distinct APs affected (detail in --log)", self.essid_unresolved_aps);
         nz!("SSID List IE entries extracted", self.ssid_list_entries);
         nz!("Country codes extracted", self.country_codes_extracted);
         nz!("Mesh IDs extracted", self.mesh_ids_extracted);
@@ -1154,7 +1343,9 @@ impl Stats {
         nz!("Multiple BSSID profiles extracted", self.multiple_bssid_profiles);
         nz!("RNR BSSIDs extracted", self.rnr_bssids_extracted);
         nz!("P2P device names extracted", self.p2p_device_names_extracted);
-        nz!("Wordlist IE-scan runs inserted (--wordlist-scan-ies)", self.wordlist_scan_ie_runs);
+        nz!("Wordlist IE-scan runs inserted (--wordlist-scan)", self.wordlist_scan_ie_runs);
+        nz!("EAP identities extracted", self.identities_extracted);
+        nz!("EAP usernames extracted", self.usernames_extracted);
 
         // EAPOL message counts and validity rejects.
         let eapol_total = self.eapol_m1 + self.eapol_m2 + self.eapol_m3 + self.eapol_m4;
@@ -1187,56 +1378,53 @@ impl Stats {
             );
         }
         stat!("  M4 messages", self.eapol_m4);
+        // Garbage-pattern rejections. The M4-vs-rest split prints only its
+        // non-zero sides: the M4 row is the spec-zero expected case (matches
+        // hcxpcapngtool's eapolm4zeroedcount), the M1/M2/M3 row is the abnormal
+        // case worth a closer look. Zero sides are suppressed.
         nz!("  NULL nonce rejected (frame dropped)", self.null_nonce_rejected);
         if self.null_nonce_rejected > 0 {
-            // Split the operator-visible NULL nonce count into the spec-zero
-            // M4 case (expected, harmless; matches hcxpcapngtool's
-            // eapolm4zeroedcount) and the abnormal M1 / M2 / M3 case (entropy
-            // starvation, firmware bug, capture tampering -- worth a closer
-            // look).
-            stat!("    on M4 (spec-zero per §12.7.6.5; expected)", self.null_nonce_rejected_on_m4);
-            stat!(
-                "    on M1 / M2 / M3 (abnormal -- entropy starvation or firmware bug)",
+            nz!("    on M4 (spec-zero per §12.7.6.5; expected)", self.null_nonce_rejected_on_m4);
+            nz!(
+                "    on M1 / M2 / M3 (abnormal; firmware or entropy bug)",
                 self.null_nonce_rejected - self.null_nonce_rejected_on_m4
             );
         }
         nz!("  0xFF nonce rejected (frame dropped)", self.ff_nonce_rejected);
         if self.ff_nonce_rejected > 0 {
-            stat!("    on M4", self.ff_nonce_rejected_on_m4);
-            stat!("    on M1 / M2 / M3", self.ff_nonce_rejected - self.ff_nonce_rejected_on_m4);
+            nz!("    on M4", self.ff_nonce_rejected_on_m4);
+            nz!("    on M1 / M2 / M3", self.ff_nonce_rejected - self.ff_nonce_rejected_on_m4);
         }
-        nz!("  garbage-pattern nonce rejected (repeating period; frame dropped)", self.repeat_nonce_rejected);
+        nz!("  repeating-pattern nonce rejected (frame dropped)", self.repeat_nonce_rejected);
         if self.repeat_nonce_rejected > 0 {
-            stat!("    on M4", self.repeat_nonce_rejected_on_m4);
-            stat!("    on M1 / M2 / M3", self.repeat_nonce_rejected - self.repeat_nonce_rejected_on_m4);
+            nz!("    on M4", self.repeat_nonce_rejected_on_m4);
+            nz!("    on M1 / M2 / M3", self.repeat_nonce_rejected - self.repeat_nonce_rejected_on_m4);
         }
         nz!("  NULL MIC rejected (frame dropped; M2/M3/M4)", self.null_mic_rejected);
         nz!("  0xFF MIC rejected (frame dropped; M2/M3/M4)", self.ff_mic_rejected);
-        nz!("  garbage-pattern MIC rejected (repeating period; frame dropped)", self.repeat_mic_rejected);
+        nz!("  repeating-pattern MIC rejected (M2/M3/M4; dropped)", self.repeat_mic_rejected);
         nz!("  NULL PMKID rejected (placeholder; PMKID dropped)", self.null_pmkid_rejected);
         nz!("  0xFF PMKID rejected (PMKID dropped)", self.ff_pmkid_rejected);
-        nz!("  garbage-pattern PMKID rejected (repeating period; PMKID dropped)", self.repeat_pmkid_rejected);
-        nz!(
-            "  ESSID control bytes seen (0x00-0x1F in body; informational, SSID shipped unchanged)",
-            self.essid_control_bytes_warned
-        );
-        if self.eapol_time_gap_max_us > 0 {
+        nz!("  repeating-pattern PMKID rejected (PMKID dropped)", self.repeat_pmkid_rejected);
+        nz!("  ESSID control bytes (informational; shipped unchanged)", self.essid_control_bytes_warned);
+        // Sub-millisecond gaps print in microseconds instead of a misleading 0 ms.
+        if self.eapol_time_gap_max_us >= 1_000 {
             stat!("  session time gap max (ms)", self.eapol_time_gap_max_us / 1_000);
+        } else {
+            nz!("  session time gap max (us)", self.eapol_time_gap_max_us);
         }
-        nz!(
-            "  ANonce M1/M3 mismatch sessions (diagnostic; both anchors emitted; spec §12.7.6.4)",
-            self.anonce_m1_m3_mismatch_sessions
-        );
+        nz!("  ANonce M1/M3 mismatch sessions (diagnostic; §12.7.6.4)", self.anonce_m1_m3_mismatch_sessions);
 
         // EAPOL direction classification (WDS tier breakdown).
         nz!("EAPOL classified by direction (Tier 1)", self.eapol_tier1_direction);
         nz!("  WDS via essid_map (Tier 1b; recovered)", self.eapol_tier1b_essid);
         nz!("  WDS via ACK discovery (Tier 2; recovered)", self.eapol_tier2_ack_discovery);
         nz!("  WDS flag-based fallback (Tier 3; recovered)", self.eapol_tier3_flag_fallback);
-        nz!("  direction/ACK mismatches (diagnostic; frame still paired)", self.eapol_ack_mismatches);
+        nz!("  direction/ACK mismatches (diagnostic; still paired)", self.eapol_ack_mismatches);
         nz!("  preauthentication frames (EtherType 0x88C7)", self.eapol_preauth_frames);
         nz!("  LLC accepted but EAPOL parse rejected (frame dropped)", self.eapol_llc_invalid);
-        nz!("  Mesh Data frames recovered (Mesh Control header unwrapped)", self.mesh_control_frames);
+        nz!("  Mesh Data frames recovered (Mesh Control unwrapped)", self.mesh_control_frames);
+        nz!("  Mesh Data dropped (bad Mesh Control header)", self.mesh_control_malformed);
         nz!("  EAP-Success frames (RFC 3748 §4.2)", self.eap_success_frames);
         nz!("  EAP-Failure frames (RFC 3748 §4.2)", self.eap_failure_frames);
 
@@ -1258,6 +1446,12 @@ impl Stats {
         nz!("  Probe Response RSN IE (S17, vendor deviation)", self.pmkid_probe_resp);
         nz!("  Mesh Peering AMPE (S18/S19)", self.pmkid_mesh);
         nz!("  OSEN IE (S20, Hotspot 2.0)", self.pmkid_osen);
+        // Second child dimension of the same insertion total: by AKM family.
+        // Per ARCHITECTURE.md §2: non-FT = WPA2-PSK / PSK-SHA256 / PSK-SHA384;
+        // FT = FT-PSK / FT-PSK-SHA384. Labels avoid an embedded ": " so the
+        // first ": " on any banner row is always the label/value separator.
+        nz!("  by AKM family (non-FT PSK/SHA256/SHA384)", self.pmkid_wpa2_psk);
+        nz!("  by AKM family (FT-PSK/FT-PSK-SHA384)", self.pmkid_ft_psk);
 
         // ======================================================================
         // Phase 4 -- Emit: hashes written, files produced, dedup decisions.
@@ -1265,12 +1459,18 @@ impl Stats {
         // ======================================================================
         section!(4, "Emit");
 
+        // Run context: which output filters were active. A WIDE run and a
+        // --strict run must be distinguishable from the banner alone.
+        if !self.filters_active.is_empty() {
+            stat!("output filters active", self.filters_active);
+        }
+
         // Per-hash-type breakdown -- one row per `HashType` variant from the
         // 11-type classification in ARCHITECTURE.md §2. Anchors every emitted hash
         // line to a single (AKM, attack surface) so the operator can read off
         // exactly what hashcat will see, type code by type code.
         if self.hash_type_emitted.values().any(|&n| n > 0) {
-            println!("per-hash-type lines emitted (per ARCHITECTURE.md §2):");
+            let _ = writeln!(out, "per-hash-type lines emitted (per ARCHITECTURE.md §2):");
             for ht in HashType::all() {
                 let n = self.hash_type_emitted.get(&ht).copied().unwrap_or(0);
                 if n > 0 {
@@ -1280,20 +1480,29 @@ impl Stats {
             }
         }
 
-        // Pairing engine results (Phase 4 first half: pair/ -> output/).
-        stat!("EAPOL pairs generated (total)", self.eapol_pairs_generated);
+        // Pairing engine results (Phase 4 first half: pair/ -> output/). The
+        // generated total is pre-dedup; the written total and its combo children
+        // are post-dedup, so the children sum to the written row, not the
+        // generated one.
+        stat!("EAPOL pairs generated (total, pre-dedup)", self.eapol_pairs_generated);
+        stat!("EAPOL pairs written (post-dedup)", self.eapol_pairs_useful);
         nz!("  N1E2 challenge (ANonce from M1, EAPOL from M2)", self.pairs_written_n1e2);
         nz!("  N3E2 authorized (ANonce from M3, EAPOL from M2)", self.pairs_written_n3e2);
         nz!("  N1E4 authorized (ANonce from M1, EAPOL from M4)", self.pairs_written_n1e4);
         nz!("  N2E3 authorized (SNonce from M2, EAPOL from M3, AP-less)", self.pairs_written_n2e3);
         nz!("  N4E3 authorized (SNonce from M4, EAPOL from M3, AP-less)", self.pairs_written_n4e3);
         nz!("  N3E4 authorized (ANonce from M3, EAPOL from M4)", self.pairs_written_n3e4);
-        nz!("  NC flag set on pair (nonce-error-correction hint passed to hashcat)", self.pairs_nc);
-        nz!("  LE endianness flag set on pair (LE-router hint passed to hashcat)", self.pairs_le);
-        nz!("  BE endianness flag set on pair (BE-router hint passed to hashcat)", self.pairs_be);
-        nz!("  NC-dedup near-identical-nonce lines collapsed (--nc-dedup)", self.nc_dedup_collapsed_lines);
+        nz!("  NC flag set (nonce-error-correction hint for hashcat)", self.pairs_nc);
+        nz!("  LE endianness flag set (LE-router hint for hashcat)", self.pairs_le);
+        nz!("  BE endianness flag set (BE-router hint for hashcat)", self.pairs_be);
+        nz!("  NC-dedup lines collapsed (--nc-dedup)", self.nc_dedup_collapsed_lines);
         nz!("  NC-dedup cluster count (--nc-dedup)", self.nc_dedup_cluster_count);
         nz!("  NC-dedup max cluster size (--nc-dedup)", self.nc_dedup_max_cluster_size);
+        // Opt-in output-filter drops (zero in WIDE mode). These reduce the
+        // candidate set BEFORE the generated total above, so they are reported
+        // as their own lines rather than folded into the generated/written gap.
+        nz!("  candidates dropped (--eapoltimeout filter)", self.pairs_time_filtered);
+        nz!("  candidates dropped (--rc-drift filter)", self.pairs_rc_filtered);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
             // Firmware bugs and replay-counter corruption in wild captures produce
             // values like 2^56. Cap the display at 2^32 so the "suggested threshold"
@@ -1307,20 +1516,29 @@ impl Stats {
             }
         }
 
-        // PMKIDs found by AKM family (extraction-time tally, before dedup and
-        // before the type-1-vs-type-2 routing). The actual emitted-line counts
-        // appear in the per-hash-type breakdown above and the per-sink counters
-        // below; this row just shows how many raw PMKIDs each AKM family
-        // contributed. Per ARCHITECTURE.md §2: non-FT family = WPA2-PSK /
-        // PSK-SHA256 / PSK-SHA384; FT family = FT-PSK / FT-PSK-SHA384.
-        nz!("PMKIDs found by AKM family (non-FT: WPA2-PSK/SHA256/SHA384)", self.pmkid_wpa2_psk);
-        nz!("PMKIDs found by AKM family (FT: FT-PSK/FT-PSK-SHA384)", self.pmkid_ft_psk);
+        // PMKID emission (post-dedup logical count). The extraction-time totals
+        // and the per-AKM-family split live in Phase 3 under "PMKID store
+        // insertions"; this is what survived dedup at least once.
+        stat!("PMKIDs written (post-dedup)", self.pmkids_written);
 
-        // Per-sink hash output rows. Each configured sink shows its file path and
-        // the line / dedup-dropped counters; unconfigured sinks show "not configured"
-        // and skip the counter rows. The legacy 22000 / 37100 sinks remain hashcat-
-        // compatible via the 4-prefix scheme; the per-AKM-family and combined sinks
-        // emit the 11-type classification prefixes from `ARCHITECTURE.md §2`.
+        // Global dedup accounting. Total plus the per-kind children, so the
+        // pre-dedup totals above reconcile: pairs generated = pairs written +
+        // EAPOL pair duplicates; PMKID insertions >= PMKIDs written + PMKID
+        // duplicates (insertions also shed garbage-pattern and unresolved-SSID
+        // drops counted in Phase 3).
+        nz!("dedup dropped (total; duplicate hashes not written)", self.dedup_dropped);
+        nz!("  EAPOL pair duplicates", self.dedup_dropped_pairs);
+        nz!("  PMKID duplicates", self.dedup_dropped_pmkids);
+        // Emit-time drops of crack material we extracted but could not format.
+        nz!("hashes dropped (unclassified AKM; no 11-type)", self.emit_dropped_unclassified_akm);
+        nz!("hashes dropped (FT context missing; no R0KH-ID)", self.emit_dropped_ft_no_context);
+
+        // Per-sink hash output rows. Only configured sinks render (decision:
+        // banner space goes to what the run actually produced); the trailing
+        // one-liner counts the rest so the full sink surface stays discoverable.
+        // The legacy 22000 / 37100 sinks remain hashcat-compatible via the
+        // 4-prefix scheme; the per-AKM-family and combined sinks emit the
+        // 11-type classification prefixes from `ARCHITECTURE.md §2`.
         let sinks: [(&str, &str, u64, u64); 9] = [
             ("--22000-out (legacy mode 22000)", &self.path_22000, self.lines_22000, self.dropped_22000),
             ("--37100-out (legacy mode 37100)", &self.path_37100, self.lines_37100, self.dropped_37100),
@@ -1337,28 +1555,40 @@ impl Stats {
                 self.dropped_ft_psk_sha384,
             ),
         ];
+        let mut hash_sinks_unconfigured = 0u64;
         for (label, path, lines, dropped) in sinks {
-            let display = if path.is_empty() { "not configured" } else { path };
-            stat!(label, display);
-            if !path.is_empty() {
+            if path.is_empty() {
+                hash_sinks_unconfigured += 1;
+            } else {
+                stat!(label, path);
                 stat!("  lines written", lines);
                 nz!("  dedup dropped (duplicate hashes; not written)", dropped);
             }
         }
+        nz!("hash sinks not configured", hash_sinks_unconfigured);
 
-        // Auxiliary output files (Phase 4 tail: wordlists, identities, device info).
-        let path_essid = if self.essid_list_path.is_empty() { "not configured" } else { &self.essid_list_path };
-        let path_probe = if self.probe_list_path.is_empty() { "not configured" } else { &self.probe_list_path };
-        let path_wl = if self.wordlist_path.is_empty() { "not configured" } else { &self.wordlist_path };
-        let path_id = if self.identity_list_path.is_empty() { "not configured" } else { &self.identity_list_path };
-        let path_un = if self.username_list_path.is_empty() { "not configured" } else { &self.username_list_path };
-        let path_di = if self.device_info_path.is_empty() { "not configured" } else { &self.device_info_path };
-        stat!("ESSID list (-E)", path_essid);
-        stat!("probe ESSID list (-R)", path_probe);
-        stat!("wordlist (-W)", path_wl);
-        stat!("identity list (-I)", path_id);
-        stat!("username list (-U)", path_un);
-        stat!("device info (-D)", path_di);
+        // Auxiliary output files (Phase 4 tail). Same configured-only rule, and
+        // each configured sink reports the entries it actually wrote -- parity
+        // with the hash sinks' "lines written" rows.
+        let aux_sinks: [(&str, &str, u64); 7] = [
+            ("ESSID list (-E)", &self.essid_list_path, self.entries_essid_list),
+            ("probe ESSID list (-R)", &self.probe_list_path, self.entries_probe_list),
+            ("wordlist (-W)", &self.wordlist_path, self.entries_wordlist),
+            ("IE-scan wordlist (--wordlist-scan)", &self.wordlist_scan_path, self.entries_wordlist_scan),
+            ("identity list (-I)", &self.identity_list_path, self.entries_identity_list),
+            ("username list (-U)", &self.username_list_path, self.entries_username_list),
+            ("device info (-D)", &self.device_info_path, self.entries_device_info),
+        ];
+        let mut aux_sinks_unconfigured = 0u64;
+        for (label, path, entries) in aux_sinks {
+            if path.is_empty() {
+                aux_sinks_unconfigured += 1;
+            } else {
+                stat!(label, path);
+                stat!("  entries written", entries);
+            }
+        }
+        nz!("auxiliary sinks not configured", aux_sinks_unconfigured);
 
         // ======================================================================
         // Phase 5 -- Report: closing one-liner. (See ARCHITECTURE.md §3.5.)
@@ -1366,15 +1596,66 @@ impl Stats {
         section!(5, "Report");
 
         // Total hashes = sum of per-`HashType` counts (counted once per logical hash
-        // regardless of how many sinks it fanned out to). Distinct types observed = number
-        // of `HashType` rows whose counter is non-zero.
+        // regardless of how many sinks it fanned out to). The EAPOL/PMKID children
+        // come from the same table -- odd type codes are EAPOL attacks, even codes
+        // are PMKID attacks per the ARCHITECTURE.md §2 encoding rule -- so the two
+        // children always sum to the total. Distinct types observed = number of
+        // `HashType` rows whose counter is non-zero.
         let total_hashes: u64 = HashType::all().map(|ht| self.hash_type_emitted.get(&ht).copied().unwrap_or(0)).sum();
+        let eapol_lines: u64 = HashType::all()
+            .filter(|ht| ht.type_code() % 2 == 1)
+            .map(|ht| self.hash_type_emitted.get(&ht).copied().unwrap_or(0))
+            .sum();
+        let pmkid_lines: u64 = total_hashes - eapol_lines;
         let active_types =
             HashType::all().filter(|ht| self.hash_type_emitted.get(ht).copied().unwrap_or(0) > 0).count();
         stat!("hashes emitted (total)", total_hashes);
+        nz!("  EAPOL hash lines", eapol_lines);
+        nz!("  PMKID hash lines", pmkid_lines);
         stat!("distinct hash types observed", active_types);
 
-        println!("---");
+        // Run cost. Wallclock is split at the Phase 3 / Phase 4 boundary (the
+        // streaming pass vs the pairing + emit pass); throughput is file bytes
+        // over the streaming pass. One decimal place via integer math -- no
+        // float casts under the cast-lint policy.
+        let fmt_s = |ms: u64| format!("{}.{}", ms / 1000, (ms % 1000) / 100);
+        if self.wallclock_p13_ms > 0 || self.wallclock_p4_ms > 0 {
+            stat!("wallclock Phase 1-3 streaming pass (s)", fmt_s(self.wallclock_p13_ms));
+            stat!("wallclock Phase 4 emit (s)", fmt_s(self.wallclock_p4_ms));
+            stat!("wallclock total (s)", fmt_s(self.wallclock_p13_ms + self.wallclock_p4_ms));
+        }
+        if self.bytes_ingested > 0 && self.wallclock_p13_ms > 0 {
+            // tenths of MiB/s = bytes * 10_000 / (1 MiB * ms). Saturating guards
+            // the petabyte-scale corner instead of wrapping.
+            let tenths = self.bytes_ingested.saturating_mul(10_000)
+                / (1_048_576u64.saturating_mul(self.wallclock_p13_ms).max(1));
+            stat!("throughput (MiB/s)", format!("{}.{}", tenths / 10, tenths % 10));
+        }
+        nz!("peak RSS (MiB)", self.peak_rss_mib);
+        stat!("disk-backed fallback engaged", if self.disk_mode_engaged { "yes" } else { "no" });
+
+        // Zero-hash hint: one line naming the single largest drop counter so the
+        // operator knows where to look first. No advice paragraphs (terse banner
+        // is a feature); the named counter's own row carries the detail.
+        if total_hashes == 0 && self.total_packets > 0 {
+            let candidates: [(&str, u64); 6] = [
+                ("NULL nonce rejected", self.null_nonce_rejected),
+                ("LLC accepted but EAPOL parse rejected", self.eapol_llc_invalid),
+                ("hash lines dropped (no SSID resolved)", self.essid_unresolved_emissions),
+                ("link/parse errors", self.link_errors),
+                ("MAC header malformed", self.malformed_mac_hdr),
+                ("input files skipped", self.files_skipped_unknown_format),
+            ];
+            let largest = candidates.iter().max_by_key(|(_, n)| *n).filter(|(_, n)| *n > 0);
+            if let Some((label, n)) = largest {
+                stat!("hint (no hashes)", format!("largest drop is \"{label}\" ({n})"));
+            } else {
+                stat!("hint (no hashes)", "no EAPOL or PMKID material found in capture");
+            }
+        }
+
+        let _ = writeln!(out, "---");
+        out
     }
 }
 
@@ -1424,8 +1705,10 @@ mod tests {
         assert_eq!(s.unreadable_packets, 0);
         assert_eq!(s.files_skipped_unknown_format, 0);
         assert_eq!(s.out_of_sequence_timestamps, 0);
-        assert_eq!(s.hashes_written, 0);
+        assert_eq!(s.pmkids_written, 0);
         assert_eq!(s.dedup_dropped, 0);
+        assert_eq!(s.dedup_dropped_pairs, 0);
+        assert_eq!(s.dedup_dropped_pmkids, 0);
         assert_eq!(s.essid_count, 0);
         assert_eq!(s.beacon_frames, 0);
         assert_eq!(s.probe_resp_frames, 0);
@@ -1516,17 +1799,19 @@ mod tests {
         s.record_key_descriptor_version(3);
         s.record_key_descriptor_version(3);
         s.record_key_descriptor_version(3);
-        s.record_key_descriptor_version(0); // reserved -> other
+        s.record_key_descriptor_version(0); // AKM-defined (SHA-384 families) -> kdv0
         s.record_key_descriptor_version(7); // reserved -> other
+        assert_eq!(s.eapol_kdv0, 1);
         assert_eq!(s.eapol_kdv1, 2);
         assert_eq!(s.eapol_kdv2, 1);
         assert_eq!(s.eapol_kdv3, 3);
-        assert_eq!(s.eapol_kdv_other, 2);
+        assert_eq!(s.eapol_kdv_other, 1);
     }
 
     #[test]
     fn record_kdv_starts_at_zero() {
         let s = Stats::new();
+        assert_eq!(s.eapol_kdv0, 0);
         assert_eq!(s.eapol_kdv1, 0);
         assert_eq!(s.eapol_kdv2, 0);
         assert_eq!(s.eapol_kdv3, 0);
@@ -1635,8 +1920,9 @@ mod tests {
         s.m4_auth_len_max = 95;
         s.pmkids_found = 5;
         s.essid_count = 3;
-        s.hashes_written = 14;
+        s.pmkids_written = 4;
         s.dedup_dropped = 2;
+        s.dedup_dropped_pairs = 2;
         s.link_errors = 1;
         s.truncated_capture_files = 2;
         s.unreadable_packets = 2;
@@ -1673,5 +1959,356 @@ mod tests {
         *s.dlt_descs_seen.entry("DLT_IEEE802_11 (105)".to_owned()).or_insert(0) += 5;
         s.last_file = "/captures/last.pcap".to_owned();
         s.print_summary();
+    }
+
+    /// Lights up every banner row, then asserts each rendered row keeps at
+    /// least two leader dots before the value column -- i.e. every label fits
+    /// the W=60 contract from `ARCHITECTURE.md §9`. A new row whose label
+    /// exceeds the cap fails here (and trips the `debug_assert` in the row
+    /// macros) instead of silently breaking the column alignment.
+    #[test]
+    fn banner_labels_fit_column() {
+        let mut s = Stats::new();
+        // Phase 1.
+        s.input_file_count = 2;
+        *s.file_formats_seen.entry("pcap 2.4".to_owned()).or_insert(0) += 2;
+        *s.endians_seen.entry("little endian".to_owned()).or_insert(0) += 2;
+        *s.dlt_descs_seen.entry("DLT_IEEE802_11_RADIO (127)".to_owned()).or_insert(0) += 2;
+        s.last_file = "b.pcap".to_owned();
+        s.timestamp_first_us = 1_000_000;
+        s.timestamp_last_us = 2_000_000;
+        s.bytes_ingested = 10 * 1024 * 1024;
+        s.total_packets = 100;
+        s.link_errors = 1;
+        s.malformed_mac_hdr = 1;
+        s.lenient_proto_version = 1;
+        s.truncated_capture_files = 1;
+        s.unreadable_packets = 1;
+        s.files_skipped_unknown_format = 1;
+        s.packets_unknown_linktype = 1;
+        s.truncated_after_header = 1;
+        s.packets_zeroed_timestamp = 1;
+        s.out_of_sequence_timestamps = 1;
+        // Phase 2.
+        s.mgmt_frames = 50;
+        s.data_frames = 40;
+        s.ctrl_frames = 10;
+        s.extension_frames = 1;
+        s.relay_frames = 1;
+        s.wpa_encrypted_data = 1;
+        s.wep_encrypted_data = 1;
+        s.mgmt_protected_frames = 1;
+        s.mgmt_protected_action_skipped = 1;
+        s.amsdu_frames_seen = 1;
+        s.amsdu_subframes_total = 1;
+        s.radiotap_version_nonzero = 1;
+        s.recovered_tier2 = 1;
+        s.recovered_tier3 = 1;
+        s.fcs_header_and_crc_agree = 1;
+        s.fcs_detected_by_crc = 1;
+        s.fcs_badfcs_flagged = 1;
+        s.fcs_crc_mismatch_no_flag = 1;
+        s.fcs_neither = 1;
+        s.ampdu_status_frames = 1;
+        s.fragment_stats.fragments_seen = 1;
+        s.fragment_stats.fragments_reassembled = 1;
+        s.fragment_stats.fragments_incomplete = 1;
+        s.fragment_stats.fragments_dropped_safety_cap = 1;
+        s.awdl_frames = 1;
+        s.band_24ghz = 1;
+        s.band_5ghz = 1;
+        s.band_6ghz = 1;
+        s.band_other = 1;
+        *s.beacon_channels.entry(6).or_insert(0) += 1;
+        *s.beacon_channels.entry(36).or_insert(0) += 1;
+        s.eapol_kdv0 = 1;
+        s.eapol_kdv1 = 1;
+        s.eapol_kdv2 = 1;
+        s.eapol_kdv3 = 1;
+        s.eapol_kdv_other = 1;
+        s.eapol_rsn = 1;
+        s.eapol_wpa = 1;
+        // Phase 3: management subtype tree.
+        s.beacon_frames = 1;
+        s.beacon_ssid_wildcard = 1;
+        s.beacon_ssid_zeroed = 1;
+        s.beacon_ssid_oversized = 1;
+        s.rsnxe_sae_h2e = 1;
+        s.rsnxe_sae_pk = 1;
+        s.rsnxe_secure_ltf = 1;
+        s.rsnxe_protected_twt = 1;
+        s.rnr_blocks_parsed = 1;
+        s.rnr_6ghz_colocated = 1;
+        s.mle_basic_seen = 1;
+        s.mle_mld_addrs_learned = 1;
+        s.mld_groups_merged = 1;
+        s.essid_link_macs_merged = 1;
+        s.probe_resp_frames = 1;
+        s.probe_resp_ssid_unset = 1;
+        s.probe_resp_ssid_zeroed = 1;
+        s.probe_req_undirected = 1;
+        s.probe_req_directed = 1;
+        s.assoc_req_frames = 1;
+        s.assoc_req_wpa1 = 1;
+        s.assoc_req_wpa2_psk = 1;
+        s.assoc_req_ft_psk = 1;
+        s.assoc_req_ft_psk_sha384 = 1;
+        s.assoc_req_psk_sha256 = 1;
+        s.assoc_req_psk_sha384 = 1;
+        s.assoc_req_sae = 1;
+        s.assoc_req_owe = 1;
+        s.assoc_req_fils = 1;
+        s.assoc_req_pasn = 1;
+        s.assoc_req_enterprise_sha1 = 1;
+        s.assoc_req_enterprise_sha256 = 1;
+        s.assoc_req_enterprise_sha384 = 1;
+        s.assoc_req_tdls = 1;
+        s.assoc_req_appeerkey = 1;
+        s.assoc_req_akm_unknown = 1;
+        s.assoc_resp_frames = 1;
+        s.reassoc_req_frames = 1;
+        s.reassoc_req_wpa1 = 1;
+        s.reassoc_req_wpa2_psk = 1;
+        s.reassoc_req_ft_psk = 1;
+        s.reassoc_req_ft_psk_sha384 = 1;
+        s.reassoc_req_psk_sha256 = 1;
+        s.reassoc_req_psk_sha384 = 1;
+        s.reassoc_req_sae = 1;
+        s.reassoc_req_owe = 1;
+        s.reassoc_req_fils = 1;
+        s.reassoc_req_pasn = 1;
+        s.reassoc_req_enterprise_sha1 = 1;
+        s.reassoc_req_enterprise_sha256 = 1;
+        s.reassoc_req_enterprise_sha384 = 1;
+        s.reassoc_req_tdls = 1;
+        s.reassoc_req_appeerkey = 1;
+        s.reassoc_req_akm_unknown = 1;
+        s.reassoc_resp_frames = 1;
+        s.auth_frames = 1;
+        s.auth_open_system = 1;
+        s.auth_shared_key = 1;
+        s.auth_fbt = 1;
+        s.ft_status_r0kh_unreachable = 1;
+        s.ft_status_invalid_pmkid = 1;
+        s.ft_status_invalid_mde = 1;
+        s.ft_status_invalid_fte = 1;
+        s.auth_sae = 1;
+        s.auth_fils = 1;
+        s.auth_network_eap = 1;
+        s.auth_pasn = 1;
+        s.deauth_frames = 1;
+        s.mic_failure_deauths = 1;
+        s.disassoc_frames = 1;
+        s.action_frames = 1;
+        s.action_nr_req_ssids = 1;
+        s.fils_discovery_ssids = 1;
+        s.action_ft_frames = 1;
+        s.action_mesh_peering = 1;
+        s.anqp_gas_frames = 1;
+        s.anqp_venue_name = 1;
+        s.anqp_domain_name = 1;
+        s.anqp_nai_realm = 1;
+        s.anqp_hs_operator_friendly_name = 1;
+        s.anqp_unknown_info_id = 1;
+        s.anqp_fragmented_skipped = 1;
+        s.action_no_ack_frames = 1;
+        s.atim_frames = 1;
+        s.measurement_pilot_frames = 1;
+        s.timing_advert_frames = 1;
+        s.mgmt_reserved_subtype = 1;
+        // Phase 3: ESSID + plaintext surfaces.
+        s.essid_count = 1;
+        s.essid_changes_max = 1;
+        s.essid_unresolved_emissions = 1;
+        s.essid_unresolved_aps = 1;
+        s.ssid_list_entries = 1;
+        s.country_codes_extracted = 1;
+        s.mesh_ids_extracted = 1;
+        s.wps_probe_req_extracted = 1;
+        s.vendor_ap_names_extracted = 1;
+        s.owe_transition_ssids = 1;
+        s.ccx1_ap_names_extracted = 1;
+        s.time_zones_extracted = 1;
+        s.multiple_bssid_profiles = 1;
+        s.rnr_bssids_extracted = 1;
+        s.p2p_device_names_extracted = 1;
+        s.wordlist_scan_ie_runs = 1;
+        s.identities_extracted = 1;
+        s.usernames_extracted = 1;
+        // Phase 3: EAPOL block.
+        s.eapol_m1 = 1;
+        s.eapol_m2 = 1;
+        s.eapol_m3 = 1;
+        s.eapol_m4 = 1;
+        s.m1_auth_len_max = 95;
+        s.m2_auth_len_max = 121;
+        s.m3_auth_len_max = 151;
+        s.m4_auth_len_max = 95;
+        s.null_nonce_rejected = 2;
+        s.null_nonce_rejected_on_m4 = 1;
+        s.ff_nonce_rejected = 2;
+        s.ff_nonce_rejected_on_m4 = 1;
+        s.repeat_nonce_rejected = 2;
+        s.repeat_nonce_rejected_on_m4 = 1;
+        s.null_mic_rejected = 1;
+        s.ff_mic_rejected = 1;
+        s.repeat_mic_rejected = 1;
+        s.null_pmkid_rejected = 1;
+        s.ff_pmkid_rejected = 1;
+        s.repeat_pmkid_rejected = 1;
+        s.essid_control_bytes_warned = 1;
+        s.eapol_time_gap_max_us = 1_500_000;
+        s.anonce_m1_m3_mismatch_sessions = 1;
+        s.eapol_tier1_direction = 1;
+        s.eapol_tier1b_essid = 1;
+        s.eapol_tier2_ack_discovery = 1;
+        s.eapol_tier3_flag_fallback = 1;
+        s.eapol_ack_mismatches = 1;
+        s.eapol_preauth_frames = 1;
+        s.eapol_llc_invalid = 1;
+        s.mesh_control_frames = 1;
+        s.mesh_control_malformed = 1;
+        s.eap_success_frames = 1;
+        s.eap_failure_frames = 1;
+        // Phase 3: PMKID sources.
+        s.pmkids_found = 13;
+        s.pmkid_m1 = 1;
+        s.pmkid_m2 = 1;
+        s.pmkid_assoc_req = 1;
+        s.pmkid_reassoc_req = 1;
+        s.pmkid_ft_auth = 1;
+        s.pmkid_fils_auth = 1;
+        s.pmkid_pasn_auth = 1;
+        s.pmkid_ft_action = 1;
+        s.pmkid_probe_req = 1;
+        s.pmkid_beacon = 1;
+        s.pmkid_probe_resp = 1;
+        s.pmkid_mesh = 1;
+        s.pmkid_osen = 1;
+        s.pmkid_wpa2_psk = 1;
+        s.pmkid_ft_psk = 1;
+        // Phase 4.
+        s.filters_active = "eapoltimeout=5, rc-drift=8, dedup-hash-combos, nc-dedup (tolerance 8)".to_owned();
+        for ht in HashType::all() {
+            *s.hash_type_emitted.entry(ht).or_insert(0) += 1;
+        }
+        s.eapol_pairs_generated = 8;
+        s.eapol_pairs_useful = 6;
+        s.pairs_written_n1e2 = 1;
+        s.pairs_written_n3e2 = 1;
+        s.pairs_written_n1e4 = 1;
+        s.pairs_written_n2e3 = 1;
+        s.pairs_written_n4e3 = 1;
+        s.pairs_written_n3e4 = 1;
+        s.pairs_nc = 1;
+        s.pairs_le = 1;
+        s.pairs_be = 1;
+        s.pairs_time_filtered = 1;
+        s.pairs_rc_filtered = 1;
+        s.nc_dedup_collapsed_lines = 1;
+        s.nc_dedup_cluster_count = 1;
+        s.nc_dedup_max_cluster_size = 1;
+        s.rc_drift_enabled = true;
+        s.rc_gap_max = 3;
+        s.pmkids_written = 5;
+        s.dedup_dropped = 3;
+        s.dedup_dropped_pairs = 2;
+        s.dedup_dropped_pmkids = 1;
+        s.emit_dropped_unclassified_akm = 1;
+        s.emit_dropped_ft_no_context = 1;
+        s.path_22000 = "h.22000".to_owned();
+        s.lines_22000 = 1;
+        s.dropped_22000 = 1;
+        s.path_37100 = "h.37100".to_owned();
+        s.lines_37100 = 1;
+        s.path_combined = "h.all".to_owned();
+        s.lines_combined = 1;
+        s.path_wpa1 = "h.wpa1".to_owned();
+        s.path_wpa2 = "h.wpa2".to_owned();
+        s.path_psk_sha256 = "h.s256".to_owned();
+        s.path_ft = "h.ft".to_owned();
+        s.path_psk_sha384 = "h.s384".to_owned();
+        s.path_ft_psk_sha384 = "h.fts384".to_owned();
+        s.essid_list_path = "essids.txt".to_owned();
+        s.entries_essid_list = 1;
+        s.probe_list_path = "probes.txt".to_owned();
+        s.entries_probe_list = 1;
+        s.wordlist_path = "wl.txt".to_owned();
+        s.entries_wordlist = 1;
+        s.identity_list_path = "ids.txt".to_owned();
+        s.entries_identity_list = 1;
+        s.username_list_path = "users.txt".to_owned();
+        s.entries_username_list = 1;
+        s.device_info_path = "devs.tsv".to_owned();
+        s.entries_device_info = 1;
+        s.wordlist_scan_path = "scan.txt".to_owned();
+        s.entries_wordlist_scan = 1;
+        // Phase 5.
+        s.wallclock_p13_ms = 1_500;
+        s.wallclock_p4_ms = 200;
+        s.peak_rss_mib = 10;
+        s.disk_mode_engaged = true;
+
+        let rendered = s.summary_string();
+        let mut rows_checked = 0usize;
+        for line in rendered.lines() {
+            if line.starts_with("===") || line == "---" || line.starts_with("wpawolf ") || line.ends_with(':') {
+                continue;
+            }
+            let Some(idx) = line.find(": ") else { continue };
+            let label_part = &line[..idx];
+            assert!(label_part.ends_with(".."), "banner row label too wide (no dot leader): {line}");
+            rows_checked += 1;
+        }
+        // Guard against the test silently checking nothing if the layout changes.
+        assert!(rows_checked > 150, "expected the lit-up banner to render >150 rows, got {rows_checked}");
+    }
+
+    /// `packets_accounted` sums exactly the eight terminal dispositions, so a
+    /// consistent run reconciles to `total_packets` (identity 1) and neither BUG
+    /// row renders; an inconsistent run surfaces the discrepancy.
+    #[test]
+    fn packet_accounting_identity_reconciles_and_surfaces_breaks() {
+        let mut s = Stats::new();
+        s.total_packets = 12;
+        s.mgmt_frames = 4;
+        s.data_frames = 3;
+        s.ctrl_frames = 2;
+        s.extension_frames = 1;
+        s.link_errors = 1;
+        s.malformed_mac_hdr = 0;
+        s.truncated_after_header = 1;
+        s.packets_unknown_linktype = 0;
+        assert_eq!(s.packets_accounted(), 12, "the eight terminal buckets must sum to total");
+        let rendered = s.summary_string();
+        assert!(!rendered.contains("unaccounted (BUG"), "consistent run must not show the BUG row:\n{rendered}");
+        assert!(!rendered.contains("multi-counted (BUG"), "{rendered}");
+
+        // Drop a packet without a counter -> unaccounted surfaces.
+        s.total_packets = 13;
+        assert_eq!(s.total_packets - s.packets_accounted(), 1);
+        assert!(s.summary_string().contains("packets unaccounted (BUG; report this)"));
+
+        // Count one twice -> multi-counted surfaces.
+        s.total_packets = 11;
+        assert!(s.summary_string().contains("frames multi-counted (BUG; report this)"));
+    }
+
+    /// Zero-hash runs print a one-line hint naming the largest drop counter.
+    #[test]
+    fn zero_hash_hint_names_largest_drop() {
+        let mut s = Stats::new();
+        s.total_packets = 10;
+        s.null_nonce_rejected = 7;
+        s.filters_active = "none (WIDE mode)".to_owned();
+        let rendered = s.summary_string();
+        assert!(rendered.contains("hint (no hashes)"), "missing hint row:\n{rendered}");
+        assert!(rendered.contains("NULL nonce rejected"), "hint must name the largest drop:\n{rendered}");
+
+        // And when nothing was dropped either, the hint says so explicitly.
+        let mut empty = Stats::new();
+        empty.total_packets = 10;
+        let rendered_empty = empty.summary_string();
+        assert!(rendered_empty.contains("no EAPOL or PMKID material found in capture"), "{rendered_empty}");
     }
 }

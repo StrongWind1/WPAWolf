@@ -237,6 +237,21 @@ pub fn process_mgmt(
             let Some(&seq_hi) = body.get(3) else { return };
             let seq = u16::from_le_bytes([seq_lo, seq_hi]);
 
+            // Status Code: LE u16 at body[4..6]. [IEEE 802.11-2024] §9.3.3.11,
+            // §9.4.1.9 Table 9-92. The four FT failure codes are promoted to
+            // their own counters because each one explains a missing FT-PSK
+            // handshake: the AP refused the FT authentication, so no M2/M3
+            // ever followed.
+            if let (Some(&st_lo), Some(&st_hi)) = (body.get(4), body.get(5)) {
+                match u16::from_le_bytes([st_lo, st_hi]) {
+                    52 => stats.ft_status_r0kh_unreachable += 1, // Table 9-92 status 52
+                    53 => stats.ft_status_invalid_pmkid += 1,    // Table 9-92 status 53
+                    54 => stats.ft_status_invalid_mde += 1,      // Table 9-92 status 54
+                    55 => stats.ft_status_invalid_fte += 1,      // Table 9-92 status 55
+                    _ => {},
+                }
+            }
+
             // PMKID extraction dispatched by algorithm number.
             match algo {
                 2 => process_auth_ft(mac_hdr, seq, body, timestamp_us, pmkid_store, akm_map, stats, logger),
@@ -250,6 +265,15 @@ pub fn process_mgmt(
         },
         SUBTYPE_DEAUTH => {
             stats.deauth_frames += 1;
+            // Reason Code: LE u16 at body[0..2]. [IEEE 802.11-2024] §9.3.3.13,
+            // §9.4.1.7 Table 9-90. Reason 14 (Message integrity code failure)
+            // is promoted to its own counter: it is the canonical "this
+            // handshake will never pair cleanly" signal for the session.
+            if let (Some(&r_lo), Some(&r_hi)) = (body.first(), body.get(1))
+                && u16::from_le_bytes([r_lo, r_hi]) == 14
+            {
+                stats.mic_failure_deauths += 1;
+            }
         },
         SUBTYPE_ACTION_NO_ACK => {
             stats.action_no_ack_frames += 1;
@@ -257,7 +281,9 @@ pub fn process_mgmt(
         SUBTYPE_TIMING_ADVERT => {
             stats.timing_advert_frames += 1;
         },
-        _ => {}, // subtypes 7 (reserved) and >15
+        // Reserved management subtypes (7, 15) per [IEEE 802.11-2024] Table 9-1.
+        // Counted so the per-subtype rows reconcile against `mgmt_frames`.
+        _ => stats.mgmt_reserved_subtype += 1,
     }
 }
 

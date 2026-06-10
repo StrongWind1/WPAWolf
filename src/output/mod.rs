@@ -133,8 +133,15 @@ pub struct OutputStats {
     pub pmkids_written: usize,
     /// Total *logical* EAPOL pairs that survived dedup at least once across all sinks.
     pub pairs_written: usize,
-    /// Total *logical* hashes suppressed by every configured sink's dedup.
-    pub dedup_dropped: usize,
+    /// Logical EAPOL pairs suppressed by every configured sink's dedup.
+    pub dedup_dropped_pairs: usize,
+    /// Logical PMKID hashes suppressed by every configured sink's dedup.
+    pub dedup_dropped_pmkids: usize,
+    /// Hashes dropped at emit because the AKM could not be mapped to one of the
+    /// 11 types (`HashType::from_akm_and_attack` returned None).
+    pub emit_dropped_unclassified_akm: usize,
+    /// FT hashes dropped at emit because the FT context (R0KH-ID) was missing.
+    pub emit_dropped_ft_no_context: usize,
 
     /// Per-sink line counts (passed each sink's dedup, written to disk if configured).
     pub lines_per_sink: PerSinkCounts,
@@ -171,6 +178,12 @@ pub struct OutputStats {
     /// Largest single NC-dedup cluster observed. Equal to
     /// `NcDedupStats::max_cluster_size` across `pair_all_groups`.
     pub nc_dedup_max_cluster_size: u64,
+    /// Candidate pairs dropped by the `--eapoltimeout` filter, summed across all
+    /// groups (`NcDedupStats::time_filtered`). Zero in WIDE mode.
+    pub pairs_time_filtered: u64,
+    /// Candidate pairs dropped by the `--rc-drift` filter, summed across all
+    /// groups (`NcDedupStats::rc_filtered`). Zero in WIDE mode.
+    pub pairs_rc_filtered: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
@@ -189,6 +202,22 @@ pub struct OutputStats {
     /// Distinct AP MACs that triggered at least one `essid_unresolved_emissions`.
     /// Lower bound on the number of "truly hidden" APs in the capture.
     pub essid_unresolved_aps: u64,
+
+    // --- auxiliary sink entry counts (filled by `finalize`) ---
+    /// Entries written to the `-E` ESSID list.
+    pub entries_essid: usize,
+    /// Entries written to the `-R` probe-ESSID list.
+    pub entries_probe: usize,
+    /// Entries written to the `-W` combined wordlist.
+    pub entries_wordlist: usize,
+    /// Entries written to the `--wordlist-scan` IE-scan wordlist.
+    pub entries_wordlist_scan: usize,
+    /// Entries written to the `-I` identity list.
+    pub entries_identity: usize,
+    /// Entries written to the `-U` username list.
+    pub entries_username: usize,
+    /// Entries written to the `-D` device-info table.
+    pub entries_device: usize,
 }
 
 impl OutputStats {
@@ -697,14 +726,19 @@ impl OutputContext {
                 } else {
                     entry.akm
                 };
-                let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
+                let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else {
+                    stats.emit_dropped_unclassified_akm += 1;
+                    continue;
+                };
                 let ssids = essid_map.ssids_for_emit(&entry.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                 let is_ft = ht.is_ft();
 
                 let ft_ctx: Option<&FtFields> = if is_ft {
-                    match entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                        Some(ft) => Some(ft),
-                        None => continue,
+                    if let Some(ft) = entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                        Some(ft)
+                    } else {
+                        stats.emit_dropped_ft_no_context += 1;
+                        continue;
                     }
                 } else {
                     None
@@ -723,7 +757,7 @@ impl OutputContext {
                         stats.pmkids_written += 1;
                         *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
                     } else {
-                        stats.dedup_dropped += 1;
+                        stats.dedup_dropped_pmkids += 1;
                     }
                 }
             }
@@ -735,7 +769,7 @@ impl OutputContext {
         // inside the streaming callback, then dropped -- peak memory is one
         // group's pairs at a time instead of the full cross-product.
         let pairs_written_before = stats.pairs_written;
-        let dedup_dropped_before = stats.dedup_dropped;
+        let dedup_dropped_before = stats.dedup_dropped_pairs;
 
         #[allow(clippy::items_after_statements, reason = "EmitState must be defined after Pipeline 1 borrows are used")]
         struct EmitState<'a> {
@@ -767,15 +801,20 @@ impl OutputContext {
                     let EmitState { sinks: s, dedup: d, disk_dedup: dd, stats: st, unresolved_drops: ud, first_error } =
                         &mut *guard;
                     for pair in &pairs {
-                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
+                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
+                            st.emit_dropped_unclassified_akm += 1;
+                            continue;
+                        };
                         let ssids =
                             essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                         let is_ft = ht.is_ft();
 
                         let ft_ctx: Option<&FtFields> = if is_ft {
-                            match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                                Some(ft) => Some(ft),
-                                None => continue,
+                            if let Some(ft) = pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                                Some(ft)
+                            } else {
+                                st.emit_dropped_ft_no_context += 1;
+                                continue;
                             }
                         } else {
                             None
@@ -813,7 +852,7 @@ impl OutputContext {
                                         }
                                         st.rc_gap_max = st.rc_gap_max.max(pair.rc_gap_magnitude);
                                     } else {
-                                        st.dedup_dropped += 1;
+                                        st.dedup_dropped_pairs += 1;
                                     }
                                 },
                                 Err(e) => {
@@ -847,13 +886,15 @@ impl OutputContext {
         es.stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
         es.stats.nc_dedup_cluster_count += nc_stats.cluster_count;
         es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+        es.stats.pairs_time_filtered += nc_stats.time_filtered;
+        es.stats.pairs_rc_filtered += nc_stats.rc_filtered;
 
         let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
         debug.phase4_pairs_generated(total_pairs);
         debug.emit_fan_out_done(
             total_pairs,
             es.stats.pairs_written - pairs_written_before,
-            es.stats.dedup_dropped - dedup_dropped_before,
+            es.stats.dedup_dropped_pairs - dedup_dropped_before,
             es.stats.nc_dedup_collapsed_lines,
             es.stats.nc_dedup_cluster_count,
         );
@@ -917,37 +958,38 @@ impl OutputContext {
 
         if let Some(path) = &paths.essid_list {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_essid_list(essid_set, &mut f)?;
+            self.stats.entries_essid = write_essid_list(essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.probe_essid_list {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_probe_essid_list(probe_essid_set, &mut f)?;
+            self.stats.entries_probe = write_probe_essid_list(probe_essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_wordlist(wordlist_store, &mut f)?;
+            self.stats.entries_wordlist = write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist_scan {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
+            self.stats.entries_wordlist_scan =
+                write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_identities(identity_set, &mut f)?;
+            self.stats.entries_identity = write_identities(identity_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.username_list {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_usernames(username_set, &mut f)?;
+            self.stats.entries_username = write_usernames(username_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.device_info {
             let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_device_info(device_store, &mut f)?;
+            self.stats.entries_device = write_device_info(device_store, &mut f)?;
             f.flush()?;
         }
 

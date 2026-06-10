@@ -108,11 +108,14 @@ use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
 use crate::store::messages::{EapolMessage, MessageStore};
 use crate::types::{MacPair, MsgType};
 
-/// Folds `other` into `acc` in place: `collapsed_lines` and `cluster_count`
-/// sum component-wise; `max_cluster_size` takes the larger of the two.
+/// Folds `other` into `acc` in place: `collapsed_lines`, `cluster_count`, and
+/// the opt-in filter drops sum component-wise; `max_cluster_size` takes the
+/// larger of the two.
 const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
     acc.collapsed_lines += other.collapsed_lines;
     acc.cluster_count += other.cluster_count;
+    acc.time_filtered += other.time_filtered;
+    acc.rc_filtered += other.rc_filtered;
     if other.max_cluster_size > acc.max_cluster_size {
         acc.max_cluster_size = other.max_cluster_size;
     }
@@ -148,9 +151,14 @@ fn pair_one_group(
 ) -> (Vec<PairedHash>, NcDedupStats) {
     let mut sorted = messages.to_vec();
     sorted.sort_unstable_by_key(|m| m.timestamp);
-    let pairs = generate(mac_pair.ap, mac_pair.sta, &sorted, config);
+    let (pairs, filter_stats) = generate(mac_pair.ap, mac_pair.sta, &sorted, config);
     let pairs = collapse(pairs, config.all_combos);
-    nc_dedup(pairs, config)
+    let (pairs, mut nc) = nc_dedup(pairs, config);
+    // Carry the generate-time filter drops on the same per-group struct that the
+    // streaming and disk merge paths already aggregate.
+    nc.time_filtered = filter_stats.time_filtered;
+    nc.rc_filtered = filter_stats.rc_filtered;
+    (pairs, nc)
 }
 
 /// Streaming pairing pipeline: pairs each group and delivers results via callback.

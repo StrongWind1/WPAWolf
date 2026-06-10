@@ -29,6 +29,10 @@ pub struct MemMonitor {
     total_ram: u64,
     threshold_bytes: u64,
     last_rss: u64,
+    /// Highest RSS sample observed across the run (Phase 5 `peak RSS` banner row).
+    /// Sampled at the pressure-check cadence, so this is a lower bound on the
+    /// true peak, not an exact high-water mark.
+    peak_rss: u64,
     disk_mode: bool,
     packets_since_check: u64,
 }
@@ -46,7 +50,7 @@ impl MemMonitor {
             .and_then(|s| s.parse::<u64>().ok())
             .map_or(THRESHOLD_TENTHS, |pct| pct.min(100) * 10);
         let threshold_bytes = total_ram / 1000 * tenths;
-        Self { total_ram, threshold_bytes, last_rss: 0, disk_mode: false, packets_since_check: 0 }
+        Self { total_ram, threshold_bytes, last_rss: 0, peak_rss: 0, disk_mode: false, packets_since_check: 0 }
     }
 
     /// Probes current RSS and activates disk mode if over threshold.
@@ -55,11 +59,13 @@ impl MemMonitor {
         self.packets_since_check = 0;
         let rss = progress::current_rss_bytes();
         self.last_rss = rss;
+        self.peak_rss = self.peak_rss.max(rss);
         if !self.disk_mode && rss >= self.threshold_bytes {
             self.disk_mode = true;
             let rss_mib = rss / (1024 * 1024);
             let total_mib = self.total_ram / (1024 * 1024);
-            eprintln!(
+            // stdout per FR-CLI-4: stderr produces no output.
+            println!(
                 "wpawolf: memory pressure ({rss_mib} MiB / {total_mib} MiB, >= 80%) -- switching to disk-backed mode"
             );
             return true;
@@ -83,6 +89,7 @@ impl MemMonitor {
     pub fn would_exceed(&mut self, additional_bytes: u64) -> bool {
         let rss = progress::current_rss_bytes();
         self.last_rss = rss;
+        self.peak_rss = self.peak_rss.max(rss);
         rss.saturating_add(additional_bytes) >= self.threshold_bytes
     }
 
@@ -93,7 +100,8 @@ impl MemMonitor {
             self.disk_mode = true;
             let rss_mib = self.last_rss / (1024 * 1024);
             let total_mib = self.total_ram / (1024 * 1024);
-            eprintln!(
+            // stdout per FR-CLI-4: stderr produces no output.
+            println!(
                 "wpawolf: preemptive disk mode ({rss_mib} MiB / {total_mib} MiB) -- large allocation would exceed 80%"
             );
         }
@@ -116,6 +124,12 @@ impl MemMonitor {
     pub const fn last_rss(&self) -> u64 {
         self.last_rss
     }
+
+    /// Highest RSS sample observed so far in bytes (lower bound on the true peak).
+    #[must_use]
+    pub const fn peak_rss_bytes(&self) -> u64 {
+        self.peak_rss
+    }
 }
 
 impl Default for MemMonitor {
@@ -128,6 +142,7 @@ impl std::fmt::Debug for MemMonitor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemMonitor")
             .field("total_ram", &self.total_ram)
+            .field("peak_rss_mib", &(self.peak_rss / (1024 * 1024)))
             .field("disk_mode", &self.disk_mode)
             .field("last_rss_mib", &(self.last_rss / (1024 * 1024)))
             .field("threshold_mib", &(self.threshold_bytes / (1024 * 1024)))

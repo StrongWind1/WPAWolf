@@ -230,6 +230,17 @@ impl EssidMap {
         self.map.len()
     }
 
+    /// Returns the largest number of distinct SSID variants recorded for any
+    /// single AP, or 0 when the map is empty.
+    ///
+    /// Feeds the Phase 3 `ESSID changes (per-AP maximum)` banner row (variants
+    /// minus the initial SSID): the same per-AP fan-out that drives the
+    /// multi-ESSID inflation filter, surfaced as a capture-quality signal.
+    #[must_use]
+    pub fn max_ssid_variants(&self) -> usize {
+        self.map.values().map(Vec::len).max().unwrap_or(0)
+    }
+
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
     ///
     /// Sums `HashMap` bucket overhead, every `Vec<EssidEntry>` allocation,

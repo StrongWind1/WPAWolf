@@ -107,10 +107,12 @@ pub struct FileMetadata {
 pub const fn dlt_name(dlt: u16) -> &'static str {
     match dlt {
         105 => "DLT_IEEE802_11",
+        113 => "DLT_LINUX_SLL",
         127 => "DLT_IEEE802_11_RADIO",
         119 => "DLT_PRISM_HEADER",
         163 => "DLT_IEEE802_11_RADIO_AVS",
         192 => "DLT_PPI",
+        276 => "DLT_LINUX_SLL2",
         _ => "DLT_UNKNOWN",
     }
 }

@@ -88,7 +88,12 @@ impl Default for PairConfig {
 /// at near-zero cost (fingerprint computation is ~20ns vs ~150ns for a full hash line).
 /// The output phase runs a final ESSID-aware dedup for correctness.
 #[must_use]
-pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &PairConfig) -> Vec<PairedHash> {
+pub fn generate(
+    ap: MacAddr,
+    sta: MacAddr,
+    messages: &[EapolMessage],
+    config: &PairConfig,
+) -> (Vec<PairedHash>, PairFilterStats) {
     use std::collections::HashSet;
 
     // Partition messages by type for O(n*m) pairing rather than O(n^2) over the full list.
@@ -159,6 +164,18 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
 
     let mut pairs: Vec<PairedHash> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
+    let mut filter_stats = PairFilterStats::default();
+
+    // Records an opt-in-filter rejection from `try_pair` against the per-group
+    // tally. A no-op in WIDE mode (no `Err` is ever produced).
+    macro_rules! count_filtered {
+        ($reason:expr) => {
+            match $reason {
+                FilterReason::Time => filter_stats.time_filtered += 1,
+                FilterReason::Rc => filter_stats.rc_filtered += 1,
+            }
+        };
+    }
 
     // Inline dedup helper: compute fingerprint and push only if new.
     // This uses the same fingerprint as output::dedup::eapol_fingerprint but with an
@@ -216,8 +233,9 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // N1E2: ANonce from M1, EAPOL frame from M2. [ARCHITECTURE.md §5]
     for nonce_msg in &m1s {
         for eapol_msg in &m2s {
-            if let Some(pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E2, config) {
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E2, config) {
+                Ok(pair) => dedup_push!(pair),
+                Err(r) => count_filtered!(r),
             }
         }
     }
@@ -225,8 +243,9 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // N1E4: ANonce from M1, EAPOL frame from M4. Spans the whole session. [ARCHITECTURE.md §5]
     for nonce_msg in &m1s {
         for eapol_msg in &m4s {
-            if let Some(pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E4, config) {
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E4, config) {
+                Ok(pair) => dedup_push!(pair),
+                Err(r) => count_filtered!(r),
             }
         }
     }
@@ -240,11 +259,14 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // unit tests below for one representative case per source.
     for nonce_msg in &m3s {
         for eapol_msg in &m2s {
-            if let Some(mut pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E2, config) {
-                if session_carries_nc || pair.rc_gap_magnitude > 0 {
-                    pair.message_pair |= FLAG_NC;
-                }
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E2, config) {
+                Ok(mut pair) => {
+                    if session_carries_nc || pair.rc_gap_magnitude > 0 {
+                        pair.message_pair |= FLAG_NC;
+                    }
+                    dedup_push!(pair);
+                },
+                Err(r) => count_filtered!(r),
             }
         }
     }
@@ -252,8 +274,9 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // N2E3: SNonce from M2, EAPOL frame from M3. AP-less combo. [ARCHITECTURE.md §5]
     for nonce_msg in &m2s {
         for eapol_msg in &m3s {
-            if let Some(pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N2E3, config) {
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N2E3, config) {
+                Ok(pair) => dedup_push!(pair),
+                Err(r) => count_filtered!(r),
             }
         }
     }
@@ -261,8 +284,9 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // N4E3: SNonce from M4, EAPOL frame from M3. AP-less combo. [ARCHITECTURE.md §5]
     for nonce_msg in &m4s {
         for eapol_msg in &m3s {
-            if let Some(pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N4E3, config) {
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N4E3, config) {
+                Ok(pair) => dedup_push!(pair),
+                Err(r) => count_filtered!(r),
             }
         }
     }
@@ -276,16 +300,19 @@ pub fn generate(ap: MacAddr, sta: MacAddr, messages: &[EapolMessage], config: &P
     // on standard handshakes where M3.rc = M4.rc exactly.
     for nonce_msg in &m3s {
         for eapol_msg in &m4s {
-            if let Some(mut pair) = try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E4, config) {
-                if session_carries_nc || pair.rc_gap_magnitude > 0 {
-                    pair.message_pair |= FLAG_NC;
-                }
-                dedup_push!(pair);
+            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E4, config) {
+                Ok(mut pair) => {
+                    if session_carries_nc || pair.rc_gap_magnitude > 0 {
+                        pair.message_pair |= FLAG_NC;
+                    }
+                    dedup_push!(pair);
+                },
+                Err(r) => count_filtered!(r),
             }
         }
     }
 
-    pairs
+    (pairs, filter_stats)
 }
 
 // --- try_pair ---
@@ -303,11 +330,11 @@ fn try_pair(
     eapol_msg: &EapolMessage,
     combo: ComboType,
     config: &PairConfig,
-) -> Option<PairedHash> {
+) -> Result<PairedHash, FilterReason> {
     // Time constraint: both messages must fall within the configured EAPOL session window.
     // [ARCHITECTURE.md §8 FR-PAIR-3]
     if config.time_check_enabled && !within_time(nonce_msg.timestamp, eapol_msg.timestamp, config.eapol_timeout_us) {
-        return None;
+        return Err(FilterReason::Time);
     }
 
     // RC constraint (opt-in via --rc-drift): replay counters must be consistent with the
@@ -315,7 +342,10 @@ fn try_pair(
     // pairs with the standard M3.rc = M2.rc + 1 delta are not spuriously rejected.
     // Unfiltered (rc_drift_enabled=false): all pairs treated as RC-exact. [ARCHITECTURE.md §8 FR-PAIR-4]
     let rc_rel = if config.rc_drift_enabled {
-        within_rc_for_combo(nonce_msg, eapol_msg, combo, config.rc_drift_tolerance)?
+        match within_rc_for_combo(nonce_msg, eapol_msg, combo, config.rc_drift_tolerance) {
+            Some(rel) => rel,
+            None => return Err(FilterReason::Rc),
+        }
     } else {
         RcRelation::Exact // unfiltered: no RC constraint, treat all pairs as exact
     };
@@ -360,7 +390,7 @@ fn try_pair(
     // Saturate on the impossible overflow to keep clippy happy.
     let rc_gap_magnitude = u64::try_from((nonce_rc - eapol_rc - expected_delta).unsigned_abs()).unwrap_or(u64::MAX);
 
-    Some(PairedHash {
+    Ok(PairedHash {
         ap,
         sta,
         combo_type: combo,
@@ -372,6 +402,29 @@ fn try_pair(
         ft: eapol_msg.ft.clone(),
         rc_gap_magnitude,
     })
+}
+
+/// Why a candidate (nonce, EAPOL) pair was rejected by an opt-in output filter.
+///
+/// Both variants only ever occur when the corresponding filter flag is set
+/// (`--eapoltimeout` / `--rc-drift`); in WIDE mode `try_pair` never returns `Err`.
+/// `generate` tallies these so the banner can show how many pairs a filter removed
+/// rather than letting them vanish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterReason {
+    /// Dropped by the `--eapoltimeout` session-window constraint (FR-PAIR-3).
+    Time,
+    /// Dropped by the `--rc-drift` replay-counter constraint (FR-PAIR-4).
+    Rc,
+}
+
+/// Per-group tally of pairs removed by the opt-in output filters. Zero in WIDE mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PairFilterStats {
+    /// Candidate pairs dropped by the `--eapoltimeout` filter.
+    pub time_filtered: u64,
+    /// Candidate pairs dropped by the `--rc-drift` filter.
+    pub rc_filtered: u64,
 }
 
 // --- Nonce endianness detection ---
@@ -592,7 +645,7 @@ mod tests {
     fn generate_n1e2_basic() {
         // M1 (RC=1, ts=0) paired with M2 (RC=1, ts=100) -> one N1E2 pair.
         let msgs = vec![make_msg(MsgType::M1, 1, 0, 0xAA), make_msg(MsgType::M2, 1, 100, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].combo_type, ComboType::N1E2);
     }
@@ -608,8 +661,12 @@ mod tests {
             ..PairConfig::default()
         };
         let msgs = vec![make_msg(MsgType::M1, 1, 0, 0xAA), make_msg(MsgType::M2, 1, 6_000_000, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &config);
+        let (pairs, fs) = generate(ap(), sta(), &msgs, &config);
         assert!(pairs.is_empty());
+        // The one N1E2 candidate was removed by the time filter and is counted,
+        // not vanished. RC filter is off, so its tally stays zero.
+        assert_eq!(fs.time_filtered, 1, "the time-filtered candidate must be tallied");
+        assert_eq!(fs.rc_filtered, 0);
     }
 
     #[test]
@@ -617,8 +674,11 @@ mod tests {
         // M1 RC=1, M2 RC=100 -> delta=99 > tolerance=8 -> no pairs when rc_drift is on.
         let config = PairConfig { rc_drift_enabled: true, rc_drift_tolerance: 8, ..PairConfig::default() };
         let msgs = vec![make_msg(MsgType::M1, 1, 0, 0xAA), make_msg(MsgType::M2, 100, 100, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &config);
+        let (pairs, fs) = generate(ap(), sta(), &msgs, &config);
         assert!(pairs.is_empty());
+        // The N1E2 candidate was removed by the RC filter and is counted.
+        assert_eq!(fs.rc_filtered, 1, "the RC-filtered candidate must be tallied");
+        assert_eq!(fs.time_filtered, 0);
     }
 
     #[test]
@@ -626,7 +686,7 @@ mod tests {
         // M3 (RC=2, ts=200) paired with M2 (RC=2, ts=100) -> at least one N3E2 pair.
         // N2E3 also fires here (M2 as nonce, M3 as eapol, same RCs), so assert by filtering.
         let msgs = vec![make_msg(MsgType::M3, 2, 200, 0xAA), make_msg(MsgType::M2, 2, 100, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).count(), 1);
     }
 
@@ -644,7 +704,7 @@ mod tests {
             make_msg(MsgType::M2, 1, 100, 0xB1),
             make_msg(MsgType::M3, 2, 200, 0xC1),
         ];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
         assert_ne!(
@@ -662,7 +722,7 @@ mod tests {
         // be set even without M1 inheritance. Mirrors the mid-capture-start case
         // where the AP retransmitted M3 against an earlier M2.
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 1, 200, 0xC1)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
         assert_ne!(
@@ -680,7 +740,7 @@ mod tests {
         // the line-by-line superset invariant against hcx-default. This test
         // pins the matching behaviour.
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 2, 200, 0xC1)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
         assert_eq!(
@@ -709,7 +769,7 @@ mod tests {
         let m3_a = EapolMessage { nonce: n_a, ..make_msg(MsgType::M3, 2, 200, 0xC1) };
         let m3_b = EapolMessage { nonce: n_b, ..make_msg(MsgType::M3, 2, 220, 0xC2) };
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), m3_a, m3_b];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert!(!n3e2.is_empty(), "expected at least one N3E2 pair");
         for p in &n3e2 {
@@ -727,7 +787,7 @@ mod tests {
         // M2 (RC=1, ts=100) paired with M3 (RC=2, ts=200) -> at least one N2E3 pair.
         // N3E2 also fires (M3 as nonce RC=2, M2 as eapol RC=1, delta=1 -> Exact), so filter.
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xCC), make_msg(MsgType::M3, 2, 200, 0xDD)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.iter().filter(|p| p.combo_type == ComboType::N2E3).count(), 1);
     }
 
@@ -736,7 +796,7 @@ mod tests {
         // M1 (RC=1, ts=0) paired with M4 (RC=2, ts=300) -> one N1E4 pair (RC diff=1 <= 8).
         // No other combos fire with only M1 and M4 in the list.
         let msgs = vec![make_msg(MsgType::M1, 1, 0, 0xAA), make_msg(MsgType::M4, 2, 300, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].combo_type, ComboType::N1E4);
     }
@@ -746,7 +806,7 @@ mod tests {
         // M4 (RC=2, ts=300) paired with M3 (RC=2, ts=200) -> at least one N4E3 pair.
         // N3E4 also fires (same M3 as nonce, M4 as eapol, same RCs), so filter.
         let msgs = vec![make_msg(MsgType::M4, 2, 300, 0xAA), make_msg(MsgType::M3, 2, 200, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.iter().filter(|p| p.combo_type == ComboType::N4E3).count(), 1);
     }
 
@@ -755,7 +815,7 @@ mod tests {
         // M3 (RC=2, ts=200) paired with M4 (RC=2, ts=300) -> at least one N3E4 pair.
         // N4E3 also fires (M4 as nonce, M3 as eapol, same RCs), so filter.
         let msgs = vec![make_msg(MsgType::M3, 2, 200, 0xAA), make_msg(MsgType::M4, 2, 300, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.iter().filter(|p| p.combo_type == ComboType::N3E4).count(), 1);
     }
 
@@ -768,7 +828,7 @@ mod tests {
             make_msg(MsgType::M2, 1, 50, 0xB1),
             make_msg(MsgType::M2, 1, 60, 0xB2),
         ];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         // All four should be N1E2.
         assert_eq!(pairs.len(), 4);
         assert!(pairs.iter().all(|p| p.combo_type == ComboType::N1E2));
@@ -777,7 +837,7 @@ mod tests {
     #[test]
     fn generate_empty_messages() {
         // Empty slice -> no pairs.
-        let pairs = generate(ap(), sta(), &[], &default_config());
+        let (pairs, _) = generate(ap(), sta(), &[], &default_config());
         assert!(pairs.is_empty());
     }
 
@@ -798,7 +858,7 @@ mod tests {
             nc_dedup_enabled: false,
             nc_tolerance: 8,
         };
-        let pairs = generate(ap(), sta(), &msgs, &tight);
+        let (pairs, _) = generate(ap(), sta(), &msgs, &tight);
         // With rc_drift active and tolerance=8, the pair should be found with NC set.
         assert_eq!(pairs.len(), 1);
         assert_ne!(pairs[0].message_pair & FLAG_NC, 0, "FLAG_NC must be set for within-tolerance RC");
@@ -808,7 +868,7 @@ mod tests {
     fn generate_combo_type_in_message_pair() {
         // N1E2 -> combo discriminant = 0, so message_pair & 0x07 == 0.
         let msgs = vec![make_msg(MsgType::M1, 1, 0, 0xAA), make_msg(MsgType::M2, 1, 100, 0xBB)];
-        let pairs = generate(ap(), sta(), &msgs, &default_config());
+        let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].message_pair & 0x07, ComboType::N1E2 as u8);
     }

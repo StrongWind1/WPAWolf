@@ -65,7 +65,12 @@ pub fn process_beacon_or_probe_resp(
     // Extract SSID from IE id=0. [IEEE 802.11-2024] §9.4.2.3
     for ie in iter_ies(ies) {
         if ie.id == 0 {
-            // Beacon SSID quality counters (hidden/zeroed/malformed).
+            // SSID quality counters (hidden/zeroed/malformed), split per
+            // subtype: Beacons keep their three-way classification; Probe
+            // Responses get the unset/zeroed pair for hcxpcapngtool parity
+            // (a Probe Response answering a directed probe should never
+            // carry a wildcard SSID -- when it does, that is a capture
+            // quality signal worth surfacing).
             if mac_hdr.subtype == SUBTYPE_BEACON {
                 if ie.value.is_empty() {
                     stats.beacon_ssid_wildcard += 1;
@@ -74,6 +79,10 @@ pub fn process_beacon_or_probe_resp(
                 } else if ie.value.iter().all(|&b| b == 0) {
                     stats.beacon_ssid_zeroed += 1;
                 }
+            } else if ie.value.is_empty() {
+                stats.probe_resp_ssid_unset += 1;
+            } else if ie.value.len() <= 32 && ie.value.iter().all(|&b| b == 0) {
+                stats.probe_resp_ssid_zeroed += 1;
             }
             if !ie.value.is_empty() {
                 insert_essid(essid_map, mac_hdr.ap, ie.value, timestamp_us, stats, logger);

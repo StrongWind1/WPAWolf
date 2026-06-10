@@ -1,8 +1,9 @@
 //! Shared -- binary entry point and Phase 1-5 orchestrator. See ARCHITECTURE.md §3.
 //!
-//! Parses command-line arguments via `clap`, then runs the two-phase pipeline:
-//! Phase 1 collects all EAPOL messages and PMKIDs from every input file into in-memory
-//! stores; Phase 2 pairs messages and writes output files. See `ARCHITECTURE.md §3`.
+//! Parses command-line arguments via `clap`, then runs the collect-then-pair pipeline:
+//! Phases 1-3 collect all EAPOL messages and PMKIDs from every input file into the
+//! stores; Phase 4 pairs messages and writes output files; Phase 5 prints the summary.
+//! See `ARCHITECTURE.md §3`.
 //!
 //! Unfiltered by default: all 6 N#E# combinations, unlimited session window, no
 //! replay-counter check. Add output filter flags (`--rc-drift`, `--dedup-hash-combos`) to
@@ -157,7 +158,7 @@ struct Cli {
 
     /// Write structured processing log
     ///
-    /// Eleven log categories: malformed_frame, plcp_error, unknown_linktype, unknown_akm, essid_not_found_summary, capture_read_error, skipped_input, invalid_nonce, invalid_mic, invalid_pmkid, essid_control_bytes. Each line carries the rejected bytes in hex for forensic grep.
+    /// Twelve log categories: eight per-event (eapol_key_rejected, invalid_nonce, invalid_mic, invalid_pmkid, unknown_linktype, capture_read_error, skipped_input, essid_not_found_summary) carrying file=/frame= context and rejected bytes in hex for forensic grep, plus four aggregated end-of-run summaries (plcp_error, malformed_frame, essid_control_bytes, unknown_akm).
     #[arg(short = 'l', long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Auxiliary output", display_order = 17)]
     log: Option<std::path::PathBuf>,
 
@@ -225,7 +226,7 @@ struct Cli {
     // ---- Runtime ----
     /// Number of pairing threads [default: CPU count]
     ///
-    /// Phase 4 worker count. Groups are assigned via LPT scheduling. Use --threads=1 for reproducible single-threaded output.
+    /// Phase 4 worker count. Groups are paired via rayon work-stealing. Use --threads=1 for the serial path.
     #[arg(short = 't', long, value_name = "N", help_heading = "Runtime", display_order = 30)]
     threads: Option<u16>,
 
@@ -395,6 +396,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // --- Debug printer (created once; no-op when --debug is off) ---
     let debug = DebugPrinter::new(cli.debug);
 
+    // Wallclock anchors for the Phase 5 cost block. Phases 1-3 are one streaming
+    // pass over the input set; Phase 4 is the pairing + emit pass.
+    let run_start = std::time::Instant::now();
+
     // --- Initialise stores ---
     let mut message_store = MessageStore::new();
     let mut pmkid_store = PmkidStore::new();
@@ -412,14 +417,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut stats = Stats::new();
     let mut logger = Logger::new(cli.log.as_deref())?;
     let mut pending_eapol: Vec<PendingEapol> = Vec::new();
-    // Periodic stderr progress lines during Phase 1. On by default; `--quiet`
+    // Periodic stdout progress lines during Phase 1. On by default; `--quiet`
     // suppresses entirely. The closing stats banner is unaffected. See
     // `wpawolf::progress`.
     let mut progress = ProgressReporter::new(!cli.quiet);
 
     // Per-frame extraction toggles derived from the CLI output flags. See
     // `wpawolf::extract::ExtractConfig`. `scan_ies` is independent of `-W`:
-    // `--wordlist-scan-ies FILE` populates a dedicated `WordlistScanIesStore`,
+    // `--wordlist-scan FILE` populates a dedicated `WordlistScanIesStore`,
     // not the curated `-W` wordlist.
     let extract_cfg = ExtractConfig {
         populate_wordlist: cli.wordlist_output.is_some(),
@@ -523,6 +528,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // every input file so a directory walk can report a count + format /
         // endian / DLT distribution rather than only the last file's values.
         stats.input_file_count += 1;
+        stats.bytes_ingested += file_size;
         let meta = reader.file_metadata();
         // Save before meta fields are moved into stats HashMaps below.
         let file_fmt = meta.format.clone();
@@ -558,6 +564,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         }
                     }
                     // Timestamp range (epoch microseconds). Initialise first_us on the very first packet.
+                    // A zero timestamp is a capture-tool artifact (counted, frame still processed).
+                    if packet.timestamp_us == 0 {
+                        stats.packets_zeroed_timestamp += 1;
+                    }
                     if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
                         stats.timestamp_first_us = packet.timestamp_us;
                     }
@@ -576,6 +586,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
                     // Get the DLT for this interface.
                     let Some(dlt) = reader.link_type(packet.interface_id) else {
+                        stats.packets_unknown_linktype += 1;
                         logger.log_unknown_linktype(packet.interface_id);
                         continue;
                     };
@@ -588,7 +599,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                             2412..=2484 => stats.band_24ghz += 1,
                             5180..=5825 => stats.band_5ghz += 1,
                             5925..=7125 => stats.band_6ghz += 1,
-                            _ => {},
+                            _ => stats.band_other += 1,
                         }
                     }
 
@@ -634,8 +645,12 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         _ => continue, // unreachable: parse() returns one of the four types
                     }
 
-                    // Slice the frame body (past MAC header).
+                    // Slice the frame body (past MAC header). The header parsed
+                    // but the captured frame is shorter than its claimed header
+                    // length (snaplen truncation or corrupt length) -- the body,
+                    // and any EAPOL/IE it carried, is unrecoverable.
                     let Some(body) = frame_data.get(mac_hdr.body_offset..) else {
+                        stats.truncated_after_header += 1;
                         continue;
                     };
 
@@ -740,6 +755,19 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         progress.print_now(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
     }
 
+    // Packet-accounting invariant (STATS.md identity 1): every packet in
+    // `total_packets` reached exactly one terminal disposition in the loop above.
+    // A future silent `continue` that drops a packet without a counter, or a
+    // double-count, breaks this. The release banner surfaces it as a BUG row;
+    // here it hard-fails the test suite (debug builds) before it can ship.
+    debug_assert_eq!(
+        stats.packets_accounted(),
+        stats.total_packets,
+        "packet accounting broken (STATS.md identity 1): {} accounted vs {} total",
+        stats.packets_accounted(),
+        stats.total_packets
+    );
+
     // --- Phase 1.5: Resolve deferred WDS EAPOL frames ---
     // WDS relay frames had ambiguous direction during Phase 1. Now that essid_map is fully
     // populated, resolve them using essid_map lookup, ACK-based AP discovery, or flag fallback.
@@ -761,7 +789,28 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // ap_count() returns usize; u64 can represent every possible usize value on supported platforms.
     {
         stats.essid_count = essid_map.ap_count() as u64;
+        // "Changes" = distinct SSID variants per AP minus the initial one, maximum across APs.
+        stats.essid_changes_max = essid_map.max_ssid_variants().saturating_sub(1) as u64;
     }
+
+    // Echo of the resolved output-filter state for the Phase 4 banner, so a WIDE
+    // run and a --strict run are distinguishable from the banner alone.
+    stats.filters_active = {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = cli.eapoltimeout {
+            parts.push(format!("eapoltimeout={s}"));
+        }
+        if let Some(n) = cli.rc_drift {
+            parts.push(format!("rc-drift={n}"));
+        }
+        if cli.dedup_hash_combos {
+            parts.push("dedup-hash-combos".to_owned());
+        }
+        if cli.nc_dedup {
+            parts.push(format!("nc-dedup (tolerance {})", cli.nc_tolerance.unwrap_or(8)));
+        }
+        if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
+    };
 
     // Record output paths in stats so the Phase 4 banner can show configured vs not-configured.
     let path_str = |p: &Option<std::path::PathBuf>| p.as_ref().map_or_else(String::new, |p| p.display().to_string());
@@ -780,15 +829,22 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     stats.identity_list_path = path_str(&cli.identity_output);
     stats.username_list_path = path_str(&cli.username_output);
     stats.device_info_path = path_str(&cli.device_output);
+    stats.wordlist_scan_path = path_str(&cli.wordlist_scan);
 
     {
-        // 802.11be MLD canonicalization: if any Multi-Link Element was seen, rewrite all
-        // MessageStore and PmkidStore keys so link addresses collapse onto the MLD identity.
-        // When no MLE was observed, this is a no-op and byte-identical to pre-MLE behavior.
-        // [IEEE 802.11be] §9.4.2.321
+        // 802.11be MLD canonicalization: if any Multi-Link Element was seen, ADD an
+        // MLD-keyed copy of every handshake / PMKID / SSID whose link address maps to
+        // an MLD, keeping the original link-keyed form. A true multi-link handshake is
+        // crackable only under the MLD MAC; a single-link association to one BSSID of
+        // an MLD is crackable only under the link MAC -- so both are emitted (the same
+        // "emit every candidate" rule as the six N#E# combos). A destructive rewrite
+        // would silently drop single-link handshakes onto the MLD MAC, producing an
+        // uncrackable line (corpus-confirmed regression vs hcxpcapngtool). When no MLE
+        // was observed this is a no-op, byte-identical to pre-MLE behaviour.
+        // [IEEE 802.11be] §9.4.2.321, §35.3
         if !mld_store.is_empty() {
-            let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            stats.mld_groups_merged = merged;
+            let copied = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
+            stats.mld_groups_merged = copied;
             pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
             stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
         }
@@ -851,6 +907,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             debug.phase_start(4, "Emit");
         }
 
+        // Phases 1-3 (the streaming pass + WDS resolution) end here.
+        stats.wallclock_p13_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
         message_store.flush_disk_writer();
         pmkid_store.flush_disk_writer();
 
@@ -881,12 +940,21 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         &mut logger,
     )?;
 
+    // The finalize call above flushed every sink, so the Phase 4 wallclock ends
+    // here: run total minus the Phase 1-3 share measured before emit started.
+    stats.wallclock_p4_ms =
+        u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX).saturating_sub(stats.wallclock_p13_ms);
+
     // All usize -> u64: u64 subsumes usize on all supported platforms.
     {
-        stats.hashes_written = (output_stats.pmkids_written + output_stats.pairs_written) as u64;
-        stats.dedup_dropped = output_stats.dedup_dropped as u64;
-        // Total pairs attempted through dedup = written + dropped.
-        stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped) as u64;
+        stats.pmkids_written = output_stats.pmkids_written as u64;
+        stats.dedup_dropped_pairs = output_stats.dedup_dropped_pairs as u64;
+        stats.dedup_dropped_pmkids = output_stats.dedup_dropped_pmkids as u64;
+        stats.dedup_dropped = (output_stats.dedup_dropped_pairs + output_stats.dedup_dropped_pmkids) as u64;
+        stats.emit_dropped_unclassified_akm = output_stats.emit_dropped_unclassified_akm as u64;
+        stats.emit_dropped_ft_no_context = output_stats.emit_dropped_ft_no_context as u64;
+        // Total pairs attempted through dedup = written + pair-side drops.
+        stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped_pairs) as u64;
 
         // Per-combo and flag counters from the output pipeline.
         stats.pairs_written_n1e2 = output_stats.n1e2 as u64;
@@ -901,6 +969,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.nc_dedup_collapsed_lines = output_stats.nc_dedup_collapsed_lines;
         stats.nc_dedup_cluster_count = output_stats.nc_dedup_cluster_count;
         stats.nc_dedup_max_cluster_size = output_stats.nc_dedup_max_cluster_size;
+        stats.pairs_time_filtered = output_stats.pairs_time_filtered;
+        stats.pairs_rc_filtered = output_stats.pairs_rc_filtered;
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;
@@ -934,12 +1004,32 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // line via `HashType::from_akm_and_attack`; copy the resulting tally into
         // the global stats for `print_summary`.
         stats.hash_type_emitted = output_stats.hash_type_emitted;
+
+        // Auxiliary sink entry counts (filled by `finalize` from the writer returns).
+        stats.entries_essid_list = output_stats.entries_essid as u64;
+        stats.entries_probe_list = output_stats.entries_probe as u64;
+        stats.entries_wordlist = output_stats.entries_wordlist as u64;
+        stats.entries_wordlist_scan = output_stats.entries_wordlist_scan as u64;
+        stats.entries_identity_list = output_stats.entries_identity as u64;
+        stats.entries_username_list = output_stats.entries_username as u64;
+        stats.entries_device_info = output_stats.entries_device as u64;
+
+        // Extraction-side identity/username tallies -- printed in Phase 3 even
+        // when the -I / -U sinks are not configured.
+        stats.identities_extracted = identity_set.len() as u64;
+        stats.usernames_extracted = username_set.len() as u64;
     }
 
     logger.flush()?;
     message_store.cleanup_disk();
     pmkid_store.cleanup_disk();
     stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
+
+    // Phase 5 cost block: peak RSS high-water from the memory monitor and the
+    // sticky disk-mode flag (monitor or either store may have tripped it).
+    stats.peak_rss_mib = mem_monitor.peak_rss_bytes() / (1024 * 1024);
+    stats.disk_mode_engaged = mem_monitor.disk_mode() || message_store.disk_mode() || pmkid_store.disk_mode();
+
     stats.print_summary();
 
     // Optional `--mem-stats` block: per-store byte-count table for OOM triage.
@@ -996,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_alone_enables_all_five_bundled_filters() {
+    fn strict_alone_enables_all_four_bundled_filters() {
         let cli = parse_with_strict(&["--strict"]);
         assert!(cli.strict);
         assert_eq!(cli.eapoltimeout, Some(5), "--strict -> 5 s session window");
@@ -1030,7 +1120,7 @@ mod tests {
         let cli = parse_with_strict(&["--strict", "--eapoltimeout=60", "--rc-drift=2"]);
         assert_eq!(cli.eapoltimeout, Some(60));
         assert_eq!(cli.rc_drift, Some(2));
-        assert!(cli.dedup_hash_combos, "strict still enables the three boolean filters");
+        assert!(cli.dedup_hash_combos, "strict still enables the two boolean filters");
         assert!(cli.nc_dedup);
     }
 

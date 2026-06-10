@@ -89,6 +89,28 @@ fn corpus_root_exists() {
     assert!(root.exists(), "missing corpus root -- run wpawolf-fixturegen first");
 }
 
+/// Packet-accounting invariant (STATS.md reconciliation identity 1): every packet
+/// wpawolf reads reaches exactly one terminal disposition, so `total_packets`
+/// equals the sum of the eight per-packet disposition counters. The banner
+/// surfaces any break as a "packets unaccounted (BUG)" / "frames multi-counted
+/// (BUG)" row. This drives the whole generated corpus through the binary -- which
+/// exercises management/data/control/extension frames plus the link-error and
+/// unknown-DLT drop paths -- and asserts neither BUG row ever appears. The spawned
+/// binary is a debug build, so `run()`'s `debug_assert_eq!` is a second backstop:
+/// a break aborts the process and `run_wpawolf_capture_stats`'s success assert
+/// fails.
+#[test]
+fn packet_accounting_holds_across_generated_corpus() {
+    let root = Path::new(CORPUS_ROOT);
+    if !root.exists() {
+        return; // corpus not generated; `corpus_root_exists` covers that case
+    }
+    let banner = run_wpawolf_capture_stats(root);
+    assert!(banner.contains("packets total"), "no banner captured:\n{banner}");
+    assert!(!banner.contains("unaccounted (BUG"), "packet accounting broke:\n{banner}");
+    assert!(!banner.contains("multi-counted (BUG"), "frames were multi-counted:\n{banner}");
+}
+
 #[test]
 fn manifest_is_present() {
     let manifest = Path::new(CORPUS_ROOT).join("ground_truth/manifest.toml");

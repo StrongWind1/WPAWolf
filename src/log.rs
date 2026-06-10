@@ -4,7 +4,7 @@
 //! **triage tool**: it records events where wpawolf dropped, skipped, or rejected
 //! data for non-obvious reasons. Obvious high-volume rejections (null PMKID, null
 //! M4 nonce, out-of-sequence timestamps) are already counted in the stats banner
-//! on stderr and do NOT appear in the log.
+//! on stdout and do NOT appear in the log.
 //!
 //! ## Per-event categories (written immediately, low volume)
 //!
@@ -41,8 +41,8 @@
 //!
 //! ## Line format
 //!
-//! `[category] key=value key=value ...`. Per-event categories lead with
-//! `timestamp_us` when frame context is available. MAC addresses are bare
+//! `[category] key=value key=value ...`. Per-frame categories carry `file=` and
+//! `frame=` context from the stored Logger state. MAC addresses are bare
 //! lowercase hex (12 chars, no separators). Hex byte fields use `render_lower_hex`
 //! (contiguous lowercase, no separators).
 
