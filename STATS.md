@@ -32,7 +32,7 @@ These are the sums an operator can check against the banner. They hold by constr
 
 3. **Pair accounting (Phase 4).** `eapol_pairs_generated = eapol_pairs_useful + dedup_dropped_pairs`. The opt-in filters reduce the candidate set *before* generation, so `pairs_time_filtered` / `pairs_rc_filtered` are reported as their own lines, not folded into the gap. The per-combo `pairs_written_n*` children sum to `eapol_pairs_useful` (the written total), not to the generated total.
 
-4. **Hash accounting (Phase 5).** `hashes emitted (total)` is the sum over the 11-type table (`hash_type_emitted`). Its `EAPOL hash lines` / `PMKID hash lines` children are the odd-code / even-code halves of that same table, so they always sum to the total. PMKID material that did not reach a sink is accounted by `dedup_dropped_pmkids`, `emit_dropped_unclassified_akm`, `emit_dropped_ft_no_context`, and the Phase-3 garbage/`essid_unresolved` drops.
+4. **Hash accounting (Phase 5).** `hashes emitted (total)` is the sum of *written* hashes over the 11-type table (`hash_type_emitted`). Its `EAPOL hash lines` / `PMKID hash lines` children are the odd-code / even-code halves of that same table, so they always sum to the total. `hash_type_found` is the parallel *found* inventory, counted independently of which sinks were configured (so `found >= written` per type), and it drives `distinct hash types observed` and the `found but not written` row. PMKID material that did not reach a sink is accounted by `dedup_dropped_pmkids`, `emit_dropped_unclassified_akm`, `emit_dropped_ft_no_context`, and the Phase-3 garbage/`essid_unresolved` drops.
 
 ## Formatting contract
 
@@ -199,7 +199,7 @@ Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTU
 | Line | Field(s) | Source | Why we care | Disposition |
 |---|---|---|---|---|
 | output filters active | `filters_active` | FR-CLI-3 | Echoes the resolved filter state so a WIDE run and a `--strict` run are distinguishable from the banner alone. | informational |
-| per-hash-type lines emitted (11 rows) | `hash_type_emitted` | §2 | One row per 11-type code -- exactly what hashcat will see, type by type. | skeleton |
+| per-hash-type found / written (11 rows) | `hash_type_found`, `hash_type_emitted` | §2 | One row per 11-type code. **found** is the sink-independent inventory of what the capture contains; **written** is what reached a configured output file. They differ when a type has no configured accepting sink (e.g. the SHA-384 family with only `--22000-out` shows `14 / 0`). | skeleton |
 | EAPOL pairs generated (total, pre-dedup) | `eapol_pairs_generated` | §5 | Pairs the engine produced before global dedup (identity 3). | skeleton |
 | EAPOL pairs written (post-dedup) | `eapol_pairs_useful` | §5 | Pairs that survived dedup; the combo children sum to this. | skeleton |
 | per-combo written (N1E2 / N3E2 / N1E4 / N2E3 / N4E3 / N3E4) | `pairs_written_n1e2`, `pairs_written_n3e2`, `pairs_written_n1e4`, `pairs_written_n2e3`, `pairs_written_n4e3`, `pairs_written_n3e4` | §5 | Which N#E# combos produced output (AP-less N2E3/N4E3 included). | informational |
@@ -225,8 +225,9 @@ Executive summary an operator reads in five seconds.
 
 | Line | Field(s) | Source | Why we care | Disposition |
 |---|---|---|---|---|
-| hashes emitted (total) + EAPOL/PMKID split | `hash_type_emitted` (summed) | §2 | The headline yield, split by attack surface (identity 4). | skeleton |
-| distinct hash types observed | `hash_type_emitted` (nonzero count) | §2 | How many of the 11 types this capture produced. | skeleton |
+| hashes emitted (total) + EAPOL/PMKID split | `hash_type_emitted` (summed) | §2 | The headline yield written to files, split by attack surface (identity 4). | skeleton |
+| distinct hash types observed | `hash_type_found` (nonzero count) | §2 | How many of the 11 types the capture contains -- the inventory, independent of which sinks were configured. | skeleton |
+| hash types found but not written (add -o to capture) | `hash_type_found` vs `hash_type_emitted` | §2 | Types present in the capture that reached no output file; configure `-o` or the per-AKM sink to write them. | **dropped** (operator config) |
 | wallclock Phase 1-3 / Phase 4 / total | `wallclock_p13_ms`, `wallclock_p4_ms` | -- | Where the time went (streaming pass vs pairing+emit). | informational |
 | throughput (MiB/s) | `bytes_ingested`, `wallclock_p13_ms` | -- | Ingest rate against the FR-PERF-1 target. | informational |
 | peak RSS (MiB) | `peak_rss_mib` | -- | High-water memory (lower bound, sampled at the pressure-check cadence). | informational |

@@ -842,6 +842,14 @@ pub struct Stats {
     // currently share a hashcat mode.
     /// Hash lines written, keyed by `HashType`.
     pub hash_type_emitted: HashMap<HashType, u64>,
+    /// Unique crackable hashes *found* in the capture, keyed by `HashType`,
+    /// independent of which output sinks were configured. Equals
+    /// `hash_type_emitted` for any type with a configured accepting sink; for a
+    /// type with no configured sink (e.g. the SHA-384 family with only
+    /// `--22000-out`) `hash_type_emitted` is 0 but this still counts what the
+    /// capture contained. Drives the per-type "found / written" rows and the
+    /// "distinct hash types observed" count.
+    pub hash_type_found: HashMap<HashType, u64>,
 
     // --- Extraction-side identity tallies ---
     /// Unique EAP identity strings extracted (RFC 3748 §5.1). Printed in Phase 3
@@ -1466,16 +1474,19 @@ impl Stats {
         }
 
         // Per-hash-type breakdown -- one row per `HashType` variant from the
-        // 11-type classification in ARCHITECTURE.md §2. Anchors every emitted hash
-        // line to a single (AKM, attack surface) so the operator can read off
-        // exactly what hashcat will see, type code by type code.
-        if self.hash_type_emitted.values().any(|&n| n > 0) {
-            let _ = writeln!(out, "per-hash-type lines emitted (per ARCHITECTURE.md §2):");
+        // 11-type classification in ARCHITECTURE.md §2. The "found" column is the
+        // sink-independent inventory (what the capture contains); the "written"
+        // column is what reached a configured output file. They differ when a type
+        // has no configured accepting sink -- e.g. the SHA-384 family with only
+        // `--22000-out` shows "14 / 0": found in the capture, not written.
+        if self.hash_type_found.values().any(|&n| n > 0) {
+            let _ = writeln!(out, "per-hash-type found / written (per ARCHITECTURE.md §2):");
             for ht in HashType::all() {
-                let n = self.hash_type_emitted.get(&ht).copied().unwrap_or(0);
-                if n > 0 {
+                let found = self.hash_type_found.get(&ht).copied().unwrap_or(0);
+                if found > 0 {
+                    let written = self.hash_type_emitted.get(&ht).copied().unwrap_or(0);
                     let label = format!("  {:>2}. {}", ht.type_code(), ht.name());
-                    stat!(label, n);
+                    stat!(label, format!("{found} / {written}"));
                 }
             }
         }
@@ -1595,24 +1606,32 @@ impl Stats {
         // ======================================================================
         section!(5, "Report");
 
-        // Total hashes = sum of per-`HashType` counts (counted once per logical hash
-        // regardless of how many sinks it fanned out to). The EAPOL/PMKID children
-        // come from the same table -- odd type codes are EAPOL attacks, even codes
-        // are PMKID attacks per the ARCHITECTURE.md §2 encoding rule -- so the two
-        // children always sum to the total. Distinct types observed = number of
-        // `HashType` rows whose counter is non-zero.
+        // "emitted" = written to a configured sink; the EAPOL/PMKID children split
+        // it by odd/even type code per the ARCHITECTURE.md §2 encoding rule, so they
+        // always sum to the total. "found" = the sink-independent inventory of what
+        // the capture contained, so it can exceed "emitted" when a type had no
+        // configured accepting sink. "distinct hash types observed" counts the
+        // inventory (found), not just what was written.
         let total_hashes: u64 = HashType::all().map(|ht| self.hash_type_emitted.get(&ht).copied().unwrap_or(0)).sum();
         let eapol_lines: u64 = HashType::all()
             .filter(|ht| ht.type_code() % 2 == 1)
             .map(|ht| self.hash_type_emitted.get(&ht).copied().unwrap_or(0))
             .sum();
         let pmkid_lines: u64 = total_hashes - eapol_lines;
-        let active_types =
-            HashType::all().filter(|ht| self.hash_type_emitted.get(ht).copied().unwrap_or(0) > 0).count();
+        let found_types = HashType::all().filter(|ht| self.hash_type_found.get(ht).copied().unwrap_or(0) > 0).count();
+        // Types present in the capture but not written anywhere -- the operator
+        // can add `-o` (or the matching per-AKM sink) to capture them.
+        let found_not_written = HashType::all()
+            .filter(|ht| {
+                self.hash_type_found.get(ht).copied().unwrap_or(0) > 0
+                    && self.hash_type_emitted.get(ht).copied().unwrap_or(0) == 0
+            })
+            .count() as u64;
         stat!("hashes emitted (total)", total_hashes);
         nz!("  EAPOL hash lines", eapol_lines);
         nz!("  PMKID hash lines", pmkid_lines);
-        stat!("distinct hash types observed", active_types);
+        stat!("distinct hash types observed", found_types);
+        nz!("hash types found but not written (add -o to capture)", found_not_written);
 
         // Run cost. Wallclock is split at the Phase 3 / Phase 4 boundary (the
         // streaming pass vs the pairing + emit pass); throughput is file bytes
@@ -2187,10 +2206,15 @@ mod tests {
         s.pmkid_osen = 1;
         s.pmkid_wpa2_psk = 1;
         s.pmkid_ft_psk = 1;
-        // Phase 4.
+        // Phase 4. Every type is found; one type is left written=0 so the
+        // per-type "found / written" rows and the "found but not written" row
+        // both render for the label-width check.
         s.filters_active = "eapoltimeout=5, rc-drift=8, dedup-hash-combos, nc-dedup (tolerance 8)".to_owned();
         for ht in HashType::all() {
-            *s.hash_type_emitted.entry(ht).or_insert(0) += 1;
+            *s.hash_type_found.entry(ht).or_insert(0) += 1;
+            if ht != HashType::FtPskSha384Eapol {
+                *s.hash_type_emitted.entry(ht).or_insert(0) += 1;
+            }
         }
         s.eapol_pairs_generated = 8;
         s.eapol_pairs_useful = 6;

@@ -1002,8 +1002,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // Per-hash-type breakdown -- one bucket per row of the 11-type table in
         // `ARCHITECTURE.md §2`. The output pipeline classifies each emitted
         // line via `HashType::from_akm_and_attack`; copy the resulting tally into
-        // the global stats for `print_summary`.
+        // the global stats for `print_summary`. `hash_type_found` is the
+        // sink-independent inventory; `hash_type_emitted` is what reached a file.
         stats.hash_type_emitted = output_stats.hash_type_emitted;
+        stats.hash_type_found = output_stats.hash_type_found;
 
         // Auxiliary sink entry counts (filled by `finalize` from the writer returns).
         stats.entries_essid_list = output_stats.entries_essid as u64;

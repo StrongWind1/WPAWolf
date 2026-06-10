@@ -193,6 +193,15 @@ pub struct OutputStats {
     /// `run_output` returns.
     pub hash_type_emitted: HashMap<HashType, u64>,
 
+    /// Unique crackable hashes *found* in the capture, keyed by `HashType`,
+    /// counted independently of which output sinks are configured. A hash whose
+    /// only candidate sinks are unconfigured (e.g. the SHA-384 family with just
+    /// `--22000-out`) is absent from `hash_type_emitted` but still counted here,
+    /// so the banner reports the full 11-type inventory of the capture's content.
+    /// Deduped via `found_dedup` in memory mode; pre-dedup (write-through) in
+    /// disk mode, matching `hash_type_emitted`.
+    pub hash_type_found: HashMap<HashType, u64>,
+
     /// Hash lines emitted with an empty SSID because `essid_map` had no entry for
     /// the AP. Surfaces the residual hidden-SSID gap after Beacon, Probe Response,
     /// `AssocReq` / `ReassocReq`, directed Probe Request, and MLD canonicalization
@@ -564,6 +573,11 @@ pub struct OutputContext {
     dedup: PerSinkDedup,
     sinks: HashSinks,
     disk_dedup: Option<disk_dedup::DiskDedup>,
+    /// Sink-independent global dedup set used only to count `hash_type_found`:
+    /// every classified hash is fingerprinted here so the 11-type inventory
+    /// reflects what the capture contains, not just what reached a configured
+    /// sink. Unused in disk mode (found falls back to write-through counting).
+    found_dedup: dedup::DedupSet,
     /// APs whose hash lines we declined to emit because no ESSID was ever
     /// observed for them. Such lines are not crackable (hashcat needs the
     /// ESSID to derive the PMK), so they go to `--log` only -- nothing
@@ -599,6 +613,7 @@ impl OutputContext {
             dedup: PerSinkDedup::new(),
             sinks: HashSinks::open(paths),
             disk_dedup: None,
+            found_dedup: dedup::DedupSet::new(),
             unresolved_drops: HashMap::new(),
             timestamp_ranges: HashMap::new(),
         }
@@ -708,6 +723,7 @@ impl OutputContext {
         let dedup = &mut self.dedup;
         let sinks = &mut self.sinks;
         let disk_dedup = &mut self.disk_dedup;
+        let found_dedup = &mut self.found_dedup;
         let unresolved_drops = &mut self.unresolved_drops;
 
         // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
@@ -751,6 +767,12 @@ impl OutputContext {
                 }
 
                 for essid in ssids {
+                    // Inventory count (sink-independent): tally this type as found
+                    // whether or not a sink is configured to accept it. Deduped in
+                    // memory; counted write-through in disk mode (like `emitted`).
+                    if disk_dedup.is_some() || found_dedup.check_pmkid(&entry, essid) {
+                        *stats.hash_type_found.entry(ht).or_insert(0) += 1;
+                    }
                     let item = FanItem::Pmkid { entry: &entry, ft: ft_ctx, essid };
                     let written = fan_out(sinks, dedup, disk_dedup, stats, ht, item)?;
                     if written {
@@ -776,13 +798,21 @@ impl OutputContext {
             sinks: &'a mut HashSinks,
             dedup: &'a mut PerSinkDedup,
             disk_dedup: &'a mut Option<disk_dedup::DiskDedup>,
+            found_dedup: &'a mut dedup::DedupSet,
             stats: &'a mut OutputStats,
             unresolved_drops: &'a mut HashMap<crate::types::MacAddr, u64>,
             first_error: Option<crate::types::Error>,
         }
 
-        let emit_state =
-            std::sync::Mutex::new(EmitState { sinks, dedup, disk_dedup, stats, unresolved_drops, first_error: None });
+        let emit_state = std::sync::Mutex::new(EmitState {
+            sinks,
+            dedup,
+            disk_dedup,
+            found_dedup,
+            stats,
+            unresolved_drops,
+            first_error: None,
+        });
         let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
 
         let nc_stats =
@@ -798,8 +828,15 @@ impl OutputContext {
                 }
 
                 if any_sink {
-                    let EmitState { sinks: s, dedup: d, disk_dedup: dd, stats: st, unresolved_drops: ud, first_error } =
-                        &mut *guard;
+                    let EmitState {
+                        sinks: s,
+                        dedup: d,
+                        disk_dedup: dd,
+                        found_dedup: fd,
+                        stats: st,
+                        unresolved_drops: ud,
+                        first_error,
+                    } = &mut *guard;
                     for pair in &pairs {
                         let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
                             st.emit_dropped_unclassified_akm += 1;
@@ -827,6 +864,10 @@ impl OutputContext {
                         }
 
                         for essid in ssids {
+                            // Inventory count (sink-independent), as in Pipeline 1.
+                            if dd.is_some() || fd.check_eapol(pair, essid) {
+                                *st.hash_type_found.entry(ht).or_insert(0) += 1;
+                            }
                             let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
                             match fan_out(s, d, dd, st, ht, item) {
                                 Ok(written) => {

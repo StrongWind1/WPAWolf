@@ -111,6 +111,39 @@ fn packet_accounting_holds_across_generated_corpus() {
     assert!(!banner.contains("multi-counted (BUG"), "frames were multi-counted:\n{banner}");
 }
 
+/// The per-hash-type breakdown reports what the capture CONTAINS, not just what
+/// reached an output file. The SHA-384 family (types 8-11) has no legacy sink, so
+/// a run with only `--22000-out` writes none of it -- but the banner must still
+/// report those types as *found* (so an operator knows the capture holds crackable
+/// material their flags did not write). Drives a SHA-384 fixture with only
+/// `--22000-out` and asserts the type appears in the found/written block with
+/// written = 0, that "distinct hash types observed" still counts it, and that the
+/// "found but not written" alert fires.
+#[test]
+fn sha384_types_reported_as_found_without_a_matching_sink() {
+    let fixture = Path::new(CORPUS_ROOT).join("11_types/type08_psksha384_pmkid.pcap");
+    if !fixture.exists() {
+        return; // corpus not generated
+    }
+    let bin = binary_path();
+    let out22000 = std::env::temp_dir().join(format!("wpawolf-sha384-{}-{}.22000", std::process::id(), nanos_unique()));
+    let _ = fs::remove_file(&out22000);
+    // ONLY --22000-out -- no -o, no --psk-sha384-out -- so SHA-384 has no sink.
+    let output = Command::new(&bin).arg("--22000-out").arg(&out22000).arg(&fixture).output().expect("spawn wpawolf");
+    assert!(output.status.success(), "wpawolf failed on the SHA-384 fixture");
+    let banner = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    // The SHA-384 PMKID type is found in the capture even though no sink wrote it.
+    assert!(banner.contains("PSK-SHA384-PMKID"), "SHA-384 type missing from found block:\n{banner}");
+    // The inventory counts it; the operator is told to add -o to capture it.
+    assert!(banner.contains("hash types found but not written"), "missing found-not-written alert:\n{banner}");
+    assert!(banner.contains("distinct hash types observed"), "missing distinct-types row:\n{banner}");
+    // Nothing was written to the only configured sink (lazy: file may not exist).
+    let written = fs::read_to_string(&out22000).map_or(0, |s| s.lines().count());
+    assert_eq!(written, 0, "SHA-384 must not reach the --22000-out sink");
+    let _ = fs::remove_file(&out22000);
+}
+
 #[test]
 fn manifest_is_present() {
     let manifest = Path::new(CORPUS_ROOT).join("ground_truth/manifest.toml");
