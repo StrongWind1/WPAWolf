@@ -229,33 +229,50 @@ impl PmkidStore {
         self.disk_writer = None;
     }
 
-    /// Rewrites every group key and embedded AP/STA addresses using `canonicalize`.
+    /// Adds an MLD-keyed copy of every PMKID whose AP/STA canonicalizes to a
+    /// different address, **keeping the original link-keyed entry**.
     ///
-    /// Groups that collide under the canonical key are merged; per-pair dedup is re-applied
-    /// so that an identical PMKID value observed under two link addresses is stored once.
-    /// Callers typically pass an `MldStore::canonicalize` closure. Bit-identical behavior
-    /// for non-11be captures: when no mapping changes any address, the store is unchanged.
+    /// Additive, not destructive, for the same reason as
+    /// [`MessageStore::canonicalize_pairs`](crate::store::messages::MessageStore::canonicalize_pairs):
+    /// a single-link PMKID is computed under the link MAC, a multi-link one under the
+    /// MLD MAC, and only one is crackable -- so both are stored. Per-pair dedup is
+    /// applied so an identical PMKID seen under two link addresses is not duplicated
+    /// within a group. Bit-identical for non-11be captures (no address changes).
+    /// Callers typically pass an `MldStore::canonicalize` closure.
     pub fn canonicalize_pairs<F>(&mut self, mut canonicalize: F)
     where
         F: FnMut(MacAddr) -> MacAddr,
     {
         if self.disk_mode {
-            let old_index = std::mem::take(&mut self.disk_index);
-            for (pair, refs) in old_index {
-                let canon_ap = canonicalize(pair.ap);
-                let canon_sta = canonicalize(pair.sta);
-                let canon_pair = MacPair::new(canon_ap, canon_sta);
+            let mut additions: Vec<(MacPair, Vec<PmkidRef>)> = Vec::new();
+            for (pair, refs) in &self.disk_index {
+                let canon_pair = MacPair::new(canonicalize(pair.ap), canonicalize(pair.sta));
+                if canon_pair != *pair {
+                    additions.push((canon_pair, refs.clone()));
+                }
+            }
+            for (canon_pair, refs) in additions {
                 self.disk_index.entry(canon_pair).or_default().extend(refs);
             }
             return;
         }
-        let old = std::mem::take(&mut self.groups);
-        for (_pair, entries) in old {
-            for mut entry in entries {
-                entry.ap = canonicalize(entry.ap);
-                entry.sta = canonicalize(entry.sta);
-                self.add(entry);
+        // Collect MLD-keyed copies, then re-insert them (dedup applies). The
+        // originals stay in place.
+        let mut additions: Vec<PmkidEntry> = Vec::new();
+        for entries in self.groups.values() {
+            for entry in entries {
+                let canon_ap = canonicalize(entry.ap);
+                let canon_sta = canonicalize(entry.sta);
+                if canon_ap != entry.ap || canon_sta != entry.sta {
+                    let mut copy = entry.clone();
+                    copy.ap = canon_ap;
+                    copy.sta = canon_sta;
+                    additions.push(copy);
+                }
             }
+        }
+        for entry in additions {
+            self.add(entry);
         }
     }
 
@@ -425,19 +442,22 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_pairs_merges_duplicate_pmkid() {
+    fn canonicalize_pairs_adds_mld_copy_keeping_link_entries() {
         let mut store = PmkidStore::new();
         store.add(make_entry(0xAA, 0x11, realistic_pmkid(0x99)));
         store.add(make_entry(0xAA, 0x22, realistic_pmkid(0x99)));
         assert_eq!(store.total_count(), 2, "before canonicalization: distinct pairs");
+        let mld = MacAddr::from_bytes([0x55; 6]);
         store.canonicalize_pairs(|m| {
-            if m == MacAddr::from_bytes([0x11; 6]) || m == MacAddr::from_bytes([0x22; 6]) {
-                MacAddr::from_bytes([0x55; 6])
-            } else {
-                m
-            }
+            if m == MacAddr::from_bytes([0x11; 6]) || m == MacAddr::from_bytes([0x22; 6]) { mld } else { m }
         });
-        assert_eq!(store.total_count(), 1, "merged pair must dedupe on PMKID value");
+        // Additive: both link entries kept (single-link crackability) plus ONE
+        // MLD-keyed copy (the two identical PMKIDs dedupe within the MLD group).
+        assert_eq!(store.total_count(), 3, "two link entries kept + one deduped MLD copy");
+        let mld_entries = store.iter().filter(|e| e.sta == mld).count();
+        assert_eq!(mld_entries, 1, "MLD pair holds one deduped PMKID");
+        let link_entries = store.iter().filter(|e| e.sta != mld).count();
+        assert_eq!(link_entries, 2, "both original link-keyed PMKIDs survive");
     }
 
     #[test]

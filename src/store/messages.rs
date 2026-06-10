@@ -347,15 +347,32 @@ impl MessageStore {
         size_of::<Self>() + groups_cap_bytes + msgs_bytes
     }
 
-    /// Rewrites every group key and embedded `(ap, sta)` addresses using `canonicalize`,
-    /// then merges groups that collide under the canonical key.
+    /// Adds an MLD-keyed copy of every group whose `(ap, sta)` canonicalizes to a
+    /// different pair, **keeping the original link-keyed group**.
     ///
     /// Callers typically pass a closure that looks up the MLD MAC in an `MldStore`; any
     /// link address unknown to the store is returned unchanged. Groups whose canonical
-    /// keys are already unique (the non-11be case) are preserved bit-identically.
+    /// keys are unchanged (the non-11be case) are left bit-identical.
     ///
-    /// Returns the number of `(AP, STA)` groups that were merged into another group as
-    /// a result of canonicalization -- zero when no MLD mapping changed any key.
+    /// Additive, not destructive: a single-link association to one BSSID of an MLD
+    /// derives its PTK under the **link** MAC, so the link-keyed line is the crackable
+    /// one and must survive; a true multi-link association derives the PTK under the
+    /// **MLD** MAC, so the MLD-keyed copy is the crackable one. Storing both guarantees
+    /// the crackable line is always emitted -- the same "emit every candidate" rule as
+    /// the six N#E# combos. A destructive rename (the prior behaviour) silently dropped
+    /// single-link handshakes on MLD-capable APs onto the MLD MAC, producing only an
+    /// uncrackable line. [IEEE 802.11be] §35.3
+    ///
+    /// Dedup is unaffected: a link-keyed line and its MLD-keyed copy carry different AP
+    /// MACs, so they are genuinely distinct hash lines (different output fingerprint),
+    /// not duplicates -- emitting both is the point. Any true duplicate that the copy
+    /// could create (e.g. a real MLD group that already held the same message) is still
+    /// collapsed by the per-group inline dedup in `pair::generate` and the global
+    /// `SipHash` set in `output`. Verified `sort | uniq -d` empty across a multi-vendor
+    /// corpus after this change (FR-CORRECT-2).
+    ///
+    /// Returns the number of groups that received a canonical copy (0 when no MLD
+    /// mapping changed any key).
     pub fn canonicalize_pairs<F>(&mut self, mut canonicalize: F) -> u64
     where
         F: FnMut(MacAddr) -> MacAddr,
@@ -363,35 +380,42 @@ impl MessageStore {
         if self.disk_mode {
             return self.canonicalize_pairs_disk(&mut canonicalize);
         }
-        let old = std::mem::take(&mut self.groups);
-        let old_group_count = old.len();
-        let old_total = self.total_count;
-        self.total_count = 0;
-        for (pair, mut msgs) in old {
-            let canon_ap = canonicalize(pair.ap);
-            let canon_sta = canonicalize(pair.sta);
-            let canon_pair = MacPair::new(canon_ap, canon_sta);
+        // Collect the MLD-keyed copies first so we do not mutate `groups` while
+        // iterating it. Only groups whose canonical key differs get a copy.
+        let mut additions: Vec<(MacPair, Vec<EapolMessage>)> = Vec::new();
+        for (pair, msgs) in &self.groups {
+            let canon_pair = MacPair::new(canonicalize(pair.ap), canonicalize(pair.sta));
+            if canon_pair != *pair {
+                additions.push((canon_pair, msgs.clone()));
+            }
+        }
+        let canonicalized = additions.len() as u64;
+        for (canon_pair, mut msgs) in additions {
             self.total_count += msgs.len();
             self.groups.entry(canon_pair).or_default().append(&mut msgs);
         }
-        debug_assert_eq!(self.total_count, old_total, "canonicalization must not drop messages");
-        (old_group_count as u64).saturating_sub(self.groups.len() as u64)
+        canonicalized
     }
 
-    /// Disk-mode canonicalization: rewrite index keys without loading message data.
+    /// Disk-mode canonicalization: add MLD-keyed index entries without loading
+    /// message data, keeping the original link-keyed entries. The copied refs point
+    /// at the same on-disk records, so both keys reconstruct the same messages.
     fn canonicalize_pairs_disk<F>(&mut self, canonicalize: &mut F) -> u64
     where
         F: FnMut(MacAddr) -> MacAddr,
     {
-        let old_index = std::mem::take(&mut self.disk_index);
-        let old_group_count = old_index.len();
-        for (pair, refs) in old_index {
-            let canon_ap = canonicalize(pair.ap);
-            let canon_sta = canonicalize(pair.sta);
-            let canon_pair = MacPair::new(canon_ap, canon_sta);
+        let mut additions: Vec<(MacPair, Vec<MessageRef>)> = Vec::new();
+        for (pair, refs) in &self.disk_index {
+            let canon_pair = MacPair::new(canonicalize(pair.ap), canonicalize(pair.sta));
+            if canon_pair != *pair {
+                additions.push((canon_pair, refs.clone()));
+            }
+        }
+        let canonicalized = additions.len() as u64;
+        for (canon_pair, refs) in additions {
             self.disk_index.entry(canon_pair).or_default().extend(refs);
         }
-        (old_group_count as u64).saturating_sub(self.disk_index.len() as u64)
+        canonicalized
     }
 
     /// Folds the earliest and latest message timestamps for every AP MAC in
@@ -766,9 +790,12 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_pairs_merges_via_mld() {
+    fn canonicalize_pairs_adds_mld_copy_and_keeps_link_groups() {
         // Two distinct (AP, STA) groups whose STA addresses both canonicalize to the
-        // same MLD MAC -> they should merge into a single group after canonicalization.
+        // same MLD MAC. Additive canonicalization keeps both link-keyed groups AND
+        // adds an MLD-keyed group that gathers both link copies -- so a true
+        // multi-link handshake can pair across links (the MLD group has M1 + M3)
+        // while a single-link handshake's link-keyed line still survives.
         let mut store = MessageStore::new();
         let ap = mac(0xAA);
         let link_a = mac(0x11);
@@ -777,12 +804,17 @@ mod tests {
         store.add(ap, link_a, msg_with_nonce(MsgType::M1, [0x01; 32]));
         store.add(ap, link_b, msg_with_nonce(MsgType::M3, [0x01; 32]));
         assert_eq!(store.group_count(), 2);
-        assert_eq!(store.total_count(), 2);
 
-        let merged = store.canonicalize_pairs(|m| if m == link_a || m == link_b { mld } else { m });
-        assert_eq!(store.group_count(), 1, "two links sharing one MLD must merge");
-        assert_eq!(store.total_count(), 2, "messages preserved across merge");
-        assert_eq!(merged, 1, "one group was merged into another");
+        let canonicalized = store.canonicalize_pairs(|m| if m == link_a || m == link_b { mld } else { m });
+        assert_eq!(canonicalized, 2, "both link groups received an MLD copy");
+        assert_eq!(store.group_count(), 3, "two link groups kept + one MLD group added");
+
+        // Originals survive (single-link crackability).
+        let group_lens: HashMap<MacPair, usize> = store.groups().map(|(p, m)| (*p, m.len())).collect();
+        assert_eq!(group_lens.get(&MacPair::new(ap, link_a)).copied(), Some(1), "link_a group kept");
+        assert_eq!(group_lens.get(&MacPair::new(ap, link_b)).copied(), Some(1), "link_b group kept");
+        // MLD group gathers both copies, so it can pair M1 with M3 across links.
+        assert_eq!(group_lens.get(&MacPair::new(ap, mld)).copied(), Some(2), "MLD group has both messages");
     }
 
     #[test]
