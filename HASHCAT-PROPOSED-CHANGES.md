@@ -20,7 +20,7 @@ Phase 1 is shippable without any hashcat-core patch. Phase 2 unlocks the maximum
 1. **One module per input semantic.** Mode 22002 takes a passphrase and runs PBKDF2; mode 22003 takes a 64-hex PMK and skips PBKDF2. The on-disk hash format and the post-PMK math are identical between them. This mirrors the relationship between today's 22000 and 22001.
 2. **Type-driven dispatch.** The 2-digit prefix code after `WPA*` is the SOLE routing axis. The loader reads the type, picks the kernel, sets the MIC width, and decides whether to expect FT extras. No `keyver` byte inspection, no AKM inference, no pair-of-fields correlation.
 3. **PBKDF2 reuse across all 11 types per ESSID.** A hash file containing every PSK family the operator's capture produced runs PBKDF2 *once per (ESSID, work-item)* and dispatches per-type post-PMK math from the cached PMK in `tmps[].out`. PBKDF2 is the dominant cost (4096 SHA-1 iterations); the per-type math is ~0.1% of that on mode 22002.
-4. **Single-pass cracking of mixed-type files.** The natural input is a `wpawolf -o` per-AKM file containing every hash extracted from one capture. One `hashcat -m 22002 all.taxo wordlist.txt` cracks every variant. No per-type hash-file splitting, no per-mode re-runs.
+4. **Single-pass cracking of mixed-type files.** The natural input is a `wpawolf -o` per-AKM file containing every hash extracted from one capture. One `hashcat -m 22002 all.hash wordlist.txt` cracks every variant. No per-type hash-file splitting, no per-mode re-runs.
 5. **Greenfield format consumption.** New format only. The new modules never see a legacy line. This eliminates entire categories of loader complexity (the `keyver` peek, the AKM-from-`WPA*01*` guessing problem, the HCCAPX binary path).
 6. **Two-phase implementation.** Phase 1 is a self-contained ship target requiring no hashcat-core changes. Phase 2 is an independently reviewable hashcat-core patch plus a kernel-layout refactor. Operators see no CLI or hash-format change between phases.
 
@@ -199,8 +199,8 @@ The branch is a single `switch` at the top of the kernel body. Inside each case 
 
 Inside one wavefront, GPU lanes that take different `switch` arms run serialised. Realistic mix:
 
-- Operator runs `wpawolf -o all.taxo` and feeds it to `hashcat -m 22002`.
-- `all.taxo` carries one `WPA*<type>*` line per detected handshake; one capture often has many (PMKID + 3 EAPOL pair combos per session).
+- Operator runs `wpawolf -o all.hash` and feeds it to `hashcat -m 22002`.
+- `all.hash` carries one `WPA*<type>*` line per detected handshake; one capture often has many (PMKID + 3 EAPOL pair combos per session).
 - Within a single salt (ESSID), every type the capture produced shares the same PBKDF2 output; the host buckets digests by salt before launching aux kernels.
 - The host launches `m22002_aux2` once per (salt, work-item-batch) with all type-4 + type-5 digests for that salt visible. A wavefront iterating digest_pos sees mixed type 4 / type 5 lanes -> ~2x divergence cost on the post-PMK math (cheap relative to PBKDF2 on mode 22002, but visible on mode 22003).
 
@@ -375,8 +375,8 @@ The migration from Phase 1 to Phase 2 is invisible to operators: same mode numbe
 A test fixture covers all eleven types. For each:
 
 ```
-hashcat -m 22002 fixtures/typeNN.taxo wordlist.txt
-hashcat -m 22003 fixtures/typeNN.taxo pmk_list.txt
+hashcat -m 22002 fixtures/typeNN.hash wordlist.txt
+hashcat -m 22003 fixtures/typeNN.hash pmk_list.txt
 # expected: cracks the fixture password / matches the fixture PMK
 ```
 

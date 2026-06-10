@@ -9,7 +9,7 @@ Fill in each section below. Delete any that are not applicable.
 
 ## Related requirement / task
 
-<!-- e.g. FR-PARSE-3. Link the ARCHITECTURE.md section the change relates to. -->
+<!-- e.g. FR-80211-3. Link the ARCHITECTURE.md section the change relates to. -->
 
 ## Changes
 
@@ -25,8 +25,8 @@ Fill in each section below. Delete any that are not applicable.
 ## Dependency changes
 
 <!-- If this PR adds a crate dependency, justify it against the rejected-crate
-policy in CONTRIBUTING.md (`flate2` and `clap` are the entire runtime budget).
-Delete this section otherwise. -->
+policy in CONTRIBUTING.md (`flate2`, `crc32fast`, `clap`, `rayon`, and `sysinfo`
+are the entire runtime budget). Delete this section otherwise. -->
 
 ## Notes for reviewer
 

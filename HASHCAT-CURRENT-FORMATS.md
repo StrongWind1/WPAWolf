@@ -232,7 +232,7 @@ Hashcat's mode-22000 PMKID parser does not consume this byte (it reads the `***`
 
 ## §7  How the 11 wpawolf hash types map onto the four legacy prefixes
 
-`wpawolf` classifies every PSK-crackable hash into one of eleven types (see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the full classification). When the legacy sinks (`--22000-out`, `--37100-out`) are configured, each row is rewritten with a legacy prefix; this table shows what comes out and how hashcat handles it.
+`wpawolf` classifies every PSK-crackable hash into one of eleven types (see [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the full classification). When the legacy sinks (`--22000-out`, `--37100-out`) are configured, each SHA-1 / SHA-256-family row is rewritten with a legacy prefix; the SHA-384 family is suppressed from the legacy sinks entirely (`legacy_sink_for` returns no sink) because its 24 B MIC would only produce `Token length exception` parse errors at hashcat startup. This table shows what comes out and how hashcat handles it.
 
 | 11-type row             | Legacy prefix      | Legacy sink     | Hashcat reads via | Cracks today?      |
 |-------------------------|--------------------|-----------------|-------------------|--------------------|
@@ -243,12 +243,12 @@ Hashcat's mode-22000 PMKID parser does not consume this byte (it reads the `***`
 | PSK-SHA256-EAPOL        | `WPA*02*`          | `--22000-out`   | `keyver=3`        | yes (m22000_aux3)  |
 | FT-PSK-PMKID            | `WPA*03*`          | `--37100-out`   | direct prefix     | yes (m37100 type=3)|
 | FT-PSK-EAPOL            | `WPA*04*`          | `--37100-out`   | `keyver=3`        | partial (m37100 type=4) -- N2E3 / N4E3 APLESS combos do not crack, see §8.1 |
-| PSK-SHA384-PMKID        | `WPA*01*`          | `--22000-out`   | best-effort       | **no** -- kernel runs HMAC-SHA1, line is HMAC-SHA384 |
-| PSK-SHA384-EAPOL        | `WPA*02*`          | `--22000-out`   | `keyver=0`        | **no** -- 24 B MIC truncated to 16 B; module rejects keyver=0 |
-| FT-PSK-SHA384-PMKID     | `WPA*03*`          | `--37100-out`   | best-effort       | **no** -- kernel runs SHA-256 FT chain, line is SHA-384 |
-| FT-PSK-SHA384-EAPOL     | `WPA*04*`          | `--37100-out`   | `keyver=0`        | **no** -- 24 B MIC truncated; module rejects keyver=0 |
+| PSK-SHA384-PMKID        | -- (suppressed)    | none -- `--psk-sha384-out` / `-o` only | n/a | **no** -- HMAC-SHA384 PMKID has no kernel; line never written to a legacy sink |
+| PSK-SHA384-EAPOL        | -- (suppressed)    | none -- `--psk-sha384-out` / `-o` only | n/a | **no** -- 24 B MIC does not fit the 16 B field; loader would reject keyver=0 |
+| FT-PSK-SHA384-PMKID     | -- (suppressed)    | none -- `--ft-psk-sha384-out` / `-o` only | n/a | **no** -- needs FT-KDF-SHA-384 chain; line never written to a legacy sink |
+| FT-PSK-SHA384-EAPOL     | -- (suppressed)    | none -- `--ft-psk-sha384-out` / `-o` only | n/a | **no** -- SHA-384 24 B MIC + FT chain, both unsupported |
 
-Six of eleven rows route cleanly through the legacy scheme today. One row misroutes silently inside the kernel (PSK-SHA256-PMKID -- the line is well-formed but the cracker checks the wrong primitive). Four rows have no usable legacy path at all -- the SHA-384 family's 24 B MIC does not fit the 16 B `<mic>` field, and the module rejects `keyver=0` even before reaching the kernel.
+Six of eleven rows route cleanly through the legacy scheme today. One row misroutes silently inside the kernel (PSK-SHA256-PMKID -- the line is well-formed but the cracker checks the wrong primitive). Four rows have no usable legacy path at all -- the SHA-384 family's 24 B MIC does not fit the 16 B `<mic>` field and the module rejects `keyver=0` even before reaching the kernel, so wpawolf never writes them to the legacy sinks; they surface only on the per-AKM sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` under their `WPA*08*..*11*` prefixes.
 
 ---
 
