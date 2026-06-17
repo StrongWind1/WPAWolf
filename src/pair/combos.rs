@@ -315,6 +315,153 @@ pub fn generate(
     (pairs, filter_stats)
 }
 
+// --- generate_streaming (per-eapol-frame) ---
+
+/// Session-level pairing context, computed once per group and reused for every
+/// EAPOL frame in the streaming path.
+struct GenCtx<'a> {
+    ap: MacAddr,
+    sta: MacAddr,
+    config: &'a PairConfig,
+    /// `true` when any M1 was seen or nonce-counter drift was detected -- drives
+    /// the M3-anchored `FLAG_NC` rule. See `generate`.
+    session_carries_nc: bool,
+    /// `(le, be)` router-endianness flags from `detect_nonce_endianness`.
+    router_endian: (bool, bool),
+    ap_bytes: [u8; 6],
+    sta_bytes: [u8; 6],
+}
+
+/// Applies the M3-anchored `FLAG_NC` rule, the LE/BE endianness overlay, and the
+/// per-frame fingerprint dedup to a freshly built pair.
+///
+/// Returns `Some(pair)` if its fingerprint is new (push it), `None` if a
+/// fingerprint-identical pair was already seen in this frame. Mirrors the
+/// `dedup_push!` macro plus the N3E2/N3E4 `FLAG_NC` rule in `generate`; the
+/// `streamed_matches_materialized` parity test pins the two against drift.
+fn finalize_and_dedup(
+    mut pair: PairedHash,
+    ctx: &GenCtx<'_>,
+    seen: &mut std::collections::HashSet<u64>,
+) -> Option<PairedHash> {
+    // M3-anchored pairs (N3E2 / N3E4) gain FLAG_NC from session state (M1
+    // presence / endianness drift) or a per-pair RC deviation -- the same
+    // three-source rule as `generate`. M1-anchored pairs already carry FLAG_NC
+    // from `try_pair`.
+    if matches!(pair.combo_type, ComboType::N3E2 | ComboType::N3E4)
+        && (ctx.session_carries_nc || pair.rc_gap_magnitude > 0)
+    {
+        pair.message_pair |= FLAG_NC;
+    }
+    if pair.message_pair & FLAG_NC != 0 {
+        if ctx.router_endian.0 {
+            pair.message_pair |= FLAG_LE;
+        }
+        if ctx.router_endian.1 {
+            pair.message_pair |= FLAG_BE;
+        }
+    }
+    let kind: u8 = if pair.akm.is_ft() { 0x04 } else { 0x02 };
+    let fp = crate::types::hash_slices(
+        kind,
+        &[
+            pair.mic.as_slice(),
+            &ctx.ap_bytes,
+            &ctx.sta_bytes,
+            &pair.nonce,
+            &pair.eapol_frame,
+            &[],
+            &[pair.message_pair],
+        ],
+    );
+    if seen.insert(fp) { Some(pair) } else { None }
+}
+
+/// Builds every pair whose EAPOL frame is `eapol_msg`.
+///
+/// Covers the two combos that use it (`combo_a` over `nonce_a`, `combo_b` over
+/// `nonce_b`) with a frame-local dedup set; returns that one frame's pairs and
+/// tallies any filter rejections.
+fn build_frame_pairs(
+    ctx: &GenCtx<'_>,
+    eapol_msg: &EapolMessage,
+    nonce_a: &[&EapolMessage],
+    combo_a: ComboType,
+    nonce_b: &[&EapolMessage],
+    combo_b: ComboType,
+    filter_stats: &mut PairFilterStats,
+) -> Vec<PairedHash> {
+    let mut frame_pairs: Vec<PairedHash> = Vec::new();
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for (nonce_msgs, combo) in [(nonce_a, combo_a), (nonce_b, combo_b)] {
+        for &nonce_msg in nonce_msgs {
+            match try_pair(ctx.ap, ctx.sta, nonce_msg, eapol_msg, combo, ctx.config) {
+                Ok(pair) => {
+                    if let Some(p) = finalize_and_dedup(pair, ctx, &mut seen) {
+                        frame_pairs.push(p);
+                    }
+                },
+                Err(FilterReason::Time) => filter_stats.time_filtered += 1,
+                Err(FilterReason::Rc) => filter_stats.rc_filtered += 1,
+            }
+        }
+    }
+    frame_pairs
+}
+
+/// Streaming variant of [`generate`] for groups too large to materialize.
+///
+/// Emits pairs one EAPOL frame at a time via `on_chunk`, bounding peak memory to
+/// a single frame's pairs (at most the group's nonce-message count) instead of
+/// the `O(n*m)` product.
+///
+/// Set-identical to `generate` + the caller's `collapse`/`nc_dedup`: all three
+/// reductions (`generate`'s `seen`, `collapse`'s `(nonce, eapol_frame)` key,
+/// `nc_dedup`'s `(eapol_frame, mic, combo, nonce[..28])` bucket) partition by
+/// `eapol_frame`, so two pairs with different EAPOL frames never interact. The
+/// caller runs `collapse`/`nc_dedup` on each frame chunk before output. Frame
+/// emission order differs from `generate` (frame-major, not combo-major), which
+/// only affects mega-groups that already run in disk mode (set-, not
+/// order-equivalent). `on_chunk` may be called with an empty `Vec`.
+pub fn generate_streaming(
+    ap: MacAddr,
+    sta: MacAddr,
+    messages: &[EapolMessage],
+    config: &PairConfig,
+    mut on_chunk: impl FnMut(Vec<PairedHash>),
+) -> PairFilterStats {
+    let m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
+    let m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
+    let m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
+    let m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
+
+    let router_endian = detect_nonce_endianness(&m1s, &m3s);
+    let ctx = GenCtx {
+        ap,
+        sta,
+        config,
+        session_carries_nc: !m1s.is_empty() || router_endian.0 || router_endian.1,
+        router_endian,
+        ap_bytes: ap.0,
+        sta_bytes: sta.0,
+    };
+    let mut filter_stats = PairFilterStats::default();
+
+    // M2-frame chunks: N1E2 (nonce M1) + N3E2 (nonce M3).
+    for &eapol_msg in &m2s {
+        on_chunk(build_frame_pairs(&ctx, eapol_msg, &m1s, ComboType::N1E2, &m3s, ComboType::N3E2, &mut filter_stats));
+    }
+    // M3-frame chunks: N2E3 (nonce M2) + N4E3 (nonce M4).
+    for &eapol_msg in &m3s {
+        on_chunk(build_frame_pairs(&ctx, eapol_msg, &m2s, ComboType::N2E3, &m4s, ComboType::N4E3, &mut filter_stats));
+    }
+    // M4-frame chunks: N1E4 (nonce M1) + N3E4 (nonce M3).
+    for &eapol_msg in &m4s {
+        on_chunk(build_frame_pairs(&ctx, eapol_msg, &m1s, ComboType::N1E4, &m3s, ComboType::N3E4, &mut filter_stats));
+    }
+    filter_stats
+}
+
 // --- try_pair ---
 
 /// Attempts to build a `PairedHash` from a (`nonce_msg`, `eapol_msg`) candidate.

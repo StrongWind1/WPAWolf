@@ -103,10 +103,18 @@ use rayon::prelude::*;
 
 use crate::debug::{DebugPrinter, HEAVY_GROUP_COST, group_progress_interval};
 use crate::pair::collapse::collapse;
-use crate::pair::combos::{PairConfig, generate};
+use crate::pair::combos::{PairConfig, generate, generate_streaming};
 use crate::pair::nc_dedup::{NcDedupStats, nc_dedup};
 use crate::store::messages::{EapolMessage, MessageStore};
 use crate::types::{MacPair, MsgType};
+
+/// Per-group pairing cost (sum of the six N#E# cross-product sizes) above which a
+/// group is paired in streaming mode -- one EAPOL frame at a time -- instead of
+/// materializing the whole pair set. Rotating-ANonce mega-groups exceed this and
+/// degrade to bounded memory; normal groups stay on the byte-order-preserving
+/// materialize path. Such mega-groups run in disk mode (Tier A spills on cost),
+/// so the fan-out's disk-backed dedup bounds output-side memory too.
+const STREAM_PAIR_COST: u64 = 2_000_000;
 
 /// Folds `other` into `acc` in place: `collapsed_lines`, `cluster_count`, and
 /// the opt-in filter drops sum component-wise; `max_cluster_size` takes the
@@ -159,6 +167,37 @@ fn pair_one_group(
     nc.time_filtered = filter_stats.time_filtered;
     nc.rc_filtered = filter_stats.rc_filtered;
     (pairs, nc)
+}
+
+/// Streaming variant of `pair_one_group` for mega-groups.
+///
+/// Pairs one EAPOL frame at a time and delivers each frame's collapsed /
+/// NC-deduped survivors via `emit`, bounding peak memory to a single frame's
+/// pairs instead of the full cross-product.
+///
+/// Set-identical to `pair_one_group` (same surviving line set): the inline dedup,
+/// `collapse`, and `nc_dedup` all partition by EAPOL frame, so running them
+/// per-frame yields the same survivors. Frame-major emission order differs from
+/// the materialize path, which only affects mega-groups (always in disk mode,
+/// where output is set- not order-pinned). See `combos::generate_streaming`.
+fn pair_one_group_streaming(
+    mac_pair: &MacPair,
+    messages: &[EapolMessage],
+    config: &PairConfig,
+    mut emit: impl FnMut(Vec<PairedHash>),
+) -> NcDedupStats {
+    let mut sorted = messages.to_vec();
+    sorted.sort_unstable_by_key(|m| m.timestamp);
+    let mut nc_total = NcDedupStats::default();
+    let filter_stats = generate_streaming(mac_pair.ap, mac_pair.sta, &sorted, config, |frame_pairs| {
+        let collapsed = collapse(frame_pairs, config.all_combos);
+        let (survivors, nc) = nc_dedup(collapsed, config);
+        merge_nc_stats(&mut nc_total, nc);
+        emit(survivors);
+    });
+    nc_total.time_filtered = filter_stats.time_filtered;
+    nc_total.rc_filtered = filter_stats.rc_filtered;
+    nc_total
 }
 
 /// Streaming pairing pipeline: pairs each group and delivers results via callback.
@@ -219,15 +258,27 @@ where
             let _ = debug.memory_check(&ctx);
         }
         let t0 = Instant::now();
-        let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+        let (emitted, nc) = if cost > STREAM_PAIR_COST {
+            // Mega-group: stream one EAPOL frame at a time to bound peak memory.
+            let mut count = 0usize;
+            let nc = pair_one_group_streaming(mac_pair, messages, config, |survivors| {
+                count += survivors.len();
+                on_group(survivors);
+            });
+            (count, nc)
+        } else {
+            let (pairs, nc) = pair_one_group(mac_pair, messages, config);
+            let n = pairs.len();
+            on_group(pairs);
+            (n, nc)
+        };
         let elapsed_us = t0.elapsed().as_micros();
-        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+        debug.group_done(mac_pair.ap, mac_pair.sta, emitted, elapsed_us, cost);
         let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
-        pairs_done.fetch_add(pairs.len(), Ordering::Relaxed);
+        pairs_done.fetch_add(emitted, Ordering::Relaxed);
         if done.is_multiple_of(group_progress_interval()) || done == total_groups {
             debug.group_progress(done, total_groups, pairs_done.load(Ordering::Relaxed));
         }
-        on_group(pairs);
         if let Ok(mut guard) = all_nc.lock() {
             merge_nc_stats(&mut guard, nc);
         }
@@ -274,16 +325,27 @@ where
         let (m1, m2, m3, m4, cost) = group_counts_and_cost(&messages);
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
         let t0 = Instant::now();
-        let (pairs, nc) = pair_one_group(mac_pair, &messages, config);
+        let (emitted, nc) = if cost > STREAM_PAIR_COST {
+            let mut count = 0usize;
+            let nc = pair_one_group_streaming(mac_pair, &messages, config, |survivors| {
+                count += survivors.len();
+                on_group(survivors);
+            });
+            (count, nc)
+        } else {
+            let (pairs, nc) = pair_one_group(mac_pair, &messages, config);
+            let n = pairs.len();
+            on_group(pairs);
+            (n, nc)
+        };
         let elapsed_us = t0.elapsed().as_micros();
-        debug.group_done(mac_pair.ap, mac_pair.sta, pairs.len(), elapsed_us, cost);
+        debug.group_done(mac_pair.ap, mac_pair.sta, emitted, elapsed_us, cost);
         groups_done += 1;
-        pairs_done += pairs.len();
+        pairs_done += emitted;
         if groups_done.is_multiple_of(group_progress_interval()) || groups_done == total_groups {
             debug.group_progress(groups_done, total_groups, pairs_done);
         }
         merge_nc_stats(&mut all_nc, nc);
-        on_group(pairs);
         // `messages` dropped here -- memory freed before next group loads
     }
 
@@ -479,5 +541,106 @@ mod tests {
 
         let (pairs, _nc) = pair_all_groups(&store, &config, 16, &DebugPrinter::new(false));
         assert!(!pairs.is_empty());
+    }
+
+    #[test]
+    fn streamed_matches_materialized() {
+        // The per-eapol-frame streaming path must yield the same survivor SET and
+        // NC-dedup stats as the whole-group materialize path, with collapse +
+        // nc_dedup active (--strict-style). Emission order differs (frame-major),
+        // so compare sorted line keys.
+        fn msg(t: MsgType, rc: u64, ts: u64, nonce: [u8; 32], frame_disc: u8) -> EapolMessage {
+            let mut frame = vec![0u8; 99];
+            frame[0] = frame_disc;
+            EapolMessage {
+                timestamp: ts,
+                msg_type: t,
+                key_version: 2,
+                replay_counter: rc,
+                nonce,
+                mic: MicBytes::from_16([0xAB; 16]),
+                pmkid: None,
+                eapol_frame: Arc::from(frame),
+                ft: None,
+                akm: AkmType::Wpa2Psk,
+                is_rsn: true,
+            }
+        }
+        let n_a = [0x10u8; 32];
+        let n_b = [0x20u8; 32];
+        let mut n_b2 = [0x20u8; 32];
+        n_b2[28] = 0x22; // tail +2 in the LE low byte -> nc_dedup cluster with n_b
+        let messages = vec![
+            msg(MsgType::M1, 1, 0, n_a, 1),
+            msg(MsgType::M3, 2, 1, n_a, 2), // same ANonce as M1 -> collapse N1E2/N3E2
+            msg(MsgType::M1, 1, 2, n_b, 3),
+            msg(MsgType::M1, 1, 3, n_b2, 4), // near-nonce sibling -> nc cluster
+            msg(MsgType::M2, 1, 4, n_a, 5),  // two distinct M2 frames
+            msg(MsgType::M2, 1, 5, n_b, 6),
+            msg(MsgType::M4, 2, 6, n_a, 7),
+        ];
+        let config = PairConfig { all_combos: false, nc_dedup_enabled: true, ..PairConfig::default() };
+        let mac_pair = MacPair::new(ap(), sta());
+
+        let (mat_pairs, mat_nc) = pair_one_group(&mac_pair, &messages, &config);
+        let mut stream_pairs: Vec<PairedHash> = Vec::new();
+        let stream_nc = pair_one_group_streaming(&mac_pair, &messages, &config, |chunk| stream_pairs.extend(chunk));
+
+        let key = |p: &PairedHash| (p.message_pair, p.nonce, p.mic.as_slice().to_vec(), p.eapol_frame.to_vec());
+        let mut mat_keys: Vec<_> = mat_pairs.iter().map(key).collect();
+        let mut stream_keys: Vec<_> = stream_pairs.iter().map(key).collect();
+        mat_keys.sort();
+        stream_keys.sort();
+        assert_eq!(mat_keys, stream_keys, "streamed survivor set must equal materialized");
+        assert_eq!(mat_pairs.len(), stream_pairs.len(), "no extra/missing survivors");
+        assert_eq!(mat_nc.collapsed_lines, stream_nc.collapsed_lines);
+        assert_eq!(mat_nc.cluster_count, stream_nc.cluster_count);
+        assert_eq!(mat_nc.max_cluster_size, stream_nc.max_cluster_size);
+        assert!(mat_nc.cluster_count > 0, "fixture should exercise nc_dedup clustering");
+    }
+
+    #[test]
+    fn streaming_chunks_bounded_by_message_count() {
+        // Streaming processes pairs one EAPOL frame at a time: each chunk holds at
+        // most one frame's pairs (<= the group's message count), never the full
+        // cross-product -- the memory bound that lets a mega-group finish.
+        fn m1m2(t: MsgType, ts: u64, disc: u32) -> EapolMessage {
+            let mut nonce = [0u8; 32];
+            nonce[0..4].copy_from_slice(&disc.to_le_bytes());
+            nonce[4] = 0xA5;
+            let mut frame = vec![0u8; 99];
+            frame[0..4].copy_from_slice(&disc.to_le_bytes());
+            EapolMessage {
+                timestamp: ts,
+                msg_type: t,
+                key_version: 2,
+                replay_counter: 1,
+                nonce,
+                mic: MicBytes::from_16([0xAB; 16]),
+                pmkid: None,
+                eapol_frame: Arc::from(frame),
+                ft: None,
+                akm: AkmType::Wpa2Psk,
+                is_rsn: true,
+            }
+        }
+        const K: usize = 40;
+        let mut messages = Vec::new();
+        for i in 0..K {
+            let disc = u32::try_from(i).unwrap();
+            messages.push(m1m2(MsgType::M1, i as u64, disc));
+            messages.push(m1m2(MsgType::M2, (K + i) as u64, 1000 + disc));
+        }
+        let config = PairConfig::default();
+        let mac_pair = MacPair::new(ap(), sta());
+        let mut total = 0usize;
+        let mut max_chunk = 0usize;
+        pair_one_group_streaming(&mac_pair, &messages, &config, |chunk| {
+            max_chunk = max_chunk.max(chunk.len());
+            total += chunk.len();
+        });
+        assert_eq!(total, K * K, "all K*K N1E2 pairs emitted");
+        assert!(max_chunk <= messages.len(), "a chunk never exceeds the group message count");
+        assert!(max_chunk <= K, "each M2 frame's chunk is one N1E2 per M1");
     }
 }
