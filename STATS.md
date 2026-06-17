@@ -24,7 +24,7 @@ These are the sums an operator can check against the banner. They hold by constr
                    + mgmt_frames + data_frames          (handed to Phase 3 extraction)
    ```
 
-   `unreadable_packets` is the count of records that errored on read; those never entered `total_packets` (the counter increments only on a successful `next_packet`). `recovered_tier2` / `recovered_tier3`, `lenient_proto_version`, the FCS outcomes, and the per-band counts are *sub-classifications* of frames that did reach `mgmt`/`data`/`ctrl` -- they overlap those buckets and are not separate terminal states.
+   `unreadable_packets` is the count of records that errored on read; those never entered `total_packets` (the counter increments only on a successful `next_packet`). `recovered_tier2` / `recovered_tier3` / `recovered_dlt0`, `lenient_proto_version`, the FCS outcomes, and the per-band counts are *sub-classifications* of frames that did reach `mgmt`/`data`/`ctrl` -- they overlap those buckets and are not separate terminal states.
 
    **This identity is enforced, not just asserted.** `Stats::packets_accounted()` sums the eight terminal buckets; the banner prints `packets unaccounted (BUG; report this)` (= `total_packets - accounted`) and `frames multi-counted (BUG; report this)` (= `accounted - total_packets`) -- both 0 on every correct run, so neither renders. The pipeline `run()` debug-asserts the equality, and `tests/integration/generated_corpus.rs::packet_accounting_holds_across_generated_corpus` drives the whole fixture corpus through the binary and fails if either BUG row appears. A future silent `continue` that drops a packet without a counter therefore cannot pass the test suite.
 
@@ -97,6 +97,7 @@ Link-layer strip, FCS resolution, tiered recovery, 802.11 frame-type split, RF c
 | radiotap it_version != 0 (Tier 1 recovered) | `radiotap_version_nonzero` | radiotap.org | A firmware emits non-zero `it_version`; we read `it_len` regardless instead of dropping (1.5M frames in one corpus). | recovered |
 | frames recovered via it_present computation (Tier 2) | `recovered_tier2` | radiotap.org | Corrupt `it_len`; header length recomputed from the `it_present` bitmask. | recovered |
 | frames recovered via CRC-32 offset scan (Tier 3) | `recovered_tier3` | ISO 3309 CRC-32 | All header fields corrupt; the 802.11 frame located by scanning for the FCS residue `0x2144DF1C`. | recovered |
+| frames recovered from DLT 0 (unspecified link type) | `recovered_dlt0` | libpcap `dlt.h` | A pcapng IDB declared link type 0 over genuine 802.11; recovered by a light radiotap / raw-802.11 attempt instead of being dropped as `link_errors`. | recovered |
 | FCS stripped (header + CRC-32 agree) | `fcs_header_and_crc_agree` | §9.2.4.7 | Both the radiotap flag and the CRC confirm a trailing FCS; stripped before IE walking. | recovered |
 | FCS stripped (CRC-32 detected, header silent) | `fcs_detected_by_crc` | §9.2.4.7 | The header never announced an FCS but the CRC found one; without this those 4 bytes would mis-parse as IE data. | recovered |
 | FCS stripped (BADFCS flagged; corrupt on air) | `fcs_badfcs_flagged` | radiotap Flags 0x40 | Radio received the frame with a failed checksum; stripped anyway. | diagnostic |

@@ -373,6 +373,7 @@ fn strip_and_resolve<'a>(
                 match result.tier {
                     link::recover::RecoveryTier::ComputedFromPresent => stats.recovered_tier2 += 1,
                     link::recover::RecoveryTier::Crc32Scan => stats.recovered_tier3 += 1,
+                    link::recover::RecoveryTier::Dlt0 => stats.recovered_dlt0 += 1,
                 }
                 Some(result.frame)
             } else {

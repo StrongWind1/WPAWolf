@@ -157,6 +157,10 @@ pub enum RecoveryTier {
     ComputedFromPresent,
     /// Tier 3: CRC-32 scan found the frame at a candidate offset.
     Crc32Scan,
+    /// DLT-0 light recovery: a zeroed / unspecified IDB link type laid over
+    /// genuine 802.11 frames. Tried as radiotap (`it_present`) then as raw
+    /// 802.11 at offset 0 gated on a plausible Frame Control.
+    Dlt0,
 }
 
 /// Result of a successful frame recovery attempt.
@@ -204,6 +208,34 @@ pub fn recover(data: &[u8], dlt: u16) -> Option<RecoveryResult<'_>> {
             offset: computed_offset,
             fcs_stripped: fcs_valid,
         });
+    }
+
+    // DLT 0 (LINKTYPE_NULL / unspecified): some capture tooling writes a zeroed
+    // IDB link type over genuine 802.11 frames. Light best-effort recovery before
+    // the generic CRC scan: try the radiotap it_present layout (only when byte 0
+    // reads as a radiotap version of 0), then raw 802.11 at offset 0 gated on a
+    // plausible Frame Control (protocol-version bits B0-B1 == 0,
+    // [IEEE 802.11-2024] §9.2.4.1.1). A mis-guess yields no hashes -- the
+    // downstream EtherType 0x888E / EAPOL and garbage-pattern gates reject
+    // non-handshake bytes.
+    if dlt == 0 {
+        if data.first() == Some(&0)
+            && let Some(offset) = compute_offset_from_present(data)
+            && let Some(payload) = data.get(offset..)
+            && !payload.is_empty()
+        {
+            let fcs_valid = fcs::verify_crc32(payload);
+            let frame =
+                if fcs_valid { payload.get(..payload.len().saturating_sub(4)).unwrap_or(payload) } else { payload };
+            return Some(RecoveryResult { frame, tier: RecoveryTier::Dlt0, offset, fcs_stripped: fcs_valid });
+        }
+        // Frame Control protocol-version field (B0-B1) is 0 for a real 802.11
+        // frame, i.e. the low two bits are clear. [IEEE 802.11-2024] §9.2.4.1.1.
+        if data.len() >= MIN_SCAN_SLICE && data.first().is_some_and(|&fc| fc.trailing_zeros() >= 2) {
+            let fcs_valid = fcs::verify_crc32(data);
+            let frame = if fcs_valid { data.get(..data.len().saturating_sub(4)).unwrap_or(data) } else { data };
+            return Some(RecoveryResult { frame, tier: RecoveryTier::Dlt0, offset: 0, fcs_stripped: fcs_valid });
+        }
     }
 
     // Tier 3: CRC-32 offset scan -- works for any DLT.
@@ -374,5 +406,25 @@ mod tests {
     #[test]
     fn recover_empty_data() {
         assert!(recover(&[], 127).is_none());
+    }
+
+    #[test]
+    fn recover_dlt0_raw_80211_with_fcs() {
+        // Raw 802.11 beacon (FC 0x80) mislabeled as DLT 0, no radiotap, with FCS.
+        let frame = b"\x80\x00beacon-pad";
+        let data = append_fcs(frame);
+        let result = recover(&data, 0).unwrap();
+        assert_eq!(result.tier, RecoveryTier::Dlt0);
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.frame, frame);
+        assert!(result.fcs_stripped);
+    }
+
+    #[test]
+    fn recover_dlt0_rejects_implausible_frame_control() {
+        // byte0 = 0x01 -> protocol-version bits != 0; not a valid 802.11 FC, and
+        // no FCS anywhere -> no recovery.
+        let data = [0x01u8; 32];
+        assert!(recover(&data, 0).is_none());
     }
 }

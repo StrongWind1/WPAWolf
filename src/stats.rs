@@ -602,6 +602,9 @@ pub struct Stats {
     pub recovered_tier2: u64,
     /// Frames recovered via Tier 3 (CRC-32 multi-offset scan).
     pub recovered_tier3: u64,
+    /// Frames recovered from a DLT-0 (unspecified link type) packet via the light
+    /// radiotap / raw-802.11 attempt in `link::recover`.
+    pub recovered_dlt0: u64,
 
     /// FCS outcome: header said FCS present, CRC-32 confirmed. Stripped.
     pub fcs_header_and_crc_agree: u64,
@@ -1213,6 +1216,7 @@ impl Stats {
         nz!("radiotap it_version != 0 (Tier 1 recovered)", self.radiotap_version_nonzero);
         nz!("frames recovered via it_present computation (Tier 2)", self.recovered_tier2);
         nz!("frames recovered via CRC-32 offset scan (Tier 3)", self.recovered_tier3);
+        nz!("frames recovered from DLT 0 (unspecified link type)", self.recovered_dlt0);
         nz!("FCS stripped (header + CRC-32 agree)", self.fcs_header_and_crc_agree);
         nz!("FCS stripped (CRC-32 detected, header silent)", self.fcs_detected_by_crc);
         nz!("FCS stripped (BADFCS flagged; corrupt on air)", self.fcs_badfcs_flagged);
