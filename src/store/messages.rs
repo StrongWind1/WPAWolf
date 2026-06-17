@@ -102,6 +102,13 @@ struct MessageRef {
     offset: u64,
 }
 
+/// Exact dedup key for `MessageStore::add`: a new message is a duplicate of one
+/// already in its `(AP, STA)` group iff this tuple matches. The `Arc<[u8]>` is
+/// hashed and compared by value (byte-exact), so there is no fingerprint
+/// collision risk; the `Arc` is shared with the stored message, so no frame
+/// bytes are copied into the index.
+type MsgDedupKey = (MsgType, AkmType, Arc<[u8]>);
+
 /// Primary storage for EAPOL messages grouped by (AP, STA) pair.
 ///
 /// Uses `HashMap<MacPair, Vec<EapolMessage>>` in memory mode. When disk mode
@@ -111,6 +118,9 @@ struct MessageRef {
 #[derive(Default)]
 pub struct MessageStore {
     groups: HashMap<MacPair, Vec<EapolMessage>>,
+    /// Per-group exact-key index for O(1) dedup-on-insert. Memory mode only;
+    /// released by `finish_ingest` before Phase 4. Disk mode does not populate it.
+    dedup: HashMap<MacPair, HashSet<MsgDedupKey>>,
     total_count: usize,
     disk_index: HashMap<MacPair, Vec<MessageRef>>,
     disk_writer: Option<BufWriter<std::fs::File>>,
@@ -168,12 +178,16 @@ impl MessageStore {
             return self.add_to_disk(ap, sta, &msg);
         }
         let pair = MacPair::new(ap, sta);
-        let entries = self.groups.entry(pair).or_default();
 
-        if entries.iter().any(|m| m.msg_type == msg.msg_type && m.akm == msg.akm && m.eapol_frame == msg.eapol_frame) {
+        // O(1) exact dedup-on-insert. A byte-identical (msg_type, akm,
+        // eapol_frame) tuple already in this group is the same message observed
+        // twice on the air. `Arc::clone` is a refcount bump (no frame-byte copy);
+        // the index is released at end of ingest by `finish_ingest`.
+        let key = (msg.msg_type, msg.akm, Arc::clone(&msg.eapol_frame));
+        if !self.dedup.entry(pair).or_default().insert(key) {
             return Admission::Duplicate;
         }
-        entries.push(msg);
+        self.groups.entry(pair).or_default().push(msg);
         self.total_count += 1;
         Admission::Stored
     }
@@ -192,6 +206,16 @@ impl MessageStore {
         self.disk_offset += u64::from(written);
         self.total_count += 1;
         Admission::Stored
+    }
+
+    /// Releases the dedup-on-insert index once Phase 1 ingest is complete.
+    ///
+    /// `dedup` is consulted only by `add()`; after the last EAPOL message is
+    /// stored (end of WDS Phase 1.5) it is dead weight, so dropping it here keeps
+    /// it from competing with Phase 4 pairing memory. Idempotent. Stored messages
+    /// and group structure are untouched.
+    pub fn finish_ingest(&mut self) {
+        self.dedup = HashMap::new();
     }
 
     /// Iterates over all (AP, STA) groups and their message vectors.
@@ -220,6 +244,7 @@ impl MessageStore {
     /// per-file pair count is similar across files).
     pub fn clear(&mut self) {
         self.groups.clear();
+        self.dedup.clear();
         self.disk_index.clear();
         self.total_count = 0;
     }
@@ -250,6 +275,8 @@ impl MessageStore {
         let mut offset: u64 = 0;
 
         let old_groups = std::mem::take(&mut self.groups);
+        // Disk mode skips insert-dedup, so the in-memory index is now dead weight.
+        self.dedup = HashMap::new();
         for (pair, msgs) in old_groups {
             let mut refs = Vec::with_capacity(msgs.len());
             for msg in &msgs {
@@ -672,6 +699,54 @@ mod tests {
         store.add(ap, sta, EapolMessage::from_eapol_key(minimal_eapol_key(), 2_000, AkmType::Wpa2Psk, None));
         assert_eq!(store.total_count(), 1, "retransmission collapsed by dedup-on-insert");
         assert_eq!(store.group_count(), 1);
+    }
+
+    #[test]
+    fn add_many_distinct_and_retransmissions_dedupes_exactly() {
+        // N distinct frames, each immediately retransmitted byte-identically. The
+        // set-based dedup must keep exactly N (retransmissions collapse, distinct
+        // frames kept) -- identical semantics to the old linear scan, at scale.
+        const N: u8 = 64;
+        let mut store = MessageStore::new();
+        let ap = mac(0x11);
+        let sta = mac(0x22);
+        // Discriminators 1..=N: nonzero so the nonce is never all-zero (a NULL
+        // nonce is rejected by the EAPOL parser, unrelated to dedup).
+        for d in 1..=N {
+            store.add(
+                ap,
+                sta,
+                EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(d), 1_000, AkmType::Wpa2Psk, None),
+            );
+            store.add(
+                ap,
+                sta,
+                EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(d), 2_000, AkmType::Wpa2Psk, None),
+            );
+        }
+        assert_eq!(store.total_count(), usize::from(N), "retransmissions collapse, distinct frames kept");
+        assert_eq!(store.group_count(), 1);
+    }
+
+    #[test]
+    fn finish_ingest_preserves_stored_messages() {
+        // Releasing the dedup index must not touch stored messages or groups.
+        let mut store = MessageStore::new();
+        let ap = mac(0x11);
+        let sta = mac(0x22);
+        store.add(
+            ap,
+            sta,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x11), 1_000, AkmType::Wpa2Psk, None),
+        );
+        store.add(
+            ap,
+            sta,
+            EapolMessage::from_eapol_key(minimal_eapol_key_with_discriminator(0x22), 2_000, AkmType::Wpa2Psk, None),
+        );
+        store.finish_ingest();
+        assert_eq!(store.total_count(), 2);
+        assert_eq!(store.groups().count(), 1);
     }
 
     #[test]

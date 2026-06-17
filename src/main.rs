@@ -817,6 +817,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         debug.wds_resolved(wds_count, 0);
     }
 
+    // All add() calls are now done (Phase 1 ingest + WDS Phase 1.5). Release the
+    // dedup-on-insert index so it does not occupy memory during Phase 4 pairing.
+    message_store.finish_ingest();
+
     // Snapshot ESSID count before handing off to output.
     // ap_count() returns usize; u64 can represent every possible usize value on supported platforms.
     {

@@ -137,7 +137,7 @@ impl std::fmt::Display for MsgType {
 /// PSK) and `Wpa2Psk` (WPA2 AKM 2), and splitting the SHA-256 / SHA-384 variants
 /// (`FtPsk` vs `FtPskSha384`, `PskSha256` vs `PskSha384`) keeps each row pinned
 /// to a single hash family even when two suites share an output mode today.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AkmType {
     /// Legacy WPA1 PSK (Wi-Fi Alliance WPA vendor IE OUI `00:50:F2`, type 1, AKM 2).
     /// HMAC-MD5 MIC, PRF-SHA1 PTK, no PMKID. Outputs to hashcat mode 22000 as type 1.
