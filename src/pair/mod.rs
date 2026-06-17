@@ -210,16 +210,13 @@ where
                 "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
                 mac_pair.ap, mac_pair.sta
             );
-            if let Some(pct_tenths) = debug.memory_check(&ctx)
-                && pct_tenths >= 800
-            {
-                let rss_mib = crate::progress::current_rss_mib().unwrap_or(0);
-                let total_mib = crate::progress::total_ram_bytes() / (1024 * 1024);
-                println!(
-                    "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 4 pairing. Reduce input size or increase available RAM."
-                );
-                std::process::exit(1);
-            }
+            // Informational only. Memory-pressured runs are routed to the
+            // abort-free disk pairing path by the disk-mode reconciliation in
+            // `main::run` (before `emit`), so Phase 4 pairing no longer aborts
+            // here; degrading to disk preserves the no-silent-drop / no-cap rule
+            // (ARCHITECTURE.md §4 invariant 2). `memory_check` still prints a
+            // `[MEMORY WARNING]` line for heavy groups under sustained pressure.
+            let _ = debug.memory_check(&ctx);
         }
         let t0 = Instant::now();
         let (pairs, nc) = pair_one_group(mac_pair, messages, config);

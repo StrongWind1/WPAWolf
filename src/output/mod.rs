@@ -683,7 +683,7 @@ impl OutputContext {
                 if self.disk_dedup.is_none() {
                     self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
                 }
-            } else {
+            } else if self.disk_dedup.is_none() {
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
@@ -705,6 +705,47 @@ impl OutputContext {
         )?;
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
+    }
+
+    /// Decides, before Phase 4, whether this run must go disk-backed and, if so,
+    /// arms the disk-backed dedup. Returns `true` when disk mode is already
+    /// engaged or the predicted hash-line allocation would cross the memory
+    /// threshold, so the caller can flush the stores to disk and route pairing to
+    /// the abort-free disk path (`pair_all_groups_disk`). Mirrors the pre-size
+    /// estimate in [`Self::emit`]; `emit` then skips its own pre-size because
+    /// `disk_dedup` is already set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the disk-backed dedup temp files cannot be created.
+    pub fn would_spill(
+        &mut self,
+        message_store: &MessageStore,
+        pmkid_store: &PmkidStore,
+        mem_monitor: &mut crate::mem_monitor::MemMonitor,
+    ) -> Result<bool> {
+        let active = self.sinks.active_mask();
+        if mem_monitor.disk_mode() {
+            if self.disk_dedup.is_none() {
+                self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+            }
+            return Ok(true);
+        }
+        let estimated_pairs = crate::pair::estimate_total_cost(message_store);
+        let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
+        if estimated_hashes == 0 {
+            return Ok(false);
+        }
+        let active_count = active.iter().filter(|&&a| a).count() as u64;
+        let estimated_bytes = estimated_hashes.saturating_mul(12).saturating_mul(active_count);
+        if mem_monitor.would_exceed(estimated_bytes) {
+            mem_monitor.force_disk_mode();
+            if self.disk_dedup.is_none() {
+                self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn emit_inner(

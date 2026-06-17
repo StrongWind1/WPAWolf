@@ -384,6 +384,31 @@ fn strip_and_resolve<'a>(
     }
 }
 
+/// Reconciles the two disk-mode authorities before Phase 4.
+///
+/// `emit()` borrows the stores immutably and cannot flush them; `run` owns them
+/// `&mut`. If the predicted Phase-4 hash-line allocation would cross the memory
+/// threshold (or disk mode is already engaged), both stores are spilled to disk
+/// so pairing takes the abort-free disk path (`pair_all_groups_disk`) instead of
+/// the in-memory path that hard-aborts under pressure. See ARCHITECTURE.md §4
+/// invariant 2 (spill, never drop).
+fn reconcile_disk_mode(
+    output_ctx: &mut wpawolf::output::OutputContext,
+    message_store: &mut MessageStore,
+    pmkid_store: &mut PmkidStore,
+    mem_monitor: &mut MemMonitor,
+) -> wpawolf::types::Result<()> {
+    if output_ctx.would_spill(message_store, pmkid_store, mem_monitor)? {
+        if !message_store.disk_mode() {
+            message_store.flush_to_disk()?;
+        }
+        if !pmkid_store.disk_mode() {
+            pmkid_store.flush_to_disk()?;
+        }
+    }
+    Ok(())
+}
+
 // --- Pipeline ---
 
 /// Runs the full two-phase (Collect + Output) pipeline.
@@ -909,6 +934,11 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
         // Phases 1-3 (the streaming pass + WDS resolution) end here.
         stats.wallclock_p13_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Spill the stores to disk before pairing if memory is tight, so Phase 4
+        // takes the abort-free disk path instead of the hard-aborting in-memory
+        // path. See `reconcile_disk_mode`.
+        reconcile_disk_mode(&mut output_ctx, &mut message_store, &mut pmkid_store, &mut mem_monitor)?;
 
         message_store.flush_disk_writer();
         pmkid_store.flush_disk_writer();
