@@ -908,6 +908,13 @@ impl Stats {
     /// Call this once per stored EAPOL-Key message (M1/M2/M3/M4). The map is never cleared;
     /// it holds the most recent timestamp per `(AP, STA)` pair across all input files.
     pub fn update_eapol_time_gap(&mut self, ap: MacAddr, sta: MacAddr, timestamp_us: u64) {
+        // Skip implausible timestamps (zeroed clock or container corruption near
+        // 2^64): pairing one against a real timestamp would manufacture a
+        // multi-decade gap and poison `eapol_time_gap_max_us`. The frame itself is
+        // still stored and paired; only this statistic ignores it.
+        if !crate::types::is_plausible_epoch_us(timestamp_us) {
+            return;
+        }
         let key = (ap, sta);
         if let Some(&last_ts) = self.eapol_last_seen.get(&key) {
             let gap = timestamp_us.saturating_sub(last_ts);

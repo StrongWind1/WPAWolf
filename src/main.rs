@@ -593,10 +593,16 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     if packet.timestamp_us == 0 {
                         stats.packets_zeroed_timestamp += 1;
                     }
-                    if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
+                    // Only plausible epochs feed first/last (and thus duration). A
+                    // corrupt timestamp near 2^64 would otherwise render banner
+                    // garbage like `duration 18445039995104`; the frame is still
+                    // processed below regardless.
+                    if stats.timestamp_first_us == 0 && wpawolf::types::is_plausible_epoch_us(packet.timestamp_us) {
                         stats.timestamp_first_us = packet.timestamp_us;
                     }
-                    if packet.timestamp_us > stats.timestamp_last_us {
+                    if wpawolf::types::is_plausible_epoch_us(packet.timestamp_us)
+                        && packet.timestamp_us > stats.timestamp_last_us
+                    {
                         stats.timestamp_last_us = packet.timestamp_us;
                     }
                     // Per-file out-of-sequence detection. `prev_ts_us == 0` skips the

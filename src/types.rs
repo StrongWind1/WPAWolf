@@ -991,6 +991,29 @@ pub fn format_autohex(bytes: &[u8]) -> String {
     }
 }
 
+// --- Timestamp plausibility ---
+
+/// Upper bound on a plausible capture timestamp, in epoch microseconds.
+///
+/// `2100-01-01T00:00:00Z`. Capture-tool / container corruption can yield a
+/// timestamp near `u64::MAX` (e.g. a pcapng `ts_high` / `ts_low` underflow);
+/// feeding such a value into the duration and session-gap statistics renders
+/// nonsense like `duration 18445039995104`. Frames carrying an implausible
+/// timestamp are still parsed and paired -- only the stats min / max / gap
+/// accumulators ignore them.
+pub const SANE_EPOCH_CEILING_US: u64 = 4_102_444_800_000_000;
+
+/// Returns `true` when `ts_us` is a usable capture epoch.
+///
+/// "Usable" means non-zero and below [`SANE_EPOCH_CEILING_US`]. Zero is excluded
+/// because a zeroed timestamp is a capture-tool artifact, not a real clock
+/// reading, and pairing it against a real timestamp would manufacture a
+/// multi-decade gap.
+#[must_use]
+pub const fn is_plausible_epoch_us(ts_us: u64) -> bool {
+    ts_us > 0 && ts_us < SANE_EPOCH_CEILING_US
+}
+
 // --- Display helpers ---
 
 /// Formats a byte count as a human-readable string (B / KiB / MiB / GiB) with
