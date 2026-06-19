@@ -170,6 +170,7 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 | `--dedup-hash-combos` | off | 6 combos -> 3 unique per session |
 | `--nc-dedup` | off | cluster near-identical nonces, keep one survivor with FLAG_NC |
 | `--nc-tolerance N` | 8 | cluster span for `--nc-dedup` |
+| `--max-eapol-per-type N` | 0 (off) | cap pairing to the first N messages of each type per (AP, STA); bounds rotating-ANonce fan-out |
 | `--essid-collapse-min N` | 3 | SSID-variant collapse: min distinct SSIDs to trigger |
 | `--essid-collapse-ratio N` | 10 | SSID-variant collapse: top/second ratio threshold |
 | `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --nc-dedup` |

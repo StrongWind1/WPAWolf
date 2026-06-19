@@ -209,6 +209,21 @@ impl PerSinkDedup {
         self.sets = Default::default();
     }
 
+    /// Returns the number of fingerprints recorded for `sink`. In memory mode a
+    /// line is written iff its fingerprint was newly inserted, so this equals the
+    /// number of lines already written to that sink's file -- the line base a
+    /// mid-emission `DiskDedup` must start counting from. C2.
+    #[must_use]
+    pub fn len_for_sink(&self, sink: SinkId) -> usize {
+        self.sets.get(sink.as_index()).map_or(0, HashSet::len)
+    }
+
+    /// Returns `true` when no fingerprints have been recorded for any sink.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sets.iter().all(HashSet::is_empty)
+    }
+
     /// Returns `true` if this PMKID entry is new for `sink` and records the fingerprint.
     pub fn check_pmkid(&mut self, sink: SinkId, entry: &PmkidEntry, essid: &[u8]) -> bool {
         let fp = pmkid_fingerprint(entry, essid);

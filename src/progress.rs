@@ -157,6 +157,41 @@ pub fn total_ram_bytes() -> u64 {
     sys.total_memory()
 }
 
+/// Reusable process-RSS sampler holding one persistent `sysinfo::System`.
+///
+/// [`current_rss_bytes`] builds a fresh `System` on every call, which is fine at
+/// the Phase-1 cadence (every 50k packets) but too costly for the Phase-4 memory
+/// watcher that samples every ~250 ms. This sampler refreshes only the current
+/// process's memory on the same cached `System`, so repeated samples are cheap.
+/// The `sysinfo` path is kept (rather than reading `/proc/self/statm`) for the
+/// page-size portability reason behind the original migration off `/proc`.
+pub struct RssSampler {
+    sys: sysinfo::System,
+    pid: sysinfo::Pid,
+}
+
+impl RssSampler {
+    /// Creates a sampler, or `None` when the current PID cannot be determined.
+    #[must_use]
+    pub fn new() -> Option<Self> {
+        let pid = sysinfo::get_current_pid().ok()?;
+        Some(Self { sys: sysinfo::System::new(), pid })
+    }
+
+    /// Samples the current process RSS in bytes, reusing the held `System`.
+    pub fn sample(&mut self) -> u64 {
+        let refresh = sysinfo::ProcessRefreshKind::nothing().with_memory();
+        self.sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[self.pid]), false, refresh);
+        self.sys.process(self.pid).map_or(0, sysinfo::Process::memory)
+    }
+}
+
+impl std::fmt::Debug for RssSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RssSampler").field("pid", &self.pid).finish_non_exhaustive()
+    }
+}
+
 // --- Unit tests ---
 
 #[cfg(test)]

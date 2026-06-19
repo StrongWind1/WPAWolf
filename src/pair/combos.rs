@@ -50,6 +50,14 @@ pub struct PairConfig {
     /// iteration on the cracker side covers the full cluster span when the survivor
     /// sits at the sorted-median index.
     pub nc_tolerance: u8,
+    /// Opt-in per-(AP,STA)-per-type pairing cap (`--max-eapol-per-type`). When
+    /// `> 0`, pairing iterates at most this many messages of each type
+    /// (M1/M2/M3/M4) per group, bounding each N#E# combo to `cap^2` pairs. The
+    /// store still holds every message (`FR-MSG-1`); this only limits pairing
+    /// fan-out so a pathological rotating-ANonce group can't generate
+    /// `O(M1*M2)` billions of near-duplicate lines. `0` = unlimited (the default
+    /// WIDE behaviour, never miss).
+    pub max_eapol_per_type: usize,
 }
 
 impl Default for PairConfig {
@@ -66,8 +74,22 @@ impl Default for PairConfig {
             rc_drift_enabled: false,   // unfiltered: no RC drift filter
             nc_dedup_enabled: false,   // unfiltered: NC clustering off
             nc_tolerance: 8,           // matches hashcat NONCE_ERROR_CORRECTIONS default
+            max_eapol_per_type: 0,     // unlimited: no pairing cap (never miss)
         }
     }
+}
+
+/// Truncates a per-type message list to at most `cap` entries (no-op when
+/// `cap == 0`) and returns the number of messages dropped. Used by the opt-in
+/// `--max-eapol-per-type` cap to bound pairing fan-out without evicting anything
+/// from the store. See [`PairConfig::max_eapol_per_type`].
+fn cap_list(list: &mut Vec<&EapolMessage>, cap: usize) -> u64 {
+    if cap == 0 || list.len() <= cap {
+        return 0;
+    }
+    let dropped = list.len() - cap;
+    list.truncate(cap);
+    u64::try_from(dropped).unwrap_or(u64::MAX)
 }
 
 // --- generate ---
@@ -97,10 +119,18 @@ pub fn generate(
     use std::collections::HashSet;
 
     // Partition messages by type for O(n*m) pairing rather than O(n^2) over the full list.
-    let m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
-    let m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
-    let m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
-    let m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
+    let mut m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
+    let mut m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
+    let mut m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
+    let mut m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
+
+    // Opt-in per-type pairing cap (--max-eapol-per-type). Bounds each combo to
+    // cap^2 pairs so a rotating-ANonce mega-group can't explode O(M1*M2). Applied
+    // before endianness detection and the loops so every downstream step sees the
+    // capped lists. The store keeps every message; 0 = off (never miss).
+    let cap = config.max_eapol_per_type;
+    let messages_capped =
+        cap_list(&mut m1s, cap) + cap_list(&mut m2s, cap) + cap_list(&mut m3s, cap) + cap_list(&mut m4s, cap);
 
     // NC flag for M3-anchored pairs (N3E2 / N3E4) -- three independent sources, all
     // mirroring hcxpcapngtool exactly:
@@ -164,7 +194,7 @@ pub fn generate(
 
     let mut pairs: Vec<PairedHash> = Vec::new();
     let mut seen: HashSet<u64> = HashSet::new();
-    let mut filter_stats = PairFilterStats::default();
+    let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
 
     // Records an opt-in-filter rejection from `try_pair` against the per-group
     // tally. A no-op in WIDE mode (no `Err` is ever produced).
@@ -430,10 +460,15 @@ pub fn generate_streaming(
     config: &PairConfig,
     mut on_chunk: impl FnMut(Vec<PairedHash>),
 ) -> PairFilterStats {
-    let m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
-    let m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
-    let m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
-    let m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
+    let mut m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
+    let mut m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
+    let mut m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
+    let mut m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
+
+    // Opt-in per-type pairing cap -- mirrors `generate`. See `cap_list`.
+    let cap = config.max_eapol_per_type;
+    let messages_capped =
+        cap_list(&mut m1s, cap) + cap_list(&mut m2s, cap) + cap_list(&mut m3s, cap) + cap_list(&mut m4s, cap);
 
     let router_endian = detect_nonce_endianness(&m1s, &m3s);
     let ctx = GenCtx {
@@ -445,7 +480,7 @@ pub fn generate_streaming(
         ap_bytes: ap.0,
         sta_bytes: sta.0,
     };
-    let mut filter_stats = PairFilterStats::default();
+    let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
 
     // M2-frame chunks: N1E2 (nonce M1) + N3E2 (nonce M3).
     for &eapol_msg in &m2s {
@@ -572,6 +607,9 @@ pub struct PairFilterStats {
     pub time_filtered: u64,
     /// Candidate pairs dropped by the `--rc-drift` filter.
     pub rc_filtered: u64,
+    /// Messages excluded from pairing by the `--max-eapol-per-type` cap, summed
+    /// over the four types (`count - min(count, cap)` per type). Zero when off.
+    pub messages_capped: u64,
 }
 
 // --- Nonce endianness detection ---
@@ -798,6 +836,40 @@ mod tests {
     }
 
     #[test]
+    fn max_eapol_per_type_off_emits_all_pairs() {
+        // cap = 0 (default): every distinct M1 ANonce pairs with the M2.
+        let mut msgs: Vec<EapolMessage> = (0..10u8).map(|i| make_msg(MsgType::M1, 1, u64::from(i), 0x10 + i)).collect();
+        msgs.push(make_msg(MsgType::M2, 1, 1000, 0xBB));
+        let (pairs, fs) = generate(ap(), sta(), &msgs, &default_config());
+        assert_eq!(pairs.len(), 10, "all 10 M1xM2 N1E2 pairs emitted when the cap is off");
+        assert_eq!(fs.messages_capped, 0);
+    }
+
+    #[test]
+    fn max_eapol_per_type_caps_pairing() {
+        // 10 M1s x 1 M2 with cap = 4: only the first 4 M1s pair -> 4 N1E2 pairs;
+        // the other 6 M1s are excluded from pairing (the store still holds all).
+        let mut msgs: Vec<EapolMessage> = (0..10u8).map(|i| make_msg(MsgType::M1, 1, u64::from(i), 0x10 + i)).collect();
+        msgs.push(make_msg(MsgType::M2, 1, 1000, 0xBB));
+        let config = PairConfig { max_eapol_per_type: 4, ..PairConfig::default() };
+        let (pairs, fs) = generate(ap(), sta(), &msgs, &config);
+        assert_eq!(pairs.len(), 4, "cap=4 bounds N1E2 to 4 pairs");
+        assert_eq!(fs.messages_capped, 6, "6 of 10 M1s excluded from pairing");
+    }
+
+    #[test]
+    fn max_eapol_per_type_caps_streaming_identically() {
+        // The streaming path (used for mega-groups) must honour the same cap.
+        let mut msgs: Vec<EapolMessage> = (0..10u8).map(|i| make_msg(MsgType::M1, 1, u64::from(i), 0x10 + i)).collect();
+        msgs.push(make_msg(MsgType::M2, 1, 1000, 0xBB));
+        let config = PairConfig { max_eapol_per_type: 4, ..PairConfig::default() };
+        let mut streamed = 0usize;
+        let fs = generate_streaming(ap(), sta(), &msgs, &config, |chunk| streamed += chunk.len());
+        assert_eq!(streamed, 4, "streaming path honours cap=4");
+        assert_eq!(fs.messages_capped, 6);
+    }
+
+    #[test]
     fn generate_no_pairs_timeout() {
         // M1 at ts=0, M2 at ts=6_000_000 (6 s) with a 5 s window -> no pairs.
         // Use a tight config with a 5_000_000 us timeout to exercise the time check.
@@ -1004,6 +1076,7 @@ mod tests {
             eapol_timeout_us: 5_000_000,
             nc_dedup_enabled: false,
             nc_tolerance: 8,
+            max_eapol_per_type: 0,
         };
         let (pairs, _) = generate(ap(), sta(), &msgs, &tight);
         // With rc_drift active and tolerance=8, the pair should be found with NC set.

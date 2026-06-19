@@ -88,7 +88,9 @@ impl Logger {
     /// Returns `Err` if the log file cannot be created.
     pub fn new(path: Option<&std::path::Path>) -> Result<Self> {
         let writer = match path {
-            Some(p) => Some(BufWriter::new(std::fs::File::create(p)?)),
+            Some(p) => Some(BufWriter::new(
+                std::fs::File::create(p).map_err(|e| crate::types::Error::io(e, p, "create log file"))?,
+            )),
             None => None,
         };
         Ok(Self {

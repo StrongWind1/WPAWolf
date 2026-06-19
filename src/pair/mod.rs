@@ -116,6 +116,13 @@ use crate::types::{MacPair, MsgType};
 /// so the fan-out's disk-backed dedup bounds output-side memory too.
 const STREAM_PAIR_COST: u64 = 2_000_000;
 
+/// Per-group cost at or above which a group is paired under an exclusive lock so
+/// at most one such heavy group runs at a time. Set equal to `STREAM_PAIR_COST`
+/// so the serialized set is exactly the streaming-path mega-groups, whose
+/// per-frame pairing transients (x thread count) would otherwise dominate
+/// Phase-4 peak memory. Light groups stay fully parallel. C2.
+const SERIALIZE_GROUP_COST: u64 = STREAM_PAIR_COST;
+
 /// Folds `other` into `acc` in place: `collapsed_lines`, `cluster_count`, and
 /// the opt-in filter drops sum component-wise; `max_cluster_size` takes the
 /// larger of the two.
@@ -124,6 +131,7 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
     acc.cluster_count += other.cluster_count;
     acc.time_filtered += other.time_filtered;
     acc.rc_filtered += other.rc_filtered;
+    acc.messages_capped += other.messages_capped;
     if other.max_cluster_size > acc.max_cluster_size {
         acc.max_cluster_size = other.max_cluster_size;
     }
@@ -166,6 +174,7 @@ fn pair_one_group(
     // streaming and disk merge paths already aggregate.
     nc.time_filtered = filter_stats.time_filtered;
     nc.rc_filtered = filter_stats.rc_filtered;
+    nc.messages_capped = filter_stats.messages_capped;
     (pairs, nc)
 }
 
@@ -197,6 +206,7 @@ fn pair_one_group_streaming(
     });
     nc_total.time_filtered = filter_stats.time_filtered;
     nc_total.rc_filtered = filter_stats.rc_filtered;
+    nc_total.messages_capped = filter_stats.messages_capped;
     nc_total
 }
 
@@ -240,10 +250,18 @@ where
     let groups_done = AtomicUsize::new(0);
     let pairs_done = AtomicUsize::new(0);
     let all_nc = Mutex::new(NcDedupStats::default());
+    // Serializes mega-groups so at most one runs at a time (C2). A light group
+    // never touches this lock and stays fully parallel.
+    let heavy_gate = Mutex::new(());
 
     let process_group = |mac_pair: &MacPair, messages: &[EapolMessage]| {
         let (m1, m2, m3, m4, cost) = group_counts_and_cost(messages);
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
+        // Hold the heavy-group gate for the whole pairing + fan-out of a mega-group
+        // so concurrent per-group transients can't sum across rayon workers. The
+        // guard releases when this closure returns; light groups pass `None`. C2.
+        let _heavy_guard = (cost >= SERIALIZE_GROUP_COST)
+            .then(|| heavy_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         if cost >= HEAVY_GROUP_COST {
             let ctx = format!(
                 "Phase 4 pairing ap={} sta={} m1={m1} m2={m2} m3={m3} m4={m4} cost={cost}",
@@ -382,12 +400,17 @@ fn group_counts_and_cost(messages: &[EapolMessage]) -> (usize, usize, usize, usi
             MsgType::M4 => m4 += 1,
         }
     }
-    let cost = (m1 as u64) * (m2 as u64)
-        + (m1 as u64) * (m4 as u64)
-        + (m3 as u64) * (m2 as u64)
-        + (m2 as u64) * (m3 as u64)
-        + (m4 as u64) * (m3 as u64)
-        + (m3 as u64) * (m4 as u64);
+    // Saturating arithmetic (CR-22): with the uncapped default a hyperactive
+    // group's per-type products can in principle overflow u64; saturating to
+    // u64::MAX still sorts the group as "heaviest", the correct scheduling call,
+    // instead of panicking under `overflow-checks`.
+    let cost = (m1 as u64)
+        .saturating_mul(m2 as u64)
+        .saturating_add((m1 as u64).saturating_mul(m4 as u64))
+        .saturating_add((m3 as u64).saturating_mul(m2 as u64))
+        .saturating_add((m2 as u64).saturating_mul(m3 as u64))
+        .saturating_add((m4 as u64).saturating_mul(m3 as u64))
+        .saturating_add((m3 as u64).saturating_mul(m4 as u64));
     (m1, m2, m3, m4, cost)
 }
 

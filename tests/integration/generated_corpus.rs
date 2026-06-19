@@ -42,7 +42,7 @@ fn binary_path() -> PathBuf {
 fn run_wpawolf(input: &Path) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let status = Command::new(&bin).arg("-o").arg(&combined).arg(input).status().expect("spawn wpawolf");
     assert!(status.success(), "wpawolf failed on {}", input.display());
@@ -53,7 +53,7 @@ fn run_wpawolf(input: &Path) -> String {
 fn run_wpawolf_multi(inputs: &[&Path]) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let mut cmd = Command::new(&bin);
     cmd.arg("-o").arg(&combined);
@@ -65,9 +65,15 @@ fn run_wpawolf_multi(inputs: &[&Path]) -> String {
     fs::read_to_string(&combined).unwrap_or_default()
 }
 
-/// Per-call nanosecond suffix so parallel test threads don't share temp paths.
-fn nanos_unique() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+/// Per-call unique suffix so parallel test threads -- which all share this
+/// process's PID -- never collide on a temp path. Uses a process-wide atomic
+/// counter, not the wall clock: under heavy `make check-all` load two threads
+/// sampled the same coarse `SystemTime` instant, generated the same `-o` temp
+/// filename, and clobbered each other -- interleaving one fixture's hash lines
+/// into another's output file and tripping the link-layer consistency assertion.
+fn unique_suffix() -> u128 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    u128::from(SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Capture wpawolf's stdout (where the stats summary is printed) for one
@@ -76,7 +82,7 @@ fn nanos_unique() -> u128 {
 fn run_wpawolf_capture_stats(input: &Path) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let output = Command::new(&bin).arg("-o").arg(&combined).arg(input).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf failed on {}", input.display());
@@ -126,7 +132,8 @@ fn sha384_types_reported_as_found_without_a_matching_sink() {
         return; // corpus not generated
     }
     let bin = binary_path();
-    let out22000 = std::env::temp_dir().join(format!("wpawolf-sha384-{}-{}.22000", std::process::id(), nanos_unique()));
+    let out22000 =
+        std::env::temp_dir().join(format!("wpawolf-sha384-{}-{}.22000", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&out22000);
     // ONLY --22000-out -- no -o, no --psk-sha384-out -- so SHA-384 has no sink.
     let output = Command::new(&bin).arg("--22000-out").arg(&out22000).arg(&fixture).output().expect("spawn wpawolf");
@@ -265,6 +272,41 @@ fn container_fixtures_emit_consistent_output() {
     for o in &outputs[1..] {
         assert_eq!(o, baseline, "container outputs diverge -- regression in src/input/*");
     }
+}
+
+/// Forcing the disk-backed dedup path (`WPAWOLF_MEM_THRESHOLD=0`, which spills
+/// immediately regardless of box RAM) must produce the same hash SET as the
+/// default in-memory path. This guards the disk-dedup + cleaning-pass machinery
+/// that the C2 mid-stream switch reuses (set-equivalence, ARCHITECTURE.md §4
+/// invariant 2). The mid-stream switch's line-base seeding is unit-tested
+/// separately in `output::disk_dedup`.
+#[test]
+fn disk_mode_output_set_matches_memory_mode() {
+    let root = Path::new(CORPUS_ROOT);
+    if !root.exists() {
+        return;
+    }
+    let bin = binary_path();
+    let run = |threshold: Option<&str>| -> Vec<String> {
+        let combined =
+            std::env::temp_dir().join(format!("wpawolf-diskcmp-{}-{}.combined", std::process::id(), unique_suffix()));
+        let _ = fs::remove_file(&combined);
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-o").arg(&combined).arg(root);
+        if let Some(t) = threshold {
+            cmd.env("WPAWOLF_MEM_THRESHOLD", t);
+        }
+        assert!(cmd.status().expect("spawn wpawolf").success(), "wpawolf must exit 0 (threshold={threshold:?})");
+        let mut lines: Vec<String> =
+            fs::read_to_string(&combined).unwrap_or_default().lines().map(str::to_owned).collect();
+        let _ = fs::remove_file(&combined);
+        lines.sort_unstable();
+        lines
+    };
+    let memory = run(None);
+    let disk = run(Some("0"));
+    assert!(!memory.is_empty(), "corpus should produce some hashes");
+    assert_eq!(memory, disk, "disk-backed dedup output set must equal memory-mode output set");
 }
 
 fn walk_dir_no_crash(rel: &str) {

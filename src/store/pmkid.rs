@@ -197,7 +197,8 @@ impl PmkidStore {
         }
         let dir = std::env::temp_dir();
         let path = dir.join(format!("wpawolf_pmkids_{}.bin", std::process::id()));
-        let file = std::fs::File::create(&path)?;
+        let file = std::fs::File::create(&path)
+            .map_err(|e| crate::types::Error::io(e, path.clone(), "create PMKID spill file"))?;
         let mut writer = BufWriter::new(file);
         let mut offset: u64 = 0;
 

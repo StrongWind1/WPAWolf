@@ -27,7 +27,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
-    mem_monitor::MemMonitor,
+    mem_monitor::{MemMonitor, MemWatcher},
     output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
@@ -199,6 +199,12 @@ struct Cli {
     #[arg(long, value_name = "N", help_heading = "Output filters", display_order = 25)]
     nc_tolerance: Option<u8>,
 
+    /// Cap pairing to the first N messages of each type per (AP, STA) [default: unlimited]
+    ///
+    /// Absent or 0 = unlimited (never miss; the store always keeps every message). N > 0 bounds each N#E# combo to N^2 pairs, taming rotating-ANonce groups that would otherwise generate billions of near-duplicate lines. Pairing iterates only the first N messages of each type; nothing is evicted from the store.
+    #[arg(long, value_name = "N", default_value_t = 0, help_heading = "Output filters", display_order = 26)]
+    max_eapol_per_type: usize,
+
     /// Min SSIDs per AP before collapse fires
     ///
     /// APs with N or fewer distinct SSIDs always emit all of them. Raise for CTF captures where many real SSIDs are expected.
@@ -333,6 +339,26 @@ fn main() {
                 std::process::exit(1);
             }
         }
+
+        // Fail fast on an unwritable output or spill target. The field failure was
+        // a post-Phase-4 EACCES while creating the first aux file -- probing every
+        // sink's parent dir plus the temp/spill dir up front turns hours of wasted
+        // work into an immediate, legible error. [C4]
+        let temp_dir = std::env::temp_dir();
+        let mut probed: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+        let probe_dirs = paths
+            .iter()
+            .map(|p| p.parent().unwrap_or_else(|| std::path::Path::new(".")))
+            .chain(std::iter::once(temp_dir.as_path()));
+        for dir in probe_dirs {
+            if !probed.insert(dir) {
+                continue;
+            }
+            if let Err(e) = probe_dir_writable(dir) {
+                println!("error: cannot write to {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
     }
 
     if let Err(e) = run(&cli) {
@@ -383,6 +409,33 @@ fn strip_and_resolve<'a>(
             }
         },
     }
+}
+
+/// Builds the Phase-4 pairing config from the parsed CLI. All output filters
+/// default to off (WIDE mode -- "never miss"); see the `Cli` field docs.
+fn build_pair_config(cli: &Cli) -> PairConfig {
+    PairConfig {
+        eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
+        rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
+        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
+        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
+        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
+        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
+        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
+        max_eapol_per_type: cli.max_eapol_per_type, // 0 = unlimited (off by default)
+    }
+}
+
+/// Probes whether `dir` accepts writes by creating and removing a uniquely
+/// named probe file. Run at startup for every output sink's parent directory and
+/// the temp/spill directory so an unwritable target aborts the run immediately
+/// instead of after a multi-hour Phase 4 (the field failure was a post-Phase-4
+/// `Permission denied` while creating the first aux file). [C4]
+fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
+    let probe = dir.join(format!(".wpawolf_probe_{}", std::process::id()));
+    std::fs::File::create(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Reconciles the two disk-mode authorities before Phase 4.
@@ -474,15 +527,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut mem_monitor = MemMonitor::new();
 
     // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
-    let pair_config = PairConfig {
-        eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
-        rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
-        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
-        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
-        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
-        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
-        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
-    };
+    let pair_config = build_pair_config(cli);
 
     let paths = OutputPaths {
         out_22000: cli.out_22000.clone(),
@@ -954,6 +999,15 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         message_store.flush_disk_writer();
         pmkid_store.flush_disk_writer();
 
+        // Keep the `peak RSS` banner honest across the Phase-4 fan-out. The monitor
+        // is polled per-file in Phase 1 but never during pairing/emit, so transient
+        // allocation spikes (the fan-out's dedup set + per-group pairs) are invisible
+        // to the sampled peak. This 250 ms background sampler folds the true
+        // high-water into the same atomic the banner reads. The guard stops and
+        // joins when this block ends, just before `finalize`. [C3]
+        let _mem_watcher =
+            MemWatcher::spawn(mem_monitor.peak_handle(), mem_monitor.threshold_bytes(), mem_monitor.disk_trip_handle());
+
         output_ctx.emit(
             &message_store,
             &pmkid_store,
@@ -1012,6 +1066,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.nc_dedup_max_cluster_size = output_stats.nc_dedup_max_cluster_size;
         stats.pairs_time_filtered = output_stats.pairs_time_filtered;
         stats.pairs_rc_filtered = output_stats.pairs_rc_filtered;
+        stats.eapol_messages_capped = output_stats.messages_capped;
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;

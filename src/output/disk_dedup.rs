@@ -44,16 +44,18 @@ struct DiskDedupSink {
 }
 
 impl DiskDedupSink {
-    fn new(bucket_dir: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(&bucket_dir)?;
-        Ok(Self { bucket_writers: (0..NUM_BUCKETS).map(|_| None).collect(), bucket_dir, line_count: 0 })
+    fn new(bucket_dir: PathBuf, line_base: u64) -> Result<Self> {
+        std::fs::create_dir_all(&bucket_dir)
+            .map_err(|e| crate::types::Error::io(e, bucket_dir.clone(), "create dedup bucket dir"))?;
+        Ok(Self { bucket_writers: (0..NUM_BUCKETS).map(|_| None).collect(), bucket_dir, line_count: line_base })
     }
 
     #[allow(clippy::indexing_slicing, reason = "bucket_idx always < NUM_BUCKETS from % operation")]
     fn get_or_create_writer(&mut self, bucket_idx: usize) -> Result<&mut BufWriter<std::fs::File>> {
         if self.bucket_writers[bucket_idx].is_none() {
             let path = self.bucket_dir.join(format!("b{bucket_idx:03}.bin"));
-            let file = std::fs::File::create(path)?;
+            let file = std::fs::File::create(&path)
+                .map_err(|e| crate::types::Error::io(e, path, "create dedup bucket file"))?;
             self.bucket_writers[bucket_idx] = Some(BufWriter::with_capacity(BUCKET_BUF_CAPACITY, file));
         }
         Ok(self.bucket_writers[bucket_idx].as_mut().unwrap_or_else(|| unreachable!()))
@@ -106,16 +108,35 @@ impl DiskDedup {
     ///
     /// Returns `Err` if the temp directory cannot be created.
     pub fn new(active_mask: &[bool; SinkId::COUNT]) -> Result<Self> {
+        Self::new_with_offsets(active_mask, &[0; SinkId::COUNT])
+    }
+
+    /// Like [`Self::new`] but seeds each sink's line counter from `line_offsets`.
+    ///
+    /// Used for a mid-emission switchover (C2): lines were already written to the
+    /// output files in memory-dedup mode, so `record()` must number new lines from
+    /// that base. `rewrite_without_lines` indexes *absolute* file lines, so a base
+    /// of 0 here would make the cleaning pass remove the wrong lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the temp directory cannot be created.
+    pub fn new_with_offsets(
+        active_mask: &[bool; SinkId::COUNT],
+        line_offsets: &[usize; SinkId::COUNT],
+    ) -> Result<Self> {
         let seq = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base_dir = std::env::temp_dir().join(format!("wpawolf_dedup_{}_{seq}", std::process::id()));
-        std::fs::create_dir_all(&base_dir)?;
+        std::fs::create_dir_all(&base_dir)
+            .map_err(|e| crate::types::Error::io(e, base_dir.clone(), "create dedup temp dir"))?;
 
         let mut sinks: [Option<DiskDedupSink>; SinkId::COUNT] = Default::default();
         for (idx, active) in active_mask.iter().enumerate() {
             if *active {
                 let sink_dir = base_dir.join(format!("sink_{idx}"));
+                let line_base = line_offsets.get(idx).copied().map_or(0, |n| u64::try_from(n).unwrap_or(u64::MAX));
                 if let Some(slot) = sinks.get_mut(idx) {
-                    *slot = Some(DiskDedupSink::new(sink_dir)?);
+                    *slot = Some(DiskDedupSink::new(sink_dir, line_base)?);
                 }
             }
         }
@@ -449,6 +470,52 @@ mod tests {
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(content, "unique_line\n", "sentinel should cause line 0 to be removed");
+
+        dd.cleanup();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_with_offsets_seeds_line_base_for_midstream_switch() {
+        let dir = std::env::temp_dir().join(format!("wpawolf_test_dedup_{}_d", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out_path = dir.join("test.22000");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Two pre-switch lines (written in memory-dedup mode), then three
+        // write-through lines after a mid-stream switch. Line 4 duplicates the
+        // fingerprint of pre-switch line 0.
+        {
+            let mut f = std::fs::File::create(&out_path).unwrap();
+            writeln!(f, "preswitch_0").unwrap(); // absolute line 0, fp 100
+            writeln!(f, "preswitch_1").unwrap(); // absolute line 1, fp 200
+            writeln!(f, "post_2").unwrap(); // absolute line 2, fp 300
+            writeln!(f, "post_3").unwrap(); // absolute line 3, fp 400
+            writeln!(f, "dup_of_pre0").unwrap(); // absolute line 4, fp 100 (dup)
+        }
+
+        // Switch mid-stream: two lines already written to this sink -> base 2.
+        let mut offsets = [0usize; SinkId::COUNT];
+        offsets[SinkId::Out22000.as_index()] = 2;
+        let mut dd = DiskDedup::new_with_offsets(&active_mask_single(), &offsets).unwrap();
+
+        // Pre-switch in-memory fingerprints become sentinels.
+        let mut sentinels = HashSet::new();
+        sentinels.insert(100u64);
+        sentinels.insert(200u64);
+        dd.flush_hashset(SinkId::Out22000, &sentinels).unwrap();
+
+        // Post-switch write-through records number from the seeded base (2, 3, 4).
+        dd.record(SinkId::Out22000, 300).unwrap(); // line 2
+        dd.record(SinkId::Out22000, 400).unwrap(); // line 3
+        dd.record(SinkId::Out22000, 100).unwrap(); // line 4 -- dup of sentinel 100
+
+        dd.clean_all(|sink| if sink == SinkId::Out22000 { Some(out_path.clone()) } else { None }).unwrap();
+
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        // Without line-base seeding the removal set would target line 2 and delete
+        // "post_2"; seeded, it correctly removes the absolute dup line 4.
+        assert_eq!(content, "preswitch_0\npreswitch_1\npost_2\npost_3\n");
 
         dd.cleanup();
         let _ = std::fs::remove_dir_all(&dir);

@@ -358,12 +358,16 @@ impl GroupSummary {
                 MsgType::M4 => m4 += 1,
             }
         }
-        let cost = (m1 as u64) * (m2 as u64)
-            + (m1 as u64) * (m4 as u64)
-            + (m3 as u64) * (m2 as u64)
-            + (m2 as u64) * (m3 as u64)
-            + (m4 as u64) * (m3 as u64)
-            + (m3 as u64) * (m4 as u64);
+        // Saturating arithmetic (CR-22): mirrors `pair::group_counts_and_cost`;
+        // an uncapped hyperactive group's products can overflow u64, and this
+        // survey runs before Phase 4, so it must not panic first.
+        let cost = (m1 as u64)
+            .saturating_mul(m2 as u64)
+            .saturating_add((m1 as u64).saturating_mul(m4 as u64))
+            .saturating_add((m3 as u64).saturating_mul(m2 as u64))
+            .saturating_add((m2 as u64).saturating_mul(m3 as u64))
+            .saturating_add((m4 as u64).saturating_mul(m3 as u64))
+            .saturating_add((m3 as u64).saturating_mul(m4 as u64));
         Self { ap, sta, m1, m2, m3, m4, cost }
     }
 }

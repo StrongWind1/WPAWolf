@@ -184,6 +184,9 @@ pub struct OutputStats {
     /// Candidate pairs dropped by the `--rc-drift` filter, summed across all
     /// groups (`NcDedupStats::rc_filtered`). Zero in WIDE mode.
     pub pairs_rc_filtered: u64,
+    /// Messages excluded from pairing by the `--max-eapol-per-type` cap, summed
+    /// across all groups (`NcDedupStats::messages_capped`). Zero when off.
+    pub messages_capped: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
@@ -261,7 +264,9 @@ impl LazySink {
     /// Returns a writable handle, creating (and truncating) the file on first call.
     fn writer(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
         if self.writer.is_none() {
-            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(&self.path)?));
+            let file = std::fs::File::create(&self.path)
+                .map_err(|e| crate::types::Error::io(e, self.path.clone(), "create hash sink"))?;
+            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file));
         }
         // The branch above guarantees Some.
         Ok(self.writer.as_mut().unwrap_or_else(|| unreachable!()))
@@ -693,6 +698,7 @@ impl OutputContext {
             }
         }
 
+        let disk_trip = mem_monitor.disk_trip_handle();
         self.emit_inner(
             message_store,
             pmkid_store,
@@ -702,7 +708,12 @@ impl OutputContext {
             thread_count,
             essid_filter,
             debug,
+            &disk_trip,
         )?;
+        // Reconcile the monitor's sticky disk-mode flag for the Phase-5 banner: if
+        // the watcher tripped (and drove the mid-stream switch in `emit_inner`),
+        // record that the run went disk-backed. C2.
+        mem_monitor.poll_disk_trip();
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
     }
@@ -758,6 +769,7 @@ impl OutputContext {
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
+        disk_trip: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
         let any_sink = self.sinks.any_configured();
         let stats = &mut self.stats;
@@ -868,6 +880,37 @@ impl OutputContext {
                     return;
                 }
 
+                // Mid-stream switch to disk-backed dedup when the C2 watcher
+                // signalled memory pressure. Sticky: once `disk_dedup` is `Some`
+                // the check is skipped. The in-memory fingerprints already written
+                // are flushed as sentinels into a line-base-seeded `DiskDedup`
+                // (`len_for_sink` == lines already in each file), then the ~57 GB
+                // set is dropped. `fan_out` auto-routes to write-through disk dedup
+                // from here, and `finalize`'s cleaning pass removes the dupes.
+                if any_sink && guard.disk_dedup.is_none() && disk_trip.load(std::sync::atomic::Ordering::Relaxed) {
+                    let active = guard.sinks.active_mask();
+                    let mut offsets = [0usize; SinkId::COUNT];
+                    for (i, off) in offsets.iter_mut().enumerate() {
+                        if let Some(sink) = SinkId::from_index(i) {
+                            *off = guard.dedup.len_for_sink(sink);
+                        }
+                    }
+                    match disk_dedup::DiskDedup::new_with_offsets(&active, &offsets) {
+                        Ok(mut new_dd) => {
+                            if let Err(e) = guard.dedup.flush_to_buckets(&mut new_dd) {
+                                guard.first_error = Some(e);
+                                return;
+                            }
+                            guard.dedup.drain();
+                            *guard.disk_dedup = Some(new_dd);
+                        },
+                        Err(e) => {
+                            guard.first_error = Some(e);
+                            return;
+                        },
+                    }
+                }
+
                 if any_sink {
                     let EmitState {
                         sinks: s,
@@ -970,6 +1013,7 @@ impl OutputContext {
         es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
         es.stats.pairs_time_filtered += nc_stats.time_filtered;
         es.stats.pairs_rc_filtered += nc_stats.rc_filtered;
+        es.stats.messages_capped += nc_stats.messages_capped;
 
         let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
         debug.phase4_pairs_generated(total_pairs);
@@ -1039,38 +1083,52 @@ impl OutputContext {
         // file and the process would still exit `0`.
 
         if let Some(path) = &paths.essid_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create ESSID list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_essid = write_essid_list(essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.probe_essid_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create probe-ESSID list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_probe = write_probe_essid_list(probe_essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file =
+                std::fs::File::create(path).map_err(|e| crate::types::Error::io(e, path.clone(), "create wordlist"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_wordlist = write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist_scan {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create IE-scan wordlist"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_wordlist_scan =
                 write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create identity list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_identity = write_identities(identity_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.username_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create username list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_username = write_usernames(username_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.device_info {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create device-info list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
             self.stats.entries_device = write_device_info(device_store, &mut f)?;
             f.flush()?;
         }

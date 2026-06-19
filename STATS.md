@@ -208,6 +208,7 @@ Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTU
 | NC-dedup lines collapsed / cluster count / max cluster | `nc_dedup_collapsed_lines`, `nc_dedup_cluster_count`, `nc_dedup_max_cluster_size` | §5.8.1 | `--nc-dedup` folded near-identical-nonce siblings into one survivor. | informational (lines folded, not lost) |
 | candidates dropped (--eapoltimeout filter) | `pairs_time_filtered` | FR-PAIR-3 | Opt-in session-window filter removed these candidate pairs (zero in WIDE mode). | **dropped** (filter) |
 | candidates dropped (--rc-drift filter) | `pairs_rc_filtered` | FR-PAIR-4 | Opt-in replay-counter filter removed these candidate pairs (zero in WIDE mode). | **dropped** (filter) |
+| messages dropped (--max-eapol-per-type cap) | `eapol_messages_capped` | FR-CLI | Opt-in pairing cap excluded these messages from fan-out (zero when off; store still keeps all). | **dropped** (cap) |
 | RC gap max | `rc_gap_max`, `rc_drift_enabled` | §5.7 | Largest RC gap among written pairs; suggests an NC threshold. | informational |
 | PMKIDs written (post-dedup) | `pmkids_written` | §6 | PMKID hashes that survived dedup at least once. | skeleton |
 | dedup dropped (total) + EAPOL/PMKID children | `dedup_dropped`, `dedup_dropped_pairs`, `dedup_dropped_pmkids` | FR-DEDUP | Duplicate hash lines suppressed by global SipHash dedup, split by kind so the pre-dedup totals reconcile. | **dropped** (duplicates) |

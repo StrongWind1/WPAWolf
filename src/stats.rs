@@ -407,6 +407,11 @@ pub struct Stats {
     /// per-combo RC relationship exceeded the tolerance). Off by default; only
     /// nonzero when `--rc-drift` / `--strict` is set. [ARCHITECTURE.md §8 FR-PAIR-4]
     pub pairs_rc_filtered: u64,
+    /// Messages excluded from pairing by the opt-in `--max-eapol-per-type` cap,
+    /// summed across all groups. Off by default (the store always keeps every
+    /// message); only nonzero when the operator sets a cap on a rotating-ANonce
+    /// corpus. [ARCHITECTURE.md §8 FR-CLI]
+    pub eapol_messages_capped: u64,
 
     // --- RC / NC / endianness stats ---
     /// Maximum actual RC gap magnitude seen across useful pairs written to output.
@@ -1525,6 +1530,7 @@ impl Stats {
         // as their own lines rather than folded into the generated/written gap.
         nz!("  candidates dropped (--eapoltimeout filter)", self.pairs_time_filtered);
         nz!("  candidates dropped (--rc-drift filter)", self.pairs_rc_filtered);
+        nz!("  messages dropped (--max-eapol-per-type cap)", self.eapol_messages_capped);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
             // Firmware bugs and replay-counter corruption in wild captures produce
             // values like 2^56. Cap the display at 2^32 so the "suggested threshold"
@@ -1989,6 +1995,29 @@ mod tests {
         *s.dlt_descs_seen.entry("DLT_IEEE802_11 (105)".to_owned()).or_insert(0) += 5;
         s.last_file = "/captures/last.pcap".to_owned();
         s.print_summary();
+    }
+
+    #[test]
+    fn eapol_time_gap_ignores_implausible_timestamps() {
+        let mut s = Stats::new();
+        let ap = MacAddr::from_bytes([0x11; 6]);
+        let sta = MacAddr::from_bytes([0x22; 6]);
+        // A real first reading, then a near-2^64 corrupt clock. The gap must NOT
+        // be computed against the garbage value -- that manufactured ~1.8e16 ms
+        // session gaps in the field. The implausible reading is ignored.
+        s.update_eapol_time_gap(ap, sta, 1_700_000_000_000_000);
+        s.update_eapol_time_gap(ap, sta, u64::MAX);
+        assert_eq!(s.eapol_time_gap_max_us, 0, "implausible timestamp must not poison the gap");
+    }
+
+    #[test]
+    fn eapol_time_gap_records_plausible_gap() {
+        let mut s = Stats::new();
+        let ap = MacAddr::from_bytes([0x11; 6]);
+        let sta = MacAddr::from_bytes([0x22; 6]);
+        s.update_eapol_time_gap(ap, sta, 1_700_000_000_000_000);
+        s.update_eapol_time_gap(ap, sta, 1_700_000_000_500_000);
+        assert_eq!(s.eapol_time_gap_max_us, 500_000, "a plausible gap must still be recorded");
     }
 
     /// Lights up every banner row, then asserts each rendered row keeps at

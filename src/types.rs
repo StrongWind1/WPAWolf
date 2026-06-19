@@ -527,6 +527,19 @@ impl PmkidSource {
 pub enum Error {
     /// An underlying I/O operation failed.
     Io(std::io::Error),
+    /// An I/O operation failed, carrying the path and operation that triggered
+    /// it. Preferred over [`Self::Io`] at file open / create sites so the message
+    /// names *which* path and *what* operation failed -- a bare `std::io::Error`
+    /// carries neither, which left a post-Phase-4 EACCES on an aux file
+    /// undiagnosable in the field.
+    IoWithContext {
+        /// The filesystem path the operation targeted.
+        path: std::path::PathBuf,
+        /// Short verb phrase naming the operation, e.g. `"create ESSID list"`.
+        operation: &'static str,
+        /// The underlying OS error.
+        source: std::io::Error,
+    },
     /// The file's magic bytes do not match any supported format.
     UnknownFormat(String),
     /// An unknown CLI flag was passed.
@@ -551,10 +564,23 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Wraps an [`std::io::Error`] with the path and operation that produced it,
+    /// so the operator-facing message is actionable. Use at `File::create` /
+    /// `create_dir_all` sites where the path is known but would otherwise be lost.
+    #[must_use]
+    pub fn io(source: std::io::Error, path: impl Into<std::path::PathBuf>, operation: &'static str) -> Self {
+        Self::IoWithContext { path: path.into(), operation, source }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::IoWithContext { path, operation, source } => {
+                write!(f, "I/O error: {operation} {}: {source}", path.display())
+            },
             Self::UnknownFormat(hex) => write!(f, "unrecognised file format (magic bytes: {hex})"),
             Self::UnknownOption(flag) => write!(f, "unknown option: {flag}"),
             Self::MissingArgument(flag) => write!(f, "{flag} requires an argument"),
@@ -571,7 +597,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::IoWithContext { source: e, .. } => Some(e),
             _ => None,
         }
     }
@@ -1082,6 +1108,25 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn io_with_context_display_and_source() {
+        let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied (os error 13)");
+        let err = Error::io(inner, std::path::Path::new("/out/wwE.txt"), "create ESSID list");
+        let msg = err.to_string();
+        assert!(msg.contains("create ESSID list"), "operation in message: {msg}");
+        assert!(msg.contains("/out/wwE.txt"), "path in message: {msg}");
+        assert!(msg.contains("Permission denied"), "source in message: {msg}");
+        assert!(std::error::Error::source(&err).is_some(), "source() must expose the inner io::Error");
+    }
+
+    #[test]
+    fn is_plausible_epoch_us_bounds() {
+        assert!(!is_plausible_epoch_us(0), "zero (zeroed clock) is implausible");
+        assert!(is_plausible_epoch_us(1_700_000_000_000_000), "a 2023-era epoch-us is plausible");
+        assert!(!is_plausible_epoch_us(SANE_EPOCH_CEILING_US), "the ceiling itself is excluded");
+        assert!(!is_plausible_epoch_us(u64::MAX), "near-2^64 container corruption is implausible");
+    }
 
     #[test]
     fn encode_hex_empty() {

@@ -66,6 +66,10 @@ pub struct NcDedupStats {
     /// Candidate pairs dropped by the `--rc-drift` filter in `generate`. Zero in
     /// WIDE mode.
     pub rc_filtered: u64,
+    /// Messages excluded from pairing by the `--max-eapol-per-type` cap in
+    /// `generate`. Carried on the same per-group struct as the filter drops.
+    /// Zero when the cap is off (the default).
+    pub messages_capped: u64,
 }
 
 /// Collapses near-identical-nonce siblings within `pairs`, tagging the survivor
