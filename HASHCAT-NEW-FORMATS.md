@@ -29,12 +29,13 @@ EVEN code  =  PMKID attack    (no full handshake needed)
 ODD  code  =  EAPOL attack    (needs nonce + MIC frame)
 
 Ascending code  =  ascending hash complexity
-   01            WPA1 / TKIP            (HMAC-MD5 MIC, PRF-SHA1 PTK)
-   02-03         WPA2-PSK               (HMAC-SHA1, 16 B MIC)
-   04-05         PSK-SHA256 flat        (HMAC-SHA256, AES-CMAC, 16 B MIC)
-   06-07         FT-PSK SHA-256         (FT chain + SHA-256, 16 B MIC, FT extras)
-   08-09         PSK-SHA384 flat        (HMAC-SHA384, KDF-SHA384, 24 B MIC)
-   10-11         FT-PSK SHA-384         (FT chain + SHA-384, 24 B MIC, FT extras)
+   (each row lists, in order: PMKID primitive; PTK KDF; MIC algorithm, width; FT extras if present)
+   01      WPA1 / TKIP      (no PMKID; PRF-SHA1 PTK; HMAC-MD5 MIC, 16 B)
+   02-03   WPA2-PSK         (HMAC-SHA1 PMKID; PRF-SHA1 PTK; HMAC-SHA1 MIC, 16 B)
+   04-05   PSK-SHA256 flat  (HMAC-SHA256 PMKID; KDF-SHA256 PTK; AES-128-CMAC MIC, 16 B)
+   06-07   FT-PSK SHA-256   (FT-KDF-SHA256 PMKID; FT-KDF-SHA256 PTK; AES-128-CMAC MIC, 16 B; FT extras)
+   08-09   PSK-SHA384 flat  (HMAC-SHA384 PMKID; KDF-SHA384 PTK; HMAC-SHA384 MIC, 24 B)
+   10-11   FT-PSK SHA-384   (FT-KDF-SHA384 PMKID; FT-KDF-SHA384 PTK; HMAC-SHA384 MIC, 24 B; FT extras)
 ```
 
 Type 01 (WPA1-PSK-EAPOL) is the only odd code without a PMKID partner: WPA1 has no PMKID field in its RSN IE, so there is nothing to attack on that path.
