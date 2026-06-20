@@ -1,11 +1,11 @@
 //! Phase 4 -- Emit: pairing engine entry point (consumes Phase 3 stores, produces hash candidates). See ARCHITECTURE.md §3.4 + §5.
 //!
-//! After Phase 1 (Collect) completes, iterates every (AP, STA) group in `MessageStore`,
+//! After Phases 1-3 (Collect) complete, iterates every (AP, STA) group in `MessageStore`,
 //! sorts messages by timestamp, generates all valid N#E# combination pairs via `combos`,
-//! collapses equivalence classes via `collapse`, and resolves ESSIDs from `EssidMap`.
-//! Also routes PMKIDs through ESSID resolution independently of the EAPOL pipeline
-//! (Invariant OUT-1 in `ARCHITECTURE.md §7`). Returns all `PairedHash` and PMKID
-//! entries for output. See `ARCHITECTURE.md §5`.
+//! collapses equivalence classes via `collapse`, and clusters near-nonce siblings via
+//! `nc_dedup`. Delivers each group's `PairedHash` values to the caller through a streaming
+//! per-group callback (`pair_all_groups_streaming`); ESSID resolution and PMKID emission
+//! happen in `output`, not here. See `ARCHITECTURE.md §5`.
 
 pub mod collapse;
 pub mod combos;
@@ -78,8 +78,8 @@ pub struct PairedHash {
     pub eapol_frame: Arc<[u8]>,
     /// Key MIC from the EAPOL message: 16 or 24 bytes, see [`MicBytes`].
     pub mic: MicBytes,
-    /// Encoded combo type (bits 0-2) plus RC relationship flags (bits 5-7).
-    /// Format: `combo_type as u8 | FLAG_LE? | FLAG_BE? | FLAG_NC?`
+    /// Encoded combo type (bits 0-2) plus flags (bits 4-7).
+    /// Format: `combo_type as u8 | FLAG_APLESS? | FLAG_LE? | FLAG_BE? | FLAG_NC?`
     pub message_pair: u8,
     /// AKM suite type -- determines output file (22000 vs 37100).
     pub akm: AkmType,

@@ -443,8 +443,8 @@ fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
 /// `emit()` borrows the stores immutably and cannot flush them; `run` owns them
 /// `&mut`. If the predicted Phase-4 hash-line allocation would cross the memory
 /// threshold (or disk mode is already engaged), both stores are spilled to disk
-/// so pairing takes the abort-free disk path (`pair_all_groups_disk`) instead of
-/// the in-memory path that hard-aborts under pressure. See ARCHITECTURE.md §4
+/// so pairing takes the disk path (`pair_all_groups_disk`), which loads one group
+/// at a time, instead of holding every group in memory. See ARCHITECTURE.md §4
 /// invariant 2 (spill, never drop).
 fn reconcile_disk_mode(
     output_ctx: &mut wpawolf::output::OutputContext,
@@ -465,12 +465,13 @@ fn reconcile_disk_mode(
 
 // --- Pipeline ---
 
-/// Runs the full two-phase (Collect + Output) pipeline.
+/// Runs the full collect-then-emit pipeline.
 ///
-/// Phase 1 iterates every input file, dispatches management and data frames to their
-/// respective collectors, and populates all in-memory stores. Phase 2 pairs EAPOL
-/// messages, deduplicates, and writes all requested output files. Returns `Err` only
-/// for I/O failures that should abort the run -- parse errors are logged and skipped.
+/// Phases 1-3 iterate every input file, dispatch management and data frames to their
+/// respective collectors, and populate all in-memory stores. Phase 4 pairs EAPOL
+/// messages, deduplicates, and writes all requested output files; Phase 5 prints the
+/// summary. Returns `Err` only for I/O failures that should abort the run -- parse
+/// errors are logged and skipped.
 fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // --- Debug printer (created once; no-op when --debug is off) ---
     let debug = DebugPrinter::new(cli.debug);
@@ -526,7 +527,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
     let mut mem_monitor = MemMonitor::new();
 
-    // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
+    // --- Phase 4 (Emit) setup: pair config, output paths, and output context built up front ---
     let pair_config = build_pair_config(cli);
 
     let paths = OutputPaths {
@@ -557,9 +558,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         EssidFilterConfig { collapse_min: cli.essid_collapse_min, collapse_ratio: cli.essid_collapse_ratio };
 
     // Hash-output state: opens lazily, accumulates dedup + per-AP unresolved-SSID
-    // bookkeeping across calls. Per-file mode calls `emit` once per file; non-per-file
-    // mode calls it once at end of run. Both modes converge on `finalize` to flush
-    // sinks and write auxiliary outputs.
+    // bookkeeping. `emit` runs once after ingestion completes, then `finalize` flushes
+    // sinks and writes auxiliary outputs.
     let mut output_ctx = wpawolf::output::OutputContext::new(&paths);
 
     // --- Phase 1: Collect ---
@@ -579,12 +579,12 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         let mut reader = match input::open_reader(path) {
             Ok(r) => r,
             Err(e) => {
-                // Route unrecognised-magic files through the log sink instead of stderr:
-                // the corpus-scale failure mode (submission-staging watch directories
-                // leaving sub-4-byte stubs behind) is "expected garbage", not
-                // "operator-affecting error".
+                // Route unrecognised-magic files through the log sink rather than the
+                // console: the corpus-scale failure mode (submission-staging watch
+                // directories leaving sub-4-byte stubs behind) is "expected garbage",
+                // not "operator-affecting error".
                 // Genuine I/O failures (permission denied, disk error) still surface on
-                // stderr so a runaway run doesn't silently misbehave.
+                // stdout so a runaway run doesn't silently misbehave.
                 if matches!(e, wpawolf::types::Error::UnknownFormat(_)) {
                     stats.files_skipped_unknown_format += 1;
                     logger.log_skipped_input(path, &e.to_string());

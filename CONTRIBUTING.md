@@ -26,7 +26,7 @@ wpawolf/
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
 
-The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 920 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
+The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 942 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
 
 ## Before you open a PR
 
@@ -76,7 +76,7 @@ Require a paragraph-long justification in the PR body addressing the rejected-cr
 - Over 1 MiB, keep out-of-tree and reference it from benchmarks only.
 - **Redact** real ESSIDs and client MAC addresses unless the capture comes from a lab network you control. wireshark's *Edit → Preferences → Name Resolution* + `editcap` can help.
 
-The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 75-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values; every legacy-sink line cracks end-to-end through hashcat 7.1.2 with PSK `hashcat!` except the documented kernel limitations (the PSK-SHA-256 PMKID lines and the two APLESS FT combos; see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8).
+The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 79-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values; every legacy-sink line cracks end-to-end through hashcat 7.1.2 with PSK `hashcat!` except the documented kernel limitations (the PSK-SHA-256 PMKID lines and the two APLESS FT combos; see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8).
 
 ## Reporting hashcat / hcxtools gaps
 

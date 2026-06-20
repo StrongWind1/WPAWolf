@@ -503,7 +503,7 @@ pub fn generate_streaming(
 ///
 /// Returns `None` when either the time-gap or the RC constraint rejects the pair.
 /// On success, encodes the `message_pair` byte: bits 0-2 hold the `ComboType` discriminant,
-/// bits 5-7 carry the RC relationship flags (`FLAG_LE`, `FLAG_BE`, `FLAG_NC`).
+/// bits 4-7 carry the flags (`FLAG_APLESS`, `FLAG_LE`, `FLAG_BE`, `FLAG_NC`).
 /// [hcxtools convention -- `message_pair` encoding]
 fn try_pair(
     ap: MacAddr,
@@ -632,9 +632,9 @@ pub struct PairFilterStats {
 ///
 /// Returns `(le, be)` where each bool is set on the first positive pairwise match.
 /// Both remain `false` for sessions with fewer than two M1/M3 messages combined
-/// (most short captures). Used by `generate()` to propagate the flag onto every
-/// paired hash with `FLAG_NC`, matching hcxpcapngtool's `status = ST_LE + ST_NC`
-/// / `ST_BE + ST_NC` encoding.
+/// (most short captures). Used by `generate()` and `generate_streaming()` to propagate
+/// the flag onto every paired hash with `FLAG_NC`, matching hcxpcapngtool's
+/// `status = ST_LE + ST_NC` / `ST_BE + ST_NC` encoding.
 fn detect_nonce_endianness(m1s: &[&EapolMessage], m3s: &[&EapolMessage]) -> (bool, bool) {
     let mut le = false;
     let mut be = false;

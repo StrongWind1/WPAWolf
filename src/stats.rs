@@ -3,7 +3,7 @@
 //! Tracks packet counts by frame type, EAPOL M1/M2/M3/M4 message counts, PMKID counts
 //! by AKM suite, handshake pairs by combo type and equivalence class, relay frame count,
 //! dedup stats (generated vs written), AKM distribution, and ESSID count. Prints a
-//! formatted summary to stderr unconditionally at the end of every run.
+//! formatted summary to stdout unconditionally at the end of every run.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -37,9 +37,9 @@ pub struct Stats {
     pub eapol_m3: u64,
     /// EAPOL-Key M4 frames stored.
     pub eapol_m4: u64,
-    /// PMKID store insertions (pre-dedup). In `--per-file` mode this counts every
-    /// insertion across files, so the same PMKID appearing in N files is counted N
-    /// times. The emitted line count (after global dedup) is the authoritative
+    /// PMKID store insertions (pre-dedup). Counts every insertion across all
+    /// input files, so the same PMKID appearing in N files is counted N times.
+    /// The emitted line count (after global dedup) is the authoritative
     /// unique-PMKID number.
     pub pmkids_found: u64,
     /// Relay (WDS) data frames with EAPOL deferred for Phase 1.5 resolution.
@@ -1453,7 +1453,7 @@ impl Stats {
         nz!("  EAP-Failure frames (RFC 3748 §4.2)", self.eap_failure_frames);
 
         // PMKID extraction by source (S1-S20 from ARCHITECTURE.md §6).
-        // In --per-file mode, the total counts every per-file insertion (the same
+        // The total counts every insertion across all input files (the same
         // PMKID re-seen across files is counted again). The emitted line count in
         // Phase 4 is the authoritative unique number after global dedup.
         stat!("PMKID store insertions (total, pre-dedup)", self.pmkids_found);

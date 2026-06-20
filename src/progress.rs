@@ -1,4 +1,4 @@
-//! Phase 1 -- periodic stderr progress reporter. See `ARCHITECTURE.md §3.1`.
+//! Phase 1 -- periodic stdout progress reporter. See `ARCHITECTURE.md §3.1`.
 //!
 //! Emits one `[progress]` line per cadence interval during the Phase 1 ingest
 //! loop so an operator running wpawolf against a multi-hour corpus has a live
@@ -47,7 +47,7 @@ const PACKETS_THRESHOLD: u64 = 2_000_000;
 /// 100k packets takes ~50 ms, well within the 5-second print window.
 const CLOCK_CHECK_INTERVAL: u64 = 100_000;
 
-/// Stderr-bound periodic progress reporter for the Phase 1 ingest loop.
+/// Stdout-bound periodic progress reporter for the Phase 1 ingest loop.
 ///
 /// Construct once before the loop starts; call `tick` once per packet (cheap;
 /// most calls return without doing anything) and `print_now` at the end of

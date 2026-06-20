@@ -1072,8 +1072,9 @@ impl OutputContext {
 
         // --- Auxiliary outputs ---
         //
-        // Per CLAUDE.md rule 12 ("I/O errors abort"), every auxiliary writer must
-        // explicitly `flush()?` before its `BufWriter` is dropped. `BufWriter`'s
+        // Per the I/O-errors-abort invariant (ARCHITECTURE.md §4 invariant 10),
+        // every auxiliary writer must explicitly `flush()?` before its
+        // `BufWriter` is dropped. `BufWriter`'s
         // `Drop` impl swallows flush errors silently, so without an explicit flush
         // a disk-full mid-write or a closed-pipe event would silently truncate the
         // file and the process would still exit `0`.

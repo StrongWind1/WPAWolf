@@ -31,7 +31,7 @@
 - **Garbage-pattern rejection** - nonces / MICs / PMKIDs checked against five pattern classes
 - **Disk-backed fallback** - heavy stores spill to disk at 80 % RAM so corpus-scale runs finish instead of OOMing
 - **Fast** - >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **918 tests**; `make check-all` zero-warning under strict clippy
+- **942 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 

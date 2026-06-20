@@ -3,7 +3,7 @@
 //! Uses a `HashSet<u64>` of `SipHash` fingerprints to guarantee global uniqueness across
 //! all emitted hash lines. Fingerprint inputs differ by hash-line type to prevent aliasing:
 //! - PMKID lines: `kind_byte(01/03) || PMKID || MAC_AP || MAC_STA || ESSID`
-//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID`
+//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || message_pair`
 //!
 //! Replaces hcxpcapngtool's 20-entry look-back window with O(1) global lookup. At 1 M
 //! unique hashes the set occupies approximately 56 MiB. See `ARCHITECTURE.md §4`.
