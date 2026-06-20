@@ -4,8 +4,8 @@ Thanks for wanting to contribute. `wpawolf` is a narrow-scope tool (WPA/WPA2/WPA
 
 ## Before you write code
 
-1. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) end-to-end. Pay particular attention to §2 (the eleven hash categories), §3 (5-phase pipeline), §4 (critical invariants), and §8 (FR-* wire-level requirements -- find the ID your change relates to).
-2. Skim [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the `WPA*01*` -- `WPA*11*` line format your output must match, and [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8 for the verified per-category hashcat support matrix.
+1. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) end-to-end. Pay particular attention to §2 (the eleven hash categories), §3 (5-phase pipeline), §4 (critical invariants), and §8 (FR-* wire-level requirements; find the ID your change relates to).
+2. Skim [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the `WPA*01*`-`WPA*11*` line format your output must match, and [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8 for the verified per-category hashcat support matrix.
 
 ## Repository layout
 
@@ -76,7 +76,7 @@ Require a paragraph-long justification in the PR body addressing the rejected-cr
 - Over 1 MiB, keep out-of-tree and reference it from benchmarks only.
 - **Redact** real ESSIDs and client MAC addresses unless the capture comes from a lab network you control. wireshark's *Edit → Preferences → Name Resolution* + `editcap` can help.
 
-The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 75-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values — every legacy-sink line cracks end-to-end through hashcat 7.1.2 with PSK `hashcat!` except the documented kernel limitations (the PSK-SHA-256 PMKID lines and the two APLESS FT combos; see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8).
+The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 75-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values; every legacy-sink line cracks end-to-end through hashcat 7.1.2 with PSK `hashcat!` except the documented kernel limitations (the PSK-SHA-256 PMKID lines and the two APLESS FT combos; see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8).
 
 ## Reporting hashcat / hcxtools gaps
 

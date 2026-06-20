@@ -20,7 +20,7 @@ Fill in each section below. Delete any that are not applicable.
 - [ ] `make check-all` passes locally.
 - [ ] New / updated unit tests.
 - [ ] New / updated integration test in `tests/integration/`.
-- [ ] Manually exercised against a representative pcap -- paste command + output.
+- [ ] Manually exercised against a representative pcap; paste command + output.
 
 ## Dependency changes
 

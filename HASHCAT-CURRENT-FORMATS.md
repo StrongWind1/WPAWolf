@@ -8,11 +8,11 @@ If you need the new 11-type per-AKM format that supersedes this scheme, read [`H
 
 References for every claim in this document:
 
-- `hashcat/src/modules/module_22000.c` -- the mode-22000 loader, formatter, and signature checks
-- `hashcat/src/modules/module_37100.c` -- the mode-37100 loader
-- `hashcat/OpenCL/m22000-pure.cl`, `m37100-pure.cl` -- the kernels
-- `hcxtools/include/hcxpcapngtool.h` -- canonical message-pair byte values and PMKID status bytes
-- `hcxtools/hcxpcapngtool.c` -- upstream emitter
+- `hashcat/src/modules/module_22000.c`: the mode-22000 loader, formatter, and signature checks
+- `hashcat/src/modules/module_37100.c`: the mode-37100 loader
+- `hashcat/OpenCL/m22000-pure.cl`, `m37100-pure.cl`: the kernels
+- `hcxtools/include/hcxpcapngtool.h`: canonical message-pair byte values and PMKID status bytes
+- `hcxtools/hcxpcapngtool.c`: upstream emitter
 
 ---
 
@@ -43,9 +43,9 @@ The `WPA` literal is checked as a fixed signature on every line (`token.signatur
 
 | Prefix    | Mode  | Attack surface | Family   | Demuxes AKM via                                            |
 |-----------|-------|----------------|----------|------------------------------------------------------------|
-| `WPA*01*` | 22000 | PMKID          | flat PSK | none -- kernel runs HMAC-SHA1 unconditionally              |
-| `WPA*02*` | 22000 | EAPOL          | flat PSK | `keyver` field bits 0 -- 2 inside the embedded EAPOL frame |
-| `WPA*03*` | 37100 | PMKID          | FT-PSK   | none -- kernel hardcodes SHA-256 FT chain                  |
+| `WPA*01*` | 22000 | PMKID          | flat PSK | none: kernel runs HMAC-SHA1 unconditionally               |
+| `WPA*02*` | 22000 | EAPOL          | flat PSK | `keyver` field bits 0-2 inside the embedded EAPOL frame   |
+| `WPA*03*` | 37100 | PMKID          | FT-PSK   | none: kernel hardcodes SHA-256 FT chain                   |
 | `WPA*04*` | 37100 | EAPOL          | FT-PSK   | `keyver = 3` only (anything else rejected)                 |
 
 These four prefixes are the entire wire vocabulary current hashcat understands for WPA-PSK. There is no `WPA*05*` or beyond in the released modules.
@@ -54,7 +54,7 @@ These four prefixes are the entire wire vocabulary current hashcat understands f
 
 ## §3  Field layout per prefix
 
-### `WPA*01*` -- PMKID (mode 22000)
+### `WPA*01*`: PMKID (mode 22000)
 
 ```
 WPA*01*<pmkid>*<mac_ap>*<mac_sta>*<essid>***
@@ -66,11 +66,11 @@ WPA*01*<pmkid>*<mac_ap>*<mac_sta>*<essid>***
 | `<pmkid>`     | 32 hex (16 B)        | lowercase hex                |
 | `<mac_ap>`    | 12 hex (6 B)         | lowercase hex, no separators |
 | `<mac_sta>`   | 12 hex (6 B)         | lowercase hex                |
-| `<essid>`     | 0 -- 64 hex (0 -- 32 B SSID) | lowercase hex; `wpawolf` and hashcat both treat the SSID field as bytes (per `[IEEE 802.11-2024]` §9.4.2.2 it is an arbitrary byte string) |
+| `<essid>`     | 0-64 hex (0-32 B SSID) | lowercase hex; `wpawolf` and hashcat both treat the SSID field as bytes (per `[IEEE 802.11-2024]` §9.4.2.2 it is an arbitrary byte string) |
 
-Three trailing `*` (the empty `<nonce>` and `<eapol>` slots, kept so the field count matches `WPA*02*`). `WPA*01*` lines have **no message-pair byte** in the released module -- the line ends in `***` exactly. (`hcxpcapngtool` writes a single message-pair byte after the trailing `***` for diagnostic purposes; the released hashcat 22000 parser ignores it.)
+Three trailing `*` (the empty `<nonce>` and `<eapol>` slots, kept so the field count matches `WPA*02*`). `WPA*01*` lines have **no message-pair byte** in the released module; the line ends in `***` exactly. (`hcxpcapngtool` writes a single message-pair byte after the trailing `***` for diagnostic purposes; the released hashcat 22000 parser ignores it.)
 
-### `WPA*02*` -- EAPOL (mode 22000)
+### `WPA*02*`: EAPOL (mode 22000)
 
 ```
 WPA*02*<mic>*<mac_ap>*<mac_sta>*<essid>*<nonce>*<eapol>*<mp>
@@ -79,17 +79,17 @@ WPA*02*<mic>*<mac_ap>*<mac_sta>*<essid>*<nonce>*<eapol>*<mp>
 
 | Field      | Width                   | Notes |
 |------------|-------------------------|-------|
-| `<mic>`    | 32 hex (16 B)           | the original Key MIC bytes -- before the EAPOL field is zeroed |
+| `<mic>`    | 32 hex (16 B)           | the original Key MIC bytes, before the EAPOL field is zeroed |
 | `<mac_ap>` | 12 hex (6 B)            |       |
 | `<mac_sta>`| 12 hex (6 B)            |       |
-| `<essid>`  | 0 -- 64 hex             |       |
-| `<nonce>`  | 64 hex (32 B)           | the *external* nonce (ANonce or SNonce, depending on combo -- see §6) |
-| `<eapol>`  | 0 -- 512 hex            | the complete EAPOL-Key frame body with the MIC field (bytes 81 -- 96 of the EAPOL header) zeroed |
+| `<essid>`  | 0-64 hex                |       |
+| `<nonce>`  | 64 hex (32 B)           | the *external* nonce (ANonce or SNonce, depending on combo; see §6) |
+| `<eapol>`  | 0-512 hex               | the complete EAPOL-Key frame body with the MIC field (bytes 81-96 of the EAPOL header) zeroed |
 | `<mp>`     | 2 hex (1 B)             | message-pair byte; see §6 |
 
 Token width caps come from `module_22000.c` (`token.len_max[7] = 512`).
 
-### `WPA*03*` -- FT PMKID (mode 37100)
+### `WPA*03*`: FT PMKID (mode 37100)
 
 Same first six fields as `WPA*01*`, plus three FT extras appended after `***<mp>*`:
 
@@ -100,12 +100,12 @@ WPA*03*<pmkid>*<mac_ap>*<mac_sta>*<essid>***<mp>*<mdid>*<r0khid>*<r1khid>
 
 | Field      | Width                    | Notes |
 |------------|--------------------------|-------|
-| `<mp>`     | 2 hex                    | PMKID side -- usually `0x20` (`PMKID_CLIENT_FTPSK`) |
+| `<mp>`     | 2 hex                    | PMKID side, usually `0x20` (`PMKID_CLIENT_FTPSK`) |
 | `<mdid>`   | 4 hex (2 B)              | Mobility-Domain ID, lowercase hex |
-| `<r0khid>` | 2 -- 96 hex (1 -- 48 B)  | R0 Key Holder ID, lowercase hex |
+| `<r0khid>` | 2-96 hex (1-48 B)        | R0 Key Holder ID, lowercase hex |
 | `<r1khid>` | 12 hex (6 B)             | R1 Key Holder ID (always a MAC), lowercase hex |
 
-### `WPA*04*` -- FT EAPOL (mode 37100)
+### `WPA*04*`: FT EAPOL (mode 37100)
 
 Same first eight fields as `WPA*02*`, plus the same three FT extras appended:
 
@@ -113,7 +113,7 @@ Same first eight fields as `WPA*02*`, plus the same three FT extras appended:
 WPA*04*<mic>*<mac_ap>*<mac_sta>*<essid>*<nonce>*<eapol>*<mp>*<mdid>*<r0khid>*<r1khid>
 ```
 
-The 37100 module rejects every `WPA*04*` line whose embedded EAPOL frame does not have `keyver = 3` (`if (wpa->keyver != 3) return (PARSER_SALT_VALUE);`). FT-PSK uses AES-128-CMAC, which on the wire is KDV 3 -- the only legal value for an FT EAPOL line.
+The 37100 module rejects every `WPA*04*` line whose embedded EAPOL frame does not have `keyver = 3` (`if (wpa->keyver != 3) return (PARSER_SALT_VALUE);`). FT-PSK uses AES-128-CMAC, which on the wire is KDV 3, the only legal value for an FT EAPOL line.
 
 ---
 
@@ -121,11 +121,11 @@ The 37100 module rejects every `WPA*04*` line whose embedded EAPOL frame does no
 
 A `WPA*02*` line carries no AKM identifier. Three completely different PSK families produce a 16 B MIC and share the wire layout:
 
-- AKM 1 (WPA1)         -- HMAC-MD5 MIC, PRF-SHA1 PTK
-- AKM 2 (WPA2-PSK)     -- HMAC-SHA1 MIC, PRF-SHA1 PTK
-- AKM 6 (PSK-SHA256)   -- AES-128-CMAC MIC, KDF-SHA256 PTK
+- AKM 1 (WPA1): HMAC-MD5 MIC, PRF-SHA1 PTK
+- AKM 2 (WPA2-PSK): HMAC-SHA1 MIC, PRF-SHA1 PTK
+- AKM 6 (PSK-SHA256): AES-128-CMAC MIC, KDF-SHA256 PTK
 
-Hashcat tells them apart by reading bits 0 -- 2 of the Key Information field (offset 5 of the embedded EAPOL header) -- the standard's `keyver` sub-field per `[IEEE 802.11-2024]` §12.7.2:
+Hashcat tells them apart by reading bits 0-2 of the Key Information field (offset 5 of the embedded EAPOL header), the standard's `keyver` sub-field per `[IEEE 802.11-2024]` §12.7.2:
 
 ```c
 // module_22000.c, line ~951
@@ -140,7 +140,7 @@ if ((wpa->keyver != 1) && (wpa->keyver != 2) && (wpa->keyver != 3))
 | 2        | WPA2-PSK       | HMAC-SHA1 (16 B) | `m22000_aux2`                    |
 | 3        | PSK-SHA256 *or* FT-PSK (37100) | AES-128-CMAC (16 B) | `m22000_aux3` |
 
-The trick works because all three primitives output a 16 B MIC and hashcat can keep one parsed-line struct (`hccapx`-derived) for every case. The moment a family's MIC width differs (SHA-384 produces 24 B), the trick fails -- see §7.
+The trick works because all three primitives output a 16 B MIC and hashcat can keep one parsed-line struct (`hccapx`-derived) for every case. The moment a family's MIC width differs (SHA-384 produces 24 B), the trick fails (see §7).
 
 ---
 
@@ -152,15 +152,15 @@ The mode-22000 PMKID kernel (`m22000_aux4`) computes:
 PMKID = HMAC-SHA1(PMK, "PMK Name" || mac_ap || mac_sta)[0:16]
 ```
 
-unconditionally. There is no AKM-dependent branch; the kernel does not inspect any byte to choose between HMAC-SHA1 and HMAC-SHA256. This is correct for AKM 2 (WPA2-PSK -- the original PMKID definition in `[IEEE 802.11-2024]` §12.6.1.3) and for AKM 1 (WPA1 -- vacuous, WPA1 has no PMKID anyway), but **wrong** for AKM 6 (PSK-SHA256), AKM 19 (FT-PSK-SHA-384), and AKM 20 (PSK-SHA-384), all of which derive the PMKID with a different HMAC primitive.
+unconditionally. There is no AKM-dependent branch; the kernel does not inspect any byte to choose between HMAC-SHA1 and HMAC-SHA256. This is correct for AKM 2 (WPA2-PSK: the original PMKID definition in `[IEEE 802.11-2024]` §12.6.1.3) and for AKM 1 (WPA1: vacuous, WPA1 has no PMKID anyway), but **wrong** for AKM 6 (PSK-SHA256), AKM 19 (FT-PSK-SHA-384), and AKM 20 (PSK-SHA-384), all of which derive the PMKID with a different HMAC primitive.
 
-Practical effect: a passphrase-derived candidate that should match an AKM-6 PMKID will produce a SHA-1 PMKID that never matches the SHA-256-derived value on the wire. Hashcat reports "Exhausted" with no error. The workaround today is to attack the corresponding EAPOL line (`WPA*02*` keyver=3) instead -- the EAPOL kernel correctly handles AES-128-CMAC.
+Practical effect: a passphrase-derived candidate that should match an AKM-6 PMKID will produce a SHA-1 PMKID that never matches the SHA-256-derived value on the wire. Hashcat reports "Exhausted" with no error. The workaround today is to attack the corresponding EAPOL line (`WPA*02*` keyver=3) instead; the EAPOL kernel correctly handles AES-128-CMAC.
 
 ---
 
 ## §6  Message-pair byte
 
-The trailing 1-byte `<mp>` field on every EAPOL line encodes which two 4-way-handshake messages were paired plus three diagnostic flag bits. Hashcat parses it in `module_22000.c` line ~1046; the byte values come from `hcxtools` (`hcxtools/include/hcxpcapngtool.h:267 -- 279`).
+The trailing 1-byte `<mp>` field on every EAPOL line encodes which two 4-way-handshake messages were paired plus three diagnostic flag bits. Hashcat parses it in `module_22000.c` line ~1046; the byte values come from `hcxtools` (`hcxtools/include/hcxpcapngtool.h:267-279`).
 
 ### EAPOL lines (`WPA*02*`, `WPA*04*`)
 
@@ -199,7 +199,7 @@ Concrete byte values commonly seen on `WPA*02*` / `WPA*04*` lines:
 
 Hashcat reads the byte and:
 
-- masks bits 0 -- 3 to look up the combo (used to know whether the cracker should try nonce-error-correction reverses);
+- masks bits 0-3 to look up the combo (used to know whether the cracker should try nonce-error-correction reverses);
 - inspects bit 4 (APLESS) to know whether a single-side attack is enough;
 - inspects bit 7 (NC) to enable the nonce-error-correction kernel (`--nonce-error-corrections=N` cooperates with this bit).
 
@@ -207,12 +207,12 @@ Bits 5 and 6 (LE/BE) are diagnostic only and do not affect the kernel math.
 
 ### PMKID lines (`WPA*01*`, `WPA*03*`)
 
-PMKID lines reuse the `<mp>` slot for a different field. The byte records which side of the wire the PMKID was observed on, plus a PSK-SHA256 hint bit. Constants from `hcxtools/include/hcxpcapngtool.h:386 -- 390`:
+PMKID lines reuse the `<mp>` slot for a different field. The byte records which side of the wire the PMKID was observed on, plus a PSK-SHA256 hint bit. Constants from `hcxtools/include/hcxpcapngtool.h:386-390`:
 
 | Bit / value | Constant                 | Meaning                                                                  |
 |-------------|--------------------------|--------------------------------------------------------------------------|
 | `0x01`      | `PMKID_AP`               | PMKID observed on the AP-to-STA path (M1 KDE, AP-sent FT Auth seq=2, Beacon, Probe Response) |
-| `0x02`      | `PMKID_APPSK256`         | PSK-SHA256 hint -- ORed onto `PMKID_AP` when the AP advertised AKM 6 (the legacy AKM disambiguator the new per-AKM format makes redundant) |
+| `0x02`      | `PMKID_APPSK256`         | PSK-SHA256 hint: ORed onto `PMKID_AP` when the AP advertised AKM 6 (the legacy AKM disambiguator the new per-AKM format makes redundant) |
 | `0x04`      | `PMKID_CLIENT`           | PMKID observed on the STA-to-AP path (M2 RSN IE, STA-sent FT Auth seq=1, Association / Reassociation Request, Probe Request) |
 | `0x10`      | `PMKID_AP_FTPSK`         | FT-PSK AP-side variant (legacy `WPA*03*` only)                           |
 | `0x20`      | `PMKID_CLIENT_FTPSK`     | FT-PSK client-side variant (legacy `WPA*03*` only)                       |
@@ -220,7 +220,7 @@ PMKID lines reuse the `<mp>` slot for a different field. The byte records which 
 Concrete byte values:
 
 ```
-0x01   AP-side PMKID (M1 KDE -- the most common case)
+0x01   AP-side PMKID (M1 KDE, the most common case)
 0x03   AP-side PSK-SHA256 PMKID (PMKID_AP | PMKID_APPSK256)
 0x04   client-side PMKID
 0x20   FT-PSK client-side PMKID (legacy WPA*03*, what hcxpcapngtool emits)
@@ -239,16 +239,16 @@ Hashcat's mode-22000 PMKID parser does not consume this byte (it reads the `***`
 | WPA1-PSK-EAPOL          | `WPA*02*`          | `--22000-out`   | `keyver=1`        | yes (m22000_aux1)  |
 | WPA2-PSK-PMKID          | `WPA*01*`          | `--22000-out`   | direct prefix     | yes (m22000_aux4)  |
 | WPA2-PSK-EAPOL          | `WPA*02*`          | `--22000-out`   | `keyver=2`        | yes (m22000_aux2)  |
-| PSK-SHA256-PMKID        | `WPA*01*`          | `--22000-out`   | direct prefix     | **no** -- kernel runs HMAC-SHA1, line is HMAC-SHA256 |
+| PSK-SHA256-PMKID        | `WPA*01*`          | `--22000-out`   | direct prefix     | **no**: kernel runs HMAC-SHA1, line is HMAC-SHA256 |
 | PSK-SHA256-EAPOL        | `WPA*02*`          | `--22000-out`   | `keyver=3`        | yes (m22000_aux3)  |
 | FT-PSK-PMKID            | `WPA*03*`          | `--37100-out`   | direct prefix     | yes (m37100 type=3)|
-| FT-PSK-EAPOL            | `WPA*04*`          | `--37100-out`   | `keyver=3`        | partial (m37100 type=4) -- N2E3 / N4E3 APLESS combos do not crack, see §8.1 |
-| PSK-SHA384-PMKID        | -- (suppressed)    | none -- `--psk-sha384-out` / `-o` only | n/a | **no** -- HMAC-SHA384 PMKID has no kernel; line never written to a legacy sink |
-| PSK-SHA384-EAPOL        | -- (suppressed)    | none -- `--psk-sha384-out` / `-o` only | n/a | **no** -- 24 B MIC does not fit the 16 B field; loader would reject keyver=0 |
-| FT-PSK-SHA384-PMKID     | -- (suppressed)    | none -- `--ft-psk-sha384-out` / `-o` only | n/a | **no** -- needs FT-KDF-SHA-384 chain; line never written to a legacy sink |
-| FT-PSK-SHA384-EAPOL     | -- (suppressed)    | none -- `--ft-psk-sha384-out` / `-o` only | n/a | **no** -- SHA-384 24 B MIC + FT chain, both unsupported |
+| FT-PSK-EAPOL            | `WPA*04*`          | `--37100-out`   | `keyver=3`        | partial (m37100 type=4): N2E3 / N4E3 APLESS combos do not crack, see §8.1 |
+| PSK-SHA384-PMKID        | none (suppressed)  | none: `--psk-sha384-out` / `-o` only | n/a | **no**: HMAC-SHA384 PMKID has no kernel; line never written to a legacy sink |
+| PSK-SHA384-EAPOL        | none (suppressed)  | none: `--psk-sha384-out` / `-o` only | n/a | **no**: 24 B MIC does not fit the 16 B field; loader would reject keyver=0 |
+| FT-PSK-SHA384-PMKID     | none (suppressed)  | none: `--ft-psk-sha384-out` / `-o` only | n/a | **no**: needs FT-KDF-SHA-384 chain; line never written to a legacy sink |
+| FT-PSK-SHA384-EAPOL     | none (suppressed)  | none: `--ft-psk-sha384-out` / `-o` only | n/a | **no**: SHA-384 24 B MIC + FT chain, both unsupported |
 
-Six of eleven rows route cleanly through the legacy scheme today. One row misroutes silently inside the kernel (PSK-SHA256-PMKID -- the line is well-formed but the cracker checks the wrong primitive). Four rows have no usable legacy path at all -- the SHA-384 family's 24 B MIC does not fit the 16 B `<mic>` field and the module rejects `keyver=0` even before reaching the kernel, so wpawolf never writes them to the legacy sinks; they surface only on the per-AKM sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` under their `WPA*08*..*11*` prefixes.
+Six of eleven rows route cleanly through the legacy scheme today. One row misroutes silently inside the kernel (PSK-SHA256-PMKID: the line is well-formed but the cracker checks the wrong primitive). Four rows have no usable legacy path at all: the SHA-384 family's 24 B MIC does not fit the 16 B `<mic>` field and the module rejects `keyver=0` even before reaching the kernel, so wpawolf never writes them to the legacy sinks; they surface only on the per-AKM sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` under their `WPA*08*..*11*` prefixes.
 
 ---
 
@@ -258,17 +258,17 @@ Status verified against hashcat v7.1.2 using the `tools/fixturegen` corpus (PSK 
 
 | 11-type code | Name                  | Legacy prefix       | Hashcat mode | Kernel              | Verified status (hashcat 7.1.2)                                                            |
 |--------------|-----------------------|---------------------|--------------|---------------------|-------------------------------------------------------------------------------------------|
-| 1            | WPA1-PSK-EAPOL        | `WPA*02*` keyver=1  | 22000        | `m22000_aux1`       | **cracks** -- every WPA1 EAPOL line in the corpus matched                                 |
-| 2            | WPA2-PSK-PMKID        | `WPA*01*` (AKM 2)   | 22000        | `m22000_aux4`       | **cracks** -- every WPA2 PMKID line matched                                               |
-| 3            | WPA2-PSK-EAPOL        | `WPA*02*` keyver=2  | 22000        | `m22000_aux2`       | **cracks** -- every WPA2 EAPOL line matched                                               |
-| 4            | PSK-SHA256-PMKID      | `WPA*01*` (AKM 6)   | 22000        | `m22000_aux4`       | **does not crack** -- kernel computes HMAC-SHA1 PMKID; line carries HMAC-SHA-256 value    |
-| 5            | PSK-SHA256-EAPOL      | `WPA*02*` keyver=3  | 22000        | `m22000_aux3`       | **cracks** -- KDV=3 AES-CMAC MIC kernel branches on the trailing flag byte                |
-| 6            | FT-PSK-PMKID          | `WPA*03*`           | 37100        | `m37100_aux1`       | **cracks** -- PMK-R1Name HMAC-SHA-256 over PMK-R1                                         |
-| 7            | FT-PSK-EAPOL          | `WPA*04*`           | 37100        | `m37100_aux2`       | **partial** -- N1E2 / N3E2 / N3E4 (M2-anchored) crack; **APLESS combos N2E3 / N4E3 (M3-anchored) do not** -- see §8.1 below |
-| 8            | PSK-SHA384-PMKID      | -- (suppressed)     | --           | --                  | **no module** -- `legacy_sink_for` skips so no `WPA*01*` line is written                 |
-| 9            | PSK-SHA384-EAPOL      | -- (suppressed)     | --           | --                  | **no module** -- 24 B HMAC-SHA-384-192 MIC, KDV=0; loader rejects keyver=0               |
-| 10           | FT-PSK-SHA384-PMKID   | -- (suppressed)     | --           | --                  | **no module** -- needs FT-KDF-SHA-384 chain                                              |
-| 11           | FT-PSK-SHA384-EAPOL   | -- (suppressed)     | --           | --                  | **no module** -- SHA-384 24 B MIC + FT chain, both unsupported                            |
+| 1            | WPA1-PSK-EAPOL        | `WPA*02*` keyver=1  | 22000        | `m22000_aux1`       | **cracks**: every WPA1 EAPOL line in the corpus matched                                   |
+| 2            | WPA2-PSK-PMKID        | `WPA*01*` (AKM 2)   | 22000        | `m22000_aux4`       | **cracks**: every WPA2 PMKID line matched                                                 |
+| 3            | WPA2-PSK-EAPOL        | `WPA*02*` keyver=2  | 22000        | `m22000_aux2`       | **cracks**: every WPA2 EAPOL line matched                                                 |
+| 4            | PSK-SHA256-PMKID      | `WPA*01*` (AKM 6)   | 22000        | `m22000_aux4`       | **does not crack**: kernel computes HMAC-SHA1 PMKID; line carries HMAC-SHA-256 value      |
+| 5            | PSK-SHA256-EAPOL      | `WPA*02*` keyver=3  | 22000        | `m22000_aux3`       | **cracks**: KDV=3 AES-CMAC MIC kernel branches on the trailing flag byte                  |
+| 6            | FT-PSK-PMKID          | `WPA*03*`           | 37100        | `m37100_aux1`       | **cracks**: PMK-R1Name HMAC-SHA-256 over PMK-R1                                           |
+| 7            | FT-PSK-EAPOL          | `WPA*04*`           | 37100        | `m37100_aux2`       | **partial**: N1E2 / N3E2 / N3E4 (M2-anchored) crack; **APLESS combos N2E3 / N4E3 (M3-anchored) do not** (see §8.1 below) |
+| 8            | PSK-SHA384-PMKID      | none (suppressed)   | n/a          | n/a                 | **no module**: `legacy_sink_for` skips so no `WPA*01*` line is written                   |
+| 9            | PSK-SHA384-EAPOL      | none (suppressed)   | n/a          | n/a                 | **no module**: 24 B HMAC-SHA-384-192 MIC, KDV=0; loader rejects keyver=0                 |
+| 10           | FT-PSK-SHA384-PMKID   | none (suppressed)   | n/a          | n/a                 | **no module**: needs FT-KDF-SHA-384 chain                                                |
+| 11           | FT-PSK-SHA384-EAPOL   | none (suppressed)   | n/a          | n/a                 | **no module**: SHA-384 24 B MIC + FT chain, both unsupported                              |
 
 Walking the corpus end-to-end:
 
@@ -278,11 +278,11 @@ Walking the corpus end-to-end:
 | `--37100-out`     |                  15 |                9 |                  2 | Both are APLESS FT-PSK EAPOL (type 7, N2E3 / N4E3) |
 | `-o` combined     |                 147 |       n/a (per-AKM format sink, not fed to hashcat)              |
 
-Six of eleven 11-type rows are wire-cleanly cracked end-to-end. One row is partially crackable -- type 7 cracks for the M2-anchored combos but not the M3-anchored APLESS variants (§8.1). One row routes silently to a wrong-primitive kernel (type 4: SHA-256 PMKID checked against an HMAC-SHA-1 candidate). Four rows are deliberately not written to the legacy sinks because no compatible kernel exists.
+Six of eleven 11-type rows are wire-cleanly cracked end-to-end. One row is partially crackable: type 7 cracks for the M2-anchored combos but not the M3-anchored APLESS variants (§8.1). One row routes silently to a wrong-primitive kernel (type 4: SHA-256 PMKID checked against an HMAC-SHA-1 candidate). Four rows are deliberately not written to the legacy sinks because no compatible kernel exists.
 
 ### §8.1  The APLESS gap in mode 37100
 
-`module_37100.c::module_hash_decode` lines 691 -- 709 build the FT-PTK derivation buffer with this **hardcoded** layout:
+`module_37100.c::module_hash_decode` lines 691-709 build the FT-PTK derivation buffer with this **hardcoded** layout:
 
 ```c
 memcpy(pke_ptr +  2, "FT-PTK", 6);
@@ -305,7 +305,7 @@ For wpawolf's WPA*04* lines:
 
 `module_hash_decode_postprocess` reads the message-pair byte and uses it only to suppress NC iterations when bit 4 is set (`if (wpa->message_pair & (1 << 4)) wpa->nonce_error_corrections = 0;`). There is no code path that re-orders the nonces based on the APLESS bit, and `module_deep_comp_kernel` switches only on `wpa->keyver == 3`, never on `wpa->message_pair`. A hashcat 37100 kernel that handles APLESS would need both: a swap of the line layout interpretation and either a new aux kernel or a runtime branch.
 
-`wpawolf` emits these lines per the established hcxtools convention (SNonce in the line's `<nonce>` field, M3 body in the `<eapol>` field, APLESS bit set on the message-pair byte). The corpus walk confirms the bytes are well-formed -- the failure is exclusively kernel-side. The lines remain available on `--ft-out` and `-o` for downstream tools that do support APLESS FT-PSK.
+`wpawolf` emits these lines per the established hcxtools convention (SNonce in the line's `<nonce>` field, M3 body in the `<eapol>` field, APLESS bit set on the message-pair byte). The corpus walk confirms the bytes are well-formed: the failure is exclusively kernel-side. The lines remain available on `--ft-out` and `-o` for downstream tools that do support APLESS FT-PSK.
 
 ---
 
@@ -313,26 +313,26 @@ For wpawolf's WPA*04* lines:
 
 1. **The `keyver` trick does not scale past 16 B MICs.** SHA-384 produces a 24 B (192-bit) MIC. The legacy `<mic>` field is locked at 32 hex characters (16 B). Stretching it to 48 hex characters changes the token-length validation in the loader and breaks the parsed-line struct that today holds `keymic[4]` of `u32`. Backporting wider MIC support means breaking-changes to every consumer of the format.
 2. **PMKID kernel cannot disambiguate AKM.** A `WPA*01*` line carries no AKM byte. The kernel runs HMAC-SHA1 unconditionally, which is correct for AKM 2 only. AKM 6 (SHA-256) and AKMs 19/20 (SHA-384) all produce different PMKID values; the cracker checks a SHA-1 answer against a SHA-256 / SHA-384 wire value and never matches. There is no way to fix this without a new prefix (or an AKM byte in the line, which is the same thing structurally).
-3. **FT prefixes hardcode SHA-256.** `WPA*03*` and `WPA*04*` were defined when AKM 4 (FT-PSK with SHA-256) was the only FT-PSK variant. AKM 19 (FT-PSK-SHA-384) uses the same FT key-hierarchy shape with SHA-384 throughout -- nothing in the line tells a `WPA*03*` reader to switch primitives.
+3. **FT prefixes hardcode SHA-256.** `WPA*03*` and `WPA*04*` were defined when AKM 4 (FT-PSK with SHA-256) was the only FT-PSK variant. AKM 19 (FT-PSK-SHA-384) uses the same FT key-hierarchy shape with SHA-384 throughout; nothing in the line tells a `WPA*03*` reader to switch primitives.
 4. **`keyver=0` reserved.** AKMs 19 and 20 negotiate SHA-384 out of band and emit `keyver=0` in their EAPOL Key Information. The current 22000 loader rejects `keyver=0` outright (`if ((keyver != 1) && (keyver != 2) && (keyver != 3)) return PARSER_SALT_VALUE`), so even a SHA-384 line with a fictitious 16 B MIC would not load.
 5. **No room for a new variant.** Any future PSK family added to the IEEE spec (e.g. a hypothetical "PSK-SHA512" or a quantum-resistant replacement) would need yet another `keyver` slot or yet another prefix. The scheme is structurally not extensible.
 
-The new 11-type prefix scheme (one prefix per row) is the response to limitations 2 -- 5; the unified "1 module for all PSK types" proposal in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) is the response to limitation 1.
+The new 11-type prefix scheme (one prefix per row) is the response to limitations 2-5; the unified "1 module for all PSK types" proposal in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) is the response to limitation 1.
 
 ---
 
 ## §10  References
 
-- `hashcat/src/modules/module_22000.c` -- mode 22000 loader, formatter, parsed-line struct
-- `hashcat/src/modules/module_37100.c` -- mode 37100 loader (FT-PSK)
-- `hashcat/OpenCL/m22000-pure.cl`, `m37100-pure.cl` -- kernels
-- `hcxtools/include/hcxpcapngtool.h:267 -- 279` -- `MESSAGE_PAIR_M*` and `ST_*` flag bits
-- `hcxtools/include/hcxpcapngtool.h:386 -- 390` -- `PMKID_*` byte values
-- `hcxtools/hcxpcapngtool.c:2333 -- 2552` -- upstream emitter for `WPA*01*..*04*`
-- `[IEEE 802.11-2024]` §12.6.1.3 -- PMKID derivation
-- `[IEEE 802.11-2024]` §12.7.2 -- Key Information field, `keyver` bits 0 -- 2
-- `[IEEE 802.11-2024]` §12.7.6 -- 4-Way Handshake / EAPOL-Key frames
-- `[IEEE 802.11-2024]` §13.4 -- §13.8 -- FT key hierarchy
-- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type per-AKM format
-- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) -- proposed unified module
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) -- `wpawolf` design decisions
+- `hashcat/src/modules/module_22000.c`: mode 22000 loader, formatter, parsed-line struct
+- `hashcat/src/modules/module_37100.c`: mode 37100 loader (FT-PSK)
+- `hashcat/OpenCL/m22000-pure.cl`, `m37100-pure.cl`: kernels
+- `hcxtools/include/hcxpcapngtool.h:267-279`: `MESSAGE_PAIR_M*` and `ST_*` flag bits
+- `hcxtools/include/hcxpcapngtool.h:386-390`: `PMKID_*` byte values
+- `hcxtools/hcxpcapngtool.c:2333-2552`: upstream emitter for `WPA*01*..*04*`
+- `[IEEE 802.11-2024]` §12.6.1.3: PMKID derivation
+- `[IEEE 802.11-2024]` §12.7.2: Key Information field, `keyver` bits 0-2
+- `[IEEE 802.11-2024]` §12.7.6: 4-Way Handshake / EAPOL-Key frames
+- `[IEEE 802.11-2024]` §13.4-§13.8: FT key hierarchy
+- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md): the 11-type per-AKM format
+- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md): proposed unified module
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): `wpawolf` design decisions

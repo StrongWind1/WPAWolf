@@ -1126,7 +1126,7 @@ impl Stats {
         }
         macro_rules! section {
             ($num:expr, $name:expr) => {{
-                let hdr = format!("=== Phase {} -- {} ", $num, $name);
+                let hdr = format!("=== Phase {}: {} ", $num, $name);
                 let fill = "=".repeat(SW.saturating_sub(hdr.len()).max(4));
                 let _ = writeln!(out, "{hdr}{fill}");
             }};

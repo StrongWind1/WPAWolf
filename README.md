@@ -46,7 +46,7 @@ hashcat -m 37100 hashes.37100 wordlist.txt
 Sample output (stats banner, truncated):
 
 ```
-=== Phase 4 -- Emit ==================================================
+=== Phase 4: Emit ===================================================
 output filters active.......................................: none (WIDE mode)
 EAPOL pairs generated (total, pre-dedup)....................: 105
 EAPOL pairs written (post-dedup)............................: 105
@@ -54,7 +54,7 @@ EAPOL pairs written (post-dedup)............................: 105
   N3E2 authorized (ANonce from M3, EAPOL from M2)...........: 18
 --22000-out (legacy mode 22000).............................: hashes.22000
   lines written.............................................: 108
-=== Phase 5 -- Report ================================================
+=== Phase 5: Report =================================================
 hashes emitted (total)......................................: 147
 wallclock total (s).........................................: 0.4
 disk-backed fallback engaged................................: no
@@ -184,7 +184,7 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 | `--mem-stats` | off | per-store footprint table after closing banner |
 | `--debug` | off | timestamped phase/file/group diagnostic lines |
 
-Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences them. RSS is reported cross-platform via `sysinfo`. Every run prints a Phase 1-5 stats summary unconditionally. Garbage-pattern nonces / MICs / PMKIDs are rejected at extract time; missing SSIDs drop at emit time. Every line of that summary -- its backing field, spec source, why it exists, and whether it drops packets -- is catalogued in [`STATS.md`](STATS.md).
+Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences them. RSS is reported cross-platform via `sysinfo`. Every run prints a Phase 1-5 stats summary unconditionally. Garbage-pattern nonces / MICs / PMKIDs are rejected at extract time; missing SSIDs drop at emit time. Every line of that summary (its backing field, spec source, why it exists, and whether it drops packets) is catalogued in [`STATS.md`](STATS.md).
 
 </details>
 

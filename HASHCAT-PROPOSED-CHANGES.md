@@ -4,12 +4,12 @@
 
 A design sketch for two new hashcat modules that consume the 11-type classification from [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) in a single pass: one passphrase-input mode and one PMK-direct mode, covering every PSK family the spec defines.
 
-This is a greenfield design. The new modules accept ONLY the new `WPA*01*..*11*` per-AKM prefixes -- no legacy line acceptance, no `keyver` peek, no HCCAPX import. The existing modes 22000, 22001, and 37100 remain in the codebase exactly as they are today and continue to read the legacy `WPA*01*..*04*` prefixes; this proposal does not touch them. Operators with existing legacy hash files convert them to the new format with the `wpawolf-convert` companion tool (§8); operators re-extracting from pcaps run `wpawolf -o` to write the new format directly.
+This is a greenfield design. The new modules accept ONLY the new `WPA*01*..*11*` per-AKM prefixes, with no legacy line acceptance, no `keyver` peek, no HCCAPX import. The existing modes 22000, 22001, and 37100 remain in the codebase exactly as they are today and continue to read the legacy `WPA*01*..*04*` prefixes; this proposal does not touch them. Operators with existing legacy hash files convert them to the new format with the `wpawolf-convert` companion tool (§8); operators re-extracting from pcaps run `wpawolf -o` to write the new format directly.
 
 The proposal is staged in two phases:
 
 - **Phase 1** ships within hashcat's existing 4-aux-kernel limit per module. Per-AKM-family aux kernels with internal branching for the PMKID-vs-EAPOL and FT-vs-flat sub-cases.
-- **Phase 2** extends hashcat core to 11 aux kernels per module and splits the family kernels into per-type kernels. Same module identity, same on-disk hash format, same loader -- only the kernel layout changes.
+- **Phase 2** extends hashcat core to 11 aux kernels per module and splits the family kernels into per-type kernels. Same module identity, same on-disk hash format, same loader; only the kernel layout changes.
 
 Phase 1 is shippable without any hashcat-core patch. Phase 2 unlocks the maximum-throughput design but requires extending the AUX-slot count from 4 to 11 in `include/types.h`, `src/backend.c`, and the kernel-load path.
 
@@ -39,7 +39,7 @@ Two new modules, parallel structure:
 
 **Why two modules and not one.** Mirrors the existing 22000 / 22001 pattern. The PMK-direct path is faster (skips 4096 SHA-1 iterations) and useful for known-PMK testing, rainbow-table workflows, and PMK-recovery validation. Both modules read the same hash file; only the input-side semantic differs (passphrase vs hex-encoded PMK).
 
-**What they cover.** Every row of the 11-type classification, including the SHA-384 rows (types 8 -- 11) that have no working hashcat kernel today, and the PSK-SHA256 PMKID row (type 4) that current mode 22000 silently misroutes through the HMAC-SHA1 PMKID kernel.
+**What they cover.** Every row of the 11-type classification, including the SHA-384 rows (types 8-11) that have no working hashcat kernel today, and the PSK-SHA256 PMKID row (type 4) that current mode 22000 silently misroutes through the HMAC-SHA1 PMKID kernel.
 
 **What stays separate.** Modes 22000, 22001, and 37100 are unchanged. Operators with existing legacy hash files keep using them; operators adopting the 11-type classification use 22002 / 22003.
 
@@ -69,7 +69,7 @@ The complete cracker math for every row (PMKID derivation, PTK derivation, MIC c
 
 ---
 
-## §4  Esalt struct -- one shape, all 11 types
+## §4  Esalt struct: one shape, all 11 types
 
 Both modules use the same per-digest `wpa_universal_t` esalt struct. It carries every field any of the 11 types needs; per-type fields unused by a given row stay zero-initialised.
 
@@ -82,7 +82,7 @@ typedef struct wpa_universal
   u32  mac_ap[2];       // 6 B AP MAC
   u32  mac_sta[2];      // 6 B STA MAC
 
-  u32  type;            // 1 .. 11 (type code -- the only dispatch axis)
+  u32  type;            // 1 .. 11 (type code, the only dispatch axis)
 
   // PMKID specific (used iff type is even: 2, 4, 6, 8, 10).
   u32  pmkid[4];        // 16 B PMKID (always Truncate-128 of the underlying HMAC)
@@ -99,7 +99,7 @@ typedef struct wpa_universal
 
   // FT extras (used iff type in {6, 7, 10, 11}).
   u32  mdid[1];         // 2 B Mobility Domain ID
-  u32  r0khid[12];      // 1 -- 48 B R0 Key Holder ID
+  u32  r0khid[12];      // 1-48 B R0 Key Holder ID
   u32  r0khid_len;
   u32  r1khid[12];      // 6 B R1 Key Holder ID (a MAC)
   u32  r1khid_len;
@@ -116,7 +116,7 @@ typedef struct wpa_universal
 
 Field-by-field rationale:
 
-- **`type`** is the single dispatch axis. No `keyver`, no `is_ft` flag, no AKM enum -- the type code encodes all of those.
+- **`type`** is the single dispatch axis. No `keyver`, no `is_ft` flag, no AKM enum; the type code encodes all of those.
 - **`keymic[6]`** holds 16 B for SHA-1 / MD5 / AES-CMAC MICs (first 4 u32s used) and 24 B for SHA-384 MICs (all 6 u32s used). Per-type kernels know which width to read; non-MIC PMKID rows ignore the field entirely. The 8-byte cost on non-SHA-384 rows is negligible.
 - **`pmkid[4]`** is always 16 B. Truncate-128 applies to every PMKID primitive (HMAC-SHA1, HMAC-SHA256, HMAC-SHA384, FT-PMK-R1-Name); the field width never changes.
 - **FT extras** (`mdid`, `r0khid`, `r1khid`) match today's m37100 `wpa_t` shape and are populated only by the loader when `type` is 6, 7, 10, or 11. Non-FT kernels never read them.
@@ -126,16 +126,16 @@ Field-by-field rationale:
 
 ---
 
-## §5  Phase 1 -- four aux kernels, internal branching
+## §5  Phase 1: four aux kernels, internal branching
 
 ### §5.1  The 4-aux constraint
 
 Hashcat today hardcodes a maximum of four aux sub-kernels per module:
 
-- `include/types.h` -- `cl_kernel opencl_kernel_aux1..aux4` (and CUDA / HIP / Metal mirrors)
-- `include/types.h` enum -- `KERN_RUN_AUX1..AUX4` (constants 7001 -- 7004)
-- `include/types.h` flags -- `OPTS_TYPE_AUX1..AUX4` (1<<41 -- 1<<44)
-- `src/backend.c` -- four switch cases per backend dispatcher
+- `include/types.h`: `cl_kernel opencl_kernel_aux1..aux4` (and CUDA / HIP / Metal mirrors)
+- `include/types.h` enum: `KERN_RUN_AUX1..AUX4` (constants 7001-7004)
+- `include/types.h` flags: `OPTS_TYPE_AUX1..AUX4` (1<<41-1<<44)
+- `src/backend.c`: four switch cases per backend dispatcher
 
 Phase 1 fits within those four slots by grouping the 11 types into four AKM-family kernels and letting each kernel branch internally on PMKID-vs-EAPOL and (where applicable) FT-vs-flat.
 
@@ -149,7 +149,7 @@ m22002_aux1   types 1, 2, 3        SHA-1 family + WPA1
 
 m22002_aux2   types 4, 5           PSK-SHA256 family (flat)
                                    - branches: PMKID vs EAPOL
-                                   - PMKID half is NEW (type 4 -- HMAC-SHA256)
+                                   - PMKID half is NEW (type 4: HMAC-SHA256)
                                    - EAPOL half is m22000_aux3 (CMAC MIC) verbatim
 
 m22002_aux3   types 6, 7           FT-PSK-SHA256 family
@@ -167,7 +167,7 @@ The grouping splits cleanly along the dominant primitive: aux1 only loads SHA-1 
 22003 (PMK-direct) uses the identical aux kernel layout. The only differences are:
 
 - `m22003_init` parses 64-hex PMK input into `tmps[].out[0..8]` (mirror of today's `m22001_init`).
-- `m22003_loop` is empty -- no PBKDF2 iterations needed.
+- `m22003_loop` is empty: no PBKDF2 iterations needed.
 
 Everything from the aux kernels onward is byte-identical between 22002 and 22003.
 
@@ -211,13 +211,13 @@ For aux4 (4 sub-paths -> up to 4-way divergence on SHA-384 mixed captures), the 
 The 22002 loader follows the same `input_tokenizer` pattern as today's m22000:
 
 ```c
-// Pseudo-code -- not a literal hashcat loader.
+// Pseudo-code, not a literal hashcat loader.
 int module_hash_decode (...)
 {
   // Token 0: "WPA" signature, fixed length 3.
-  // Token 1: 2-hex type code (1 -- 11).
-  // Tokens 2 -- 8: hash, mac_ap, mac_sta, essid, nonce, eapol, mp.
-  // Tokens 9 -- 11 (FT only): mdid, r0khid, r1khid.
+  // Token 1: 2-hex type code (1-11).
+  // Tokens 2-8: hash, mac_ap, mac_sta, essid, nonce, eapol, mp.
+  // Tokens 9-11 (FT only): mdid, r0khid, r1khid.
 
   // Peek the type to determine token count.
   const u8 type = peek_type_after_prefix (line_buf);
@@ -248,7 +248,7 @@ int module_hash_decode (...)
 }
 ```
 
-The host-side aux selection (mirror of `module_22000.c:542 -- 570`) reads `wpa->type` and picks the right `KERN_RUN_AUX*`:
+The host-side aux selection (mirror of `module_22000.c:542-570`) reads `wpa->type` and picks the right `KERN_RUN_AUX*`:
 
 ```c
 u32 module_kern_type_per_digest (const wpa_universal_t *wpa)
@@ -277,7 +277,7 @@ These removals collapse the loader to a single straight-line parser keyed on the
 
 ---
 
-## §6  Phase 2 -- eleven aux kernels, zero internal branching
+## §6  Phase 2: eleven aux kernels, zero internal branching
 
 ### §6.1  What changes vs Phase 1
 
@@ -327,13 +327,13 @@ The 4-aux limit lives in five places. Each is a mechanical extension:
 | File                                              | Change                                                                                                   |
 |---------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | `include/types.h` (kernel-handle struct)          | Add `cl_kernel opencl_kernel_aux5..aux11` (and CUDA `CUfunction`, HIP `hipFunction_t`, Metal `mtl_function` / `mtl_pipeline` mirrors). 7 new fields x 4 backends = ~28 new struct members. |
-| `include/types.h` (KERN_RUN enum)                 | Extend `KERN_RUN_AUX1..AUX4` to `..AUX11` (constants 7005 -- 7011).                                      |
-| `include/types.h` (OPTS_TYPE flags)               | Extend `OPTS_TYPE_AUX1..AUX4` (bits 41 -- 44) to `..AUX11` (bits 45 -- 51). Fits in u64.                 |
+| `include/types.h` (KERN_RUN enum)                 | Extend `KERN_RUN_AUX1..AUX4` to `..AUX11` (constants 7005-7011).                                      |
+| `include/types.h` (OPTS_TYPE flags)               | Extend `OPTS_TYPE_AUX1..AUX4` (bits 41-44) to `..AUX11` (bits 45-51). Fits in u64.                 |
 | `include/types.h` (per-kernel tracking)           | Mirror `kernel_wgs_aux1`, `kernel_local_mem_size_aux1`, `kernel_dynamic_local_mem_size_aux1`, `kernel_preferred_wgs_multiple_aux1`, `exec_us_prev_aux1[]` for aux5..aux11. ~25 new fields. |
 | `src/backend.c` (dispatcher switch tables)        | Extend the per-backend `metal_pipeline_with_id` / `opencl_kernel_with_id` / `hip_function_with_id` / `cuda_function_with_id` switches (and their `run_kernel` analogues) with 7 new cases each. ~28 new cases x 2 dispatch sites = ~56 new lines. |
 | Kernel-load path (`backend.c` symbol resolution)  | Resolve `m<MODE>_aux5..aux11` symbols at load time. ~7 new lines per backend.                            |
 
-Total estimate: ~200 -- 400 lines of mechanical changes across ~6 files. No architectural questions; every aux1 site has an obvious aux5..aux11 parallel. The change is upstream-compatible -- existing modules that declare only `OPTS_TYPE_AUX1..AUX4` see no behaviour change.
+Total estimate: ~200-400 lines of mechanical changes across ~6 files. No architectural questions; every aux1 site has an obvious aux5..aux11 parallel. The change is upstream-compatible; existing modules that declare only `OPTS_TYPE_AUX1..AUX4` see no behaviour change.
 
 This patch must land in hashcat core before the Phase 2 kernel layout for 22002 / 22003 can be compiled and loaded.
 
@@ -343,28 +343,28 @@ The win comes from removing branch divergence inside the aux kernels and shrinki
 
 | Aux kernel  | Types in Phase 1 | Phase 1 internal switch          | Wavefront occupancy gain (Phase 2) | Throughput gain per aux (Phase 2) |
 |-------------|------------------|----------------------------------|------------------------------------|------------------------------------|
-| aux1        | 1, 2, 3          | 3-way: PMKID/EAPOL + MD5/SHA1 MIC | small (~10 -- 15%)                | 1.05 -- 1.15x                      |
-| aux2        | 4, 5             | 2-way: PMKID/EAPOL                | moderate (~20 -- 25%)             | 1.20 -- 1.40x                      |
-| aux3        | 6, 7             | 2-way: PMKID/EAPOL                | moderate (~20 -- 25%)             | 1.20 -- 1.40x                      |
-| aux4        | 8 .. 11          | 4-way: PMKID/EAPOL + FT/flat      | high (~30 -- 50%)                 | 1.50 -- 2.00x                      |
+| aux1        | 1, 2, 3          | 3-way: PMKID/EAPOL + MD5/SHA1 MIC | small (~10-15%)                | 1.05-1.15x                      |
+| aux2        | 4, 5             | 2-way: PMKID/EAPOL                | moderate (~20-25%)             | 1.20-1.40x                      |
+| aux3        | 6, 7             | 2-way: PMKID/EAPOL                | moderate (~20-25%)             | 1.20-1.40x                      |
+| aux4        | 8 .. 11          | 4-way: PMKID/EAPOL + FT/flat      | high (~30-50%)                 | 1.50-2.00x                      |
 
-Net hash-rate change for the whole run depends on the type mix in the hash file. The post-PMK math is ~0.1 -- 1% of total wall time on mode 22002 (PBKDF2 dominates); on mode 22003 (PMK-direct) the per-type math is closer to ~30 -- 80% of wall time, so the speedup is far more visible.
+Net hash-rate change for the whole run depends on the type mix in the hash file. The post-PMK math is ~0.1-1% of total wall time on mode 22002 (PBKDF2 dominates); on mode 22003 (PMK-direct) the per-type math is closer to ~30-80% of wall time, so the speedup is far more visible.
 
 | Workload                                   | 22002 (passphrase) | 22003 (PMK-direct) |
 |--------------------------------------------|--------------------|--------------------|
-| Pure WPA2-PSK (only types 2, 3)            | ~1.00x (no change) | ~1.05 -- 1.10x     |
-| Mixed AKM 2 + AKM 6 (types 2, 3, 4, 5)     | ~1.01 -- 1.02x     | ~1.20 -- 1.30x     |
-| Heavy SHA-384 (types 8 -- 11)              | ~1.02 -- 1.05x     | ~1.50 -- 2.00x     |
-| Realistic per-AKM format `-o` file (mixed)       | ~1.01 -- 1.03x     | ~1.20 -- 1.40x     |
+| Pure WPA2-PSK (only types 2, 3)            | ~1.00x (no change) | ~1.05-1.10x     |
+| Mixed AKM 2 + AKM 6 (types 2, 3, 4, 5)     | ~1.01-1.02x     | ~1.20-1.30x     |
+| Heavy SHA-384 (types 8-11)              | ~1.02-1.05x     | ~1.50-2.00x     |
+| Realistic per-AKM format `-o` file (mixed)       | ~1.01-1.03x     | ~1.20-1.40x     |
 
-Phase 2 also reduces register pressure per kernel (each kernel only loads the SHA primitives it needs), which can lift overall device occupancy by 10 -- 20% on register-constrained GPUs (older Polaris, Pascal). This effect compounds with the divergence reduction.
+Phase 2 also reduces register pressure per kernel (each kernel only loads the SHA primitives it needs), which can lift overall device occupancy by 10-20% on register-constrained GPUs (older Polaris, Pascal). This effect compounds with the divergence reduction.
 
 The exact numbers are estimates pending micro-benchmarks against a prototype. The directional ordering (Phase 2 always >= Phase 1) is guaranteed by the kernel design; the magnitude depends on GPU architecture and hash-file composition.
 
 ### §6.4  When to choose Phase 2 over Phase 1
 
 - **Phase 1** is the right shipping target for the first release of 22002 / 22003. It delivers all 11 types under one mode without requiring any hashcat-core patch. The perf cost on mode 22002 (where PBKDF2 dominates) is negligible.
-- **Phase 2** is the right target once a hashcat-core PR adding the aux5 -- aux11 slots lands. It unlocks the maximum-throughput design, particularly on PMK-direct mode 22003 and on SHA-384-heavy workloads.
+- **Phase 2** is the right target once a hashcat-core PR adding the aux5-aux11 slots lands. It unlocks the maximum-throughput design, particularly on PMK-direct mode 22003 and on SHA-384-heavy workloads.
 
 The migration from Phase 1 to Phase 2 is invisible to operators: same mode number, same hash format, same CLI. Only the kernel binaries on disk change.
 
@@ -387,7 +387,7 @@ Sources for fixture material:
 - Types 8, 9: AKM-20 (PSK-SHA384) is rare in the wild; synthesise with a vendor radio that supports it (Aruba IAP, Cisco IOS-XE) or craft fixtures using the spec's test vectors.
 - Types 10, 11: AKM-19 (FT-PSK-SHA384) likewise rare; same synthesis approach as 8 / 9 with the FT key hierarchy added.
 
-Each fixture exercises both 22002 (passphrase) and 22003 (PMK input). On Phase 2, each per-type kernel can be benchmarked in isolation by feeding a single-type fixture file -- a useful regression oracle for kernel-perf work.
+Each fixture exercises both 22002 (passphrase) and 22003 (PMK input). On Phase 2, each per-type kernel can be benchmarked in isolation by feeding a single-type fixture file, a useful regression oracle for kernel-perf work.
 
 ---
 
@@ -402,7 +402,7 @@ The build sequence below ships incremental usable subsets. Each step is independ
 | 3    | Types 8 and 9 (PSK-SHA384 family) land in aux4. Both need SHA-384 primitives; type 9 brings the 24 B MIC width.        |
 | 4    | Types 10 and 11 (FT-PSK-SHA384 family) land in aux4. Compose the SHA-384 primitives from step 3 with the FT chain code already lifted from m37100. |
 | 5    | All 11 types covered under Phase 1. Mode 22002 is the operator's one-stop PSK module.                                  |
-| 6    | (Independent of steps 1 -- 5.) Hashcat-core PR adds aux5 -- aux11 slots per §6.2.                                       |
+| 6    | (Independent of steps 1-5.) Hashcat-core PR adds aux5-aux11 slots per §6.2.                                       |
 | 7    | After step 6 lands, modes 22002 and 22003 switch to **Phase 2** kernel layout in the same release. Operators see no CLI or hash-format change; benchmark numbers improve on PMK-direct and SHA-384 workloads. |
 
 ---
@@ -412,7 +412,7 @@ The build sequence below ships incremental usable subsets. Each step is independ
 A reasonable counter-proposal: leave the new format and the new aux layout, but graft them onto the three existing modes (22000 reads new non-FT prefixes, 37100 reads new FT prefixes). Three arguments against:
 
 1. **Operator clarity.** Two modes with crisp scopes (`-m 22002` for passphrase, `-m 22003` for PMK-direct) is simpler to choose between than three modes with overlapping scopes ("does this hash file have FT lines?"). The user picks the input semantic; the hash file's own type codes do everything else.
-2. **Single-pass cracking requires kernel sharing inside one module.** PBKDF2 reuse across all 11 types only works when the per-type aux kernels read from the same `tmps[]`. Patching 22000 to also accept FT lines doesn't help, because 37100 still owns the FT-PSK code path -- the operator would still split their hash file or run twice. One module is the only structure where all 11 types share one PBKDF2 invocation.
+2. **Single-pass cracking requires kernel sharing inside one module.** PBKDF2 reuse across all 11 types only works when the per-type aux kernels read from the same `tmps[]`. Patching 22000 to also accept FT lines doesn't help, because 37100 still owns the FT-PSK code path; the operator would still split their hash file or run twice. One module is the only structure where all 11 types share one PBKDF2 invocation.
 3. **Phase 2 contained to two new modules.** The 11-aux-kernel layout and the hashcat-core slot extension touch one module-set instead of three. Smaller surface, easier to review, no risk of a Phase 2 regression in the legacy modes that the operator depended on.
 
 A fourth, softer point: operators who depend on the existing modes keep them unchanged. Nothing about modes 22000 / 22001 / 37100 changes under this proposal. Adopting 22002 / 22003 is opt-in.
@@ -434,18 +434,18 @@ These are deliberately not part of the proposal:
 
 ## §11  References
 
-- [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) -- the current modes 22000 / 22001 / 37100, their limitations, and what each kernel does today
-- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) -- the 11-type classification itself, hash-line layout, message-pair byte spec
-- `hashcat/src/modules/module_22000.c` -- structural reference for the proposed 22002 module's loader and dispatch
-- `hashcat/src/modules/module_22001.c` -- structural reference for the proposed 22003 PMK-direct module
-- `hashcat/src/modules/module_37100.c` -- reference for FT chain parsing
-- `hashcat/OpenCL/m22000-pure.cl` -- existing aux1 / aux2 / aux3 / aux4 to be lifted into Phase 1 aux1 / aux2
-- `hashcat/OpenCL/m22001-pure.cl` -- existing PMK-direct init / aux pattern to be lifted into 22003
-- `hashcat/OpenCL/m37100-pure.cl` -- existing aux1 / aux2 to be lifted into Phase 1 aux3
-- `hashcat/include/types.h` -- where the AUX-slot extension lands (`opencl_kernel_aux*`, `KERN_RUN_AUX*`, `OPTS_TYPE_AUX*`)
-- `hashcat/src/backend.c` -- where the per-backend dispatcher switch tables extend
-- `[IEEE 802.11-2024]` §12.6.1.3 -- PMKID derivation
-- `[IEEE 802.11-2024]` §12.7.1.3 -- PTK length per AKM (24 B KCK for SHA-384)
-- `[IEEE 802.11-2024]` §13.4 -- §13.8 -- FT key hierarchy
-- [`README.md`](README.md) -- how `wpawolf` produces lines for the new modules to consume natively (the `-o` per-AKM file)
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) -- `wpawolf` design decisions
+- [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md): the current modes 22000 / 22001 / 37100, their limitations, and what each kernel does today
+- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md): the 11-type classification itself, hash-line layout, message-pair byte spec
+- `hashcat/src/modules/module_22000.c`: structural reference for the proposed 22002 module's loader and dispatch
+- `hashcat/src/modules/module_22001.c`: structural reference for the proposed 22003 PMK-direct module
+- `hashcat/src/modules/module_37100.c`: reference for FT chain parsing
+- `hashcat/OpenCL/m22000-pure.cl`: existing aux1 / aux2 / aux3 / aux4 to be lifted into Phase 1 aux1 / aux2
+- `hashcat/OpenCL/m22001-pure.cl`: existing PMK-direct init / aux pattern to be lifted into 22003
+- `hashcat/OpenCL/m37100-pure.cl`: existing aux1 / aux2 to be lifted into Phase 1 aux3
+- `hashcat/include/types.h`: where the AUX-slot extension lands (`opencl_kernel_aux*`, `KERN_RUN_AUX*`, `OPTS_TYPE_AUX*`)
+- `hashcat/src/backend.c`: where the per-backend dispatcher switch tables extend
+- `[IEEE 802.11-2024]` §12.6.1.3: PMKID derivation
+- `[IEEE 802.11-2024]` §12.7.1.3: PTK length per AKM (24 B KCK for SHA-384)
+- `[IEEE 802.11-2024]` §13.4-§13.8: FT key hierarchy
+- [`README.md`](README.md): how `wpawolf` produces lines for the new modules to consume natively (the `-o` per-AKM file)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): `wpawolf` design decisions
