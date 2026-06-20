@@ -42,7 +42,7 @@ pub struct MemMonitor {
     peak_rss: Arc<AtomicU64>,
     /// Set by a [`MemWatcher`] when sampled RSS crosses the threshold during
     /// Phase 4, where the monitor itself is never polled. `poll_disk_trip` reads
-    /// it to flip into disk-backed mode mid-emission. C2.
+    /// it to flip into disk-backed mode mid-emission.
     disk_trip: Arc<AtomicBool>,
     disk_mode: bool,
     packets_since_check: u64,
@@ -159,7 +159,7 @@ impl MemMonitor {
     }
 
     /// Returns a clone of the shared disk-trip flag so a [`MemWatcher`] can set
-    /// it when sampled RSS crosses the threshold during Phase 4. C2.
+    /// it when sampled RSS crosses the threshold during Phase 4.
     #[must_use]
     pub fn disk_trip_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.disk_trip)
@@ -176,7 +176,7 @@ impl MemMonitor {
     /// engaged, flips the sticky `disk_mode` on (printing the same notice as
     /// `check`) and returns `true`. The Phase-4 emit loop polls this to switch
     /// the in-memory dedup to disk mid-stream when real RSS crosses the threshold
-    /// between the coarse pressure checks. C2.
+    /// between the coarse pressure checks.
     pub fn poll_disk_trip(&mut self) -> bool {
         if !self.disk_mode && self.disk_trip.load(Ordering::Relaxed) {
             self.disk_mode = true;
@@ -232,7 +232,7 @@ pub struct MemWatcher {
 
 impl MemWatcher {
     /// Spawns the watcher, folding each sample into `peak` and setting `disk_trip`
-    /// once a sample reaches `threshold_bytes` (the C2 mid-stream-spill signal). If
+    /// once a sample reaches `threshold_bytes` (the mid-stream-spill signal). If
     /// an [`progress::RssSampler`] cannot be created, returns an inert watcher (no
     /// thread) so callers need no error handling.
     pub fn spawn(peak: Arc<AtomicU64>, threshold_bytes: u64, disk_trip: Arc<AtomicBool>) -> Self {

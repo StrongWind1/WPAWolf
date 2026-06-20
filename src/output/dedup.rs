@@ -212,7 +212,7 @@ impl PerSinkDedup {
     /// Returns the number of fingerprints recorded for `sink`. In memory mode a
     /// line is written iff its fingerprint was newly inserted, so this equals the
     /// number of lines already written to that sink's file -- the line base a
-    /// mid-emission `DiskDedup` must start counting from. C2.
+    /// mid-emission `DiskDedup` must start counting from.
     #[must_use]
     pub fn len_for_sink(&self, sink: SinkId) -> usize {
         self.sets.get(sink.as_index()).map_or(0, HashSet::len)

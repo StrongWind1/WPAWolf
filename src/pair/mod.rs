@@ -120,7 +120,7 @@ const STREAM_PAIR_COST: u64 = 2_000_000;
 /// at most one such heavy group runs at a time. Set equal to `STREAM_PAIR_COST`
 /// so the serialized set is exactly the streaming-path mega-groups, whose
 /// per-frame pairing transients (x thread count) would otherwise dominate
-/// Phase-4 peak memory. Light groups stay fully parallel. C2.
+/// Phase-4 peak memory. Light groups stay fully parallel.
 const SERIALIZE_GROUP_COST: u64 = STREAM_PAIR_COST;
 
 /// Folds `other` into `acc` in place: `collapsed_lines`, `cluster_count`, and
@@ -250,7 +250,7 @@ where
     let groups_done = AtomicUsize::new(0);
     let pairs_done = AtomicUsize::new(0);
     let all_nc = Mutex::new(NcDedupStats::default());
-    // Serializes mega-groups so at most one runs at a time (C2). A light group
+    // Serializes mega-groups so at most one runs at a time. A light group
     // never touches this lock and stays fully parallel.
     let heavy_gate = Mutex::new(());
 
@@ -259,7 +259,7 @@ where
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
         // Hold the heavy-group gate for the whole pairing + fan-out of a mega-group
         // so concurrent per-group transients can't sum across rayon workers. The
-        // guard releases when this closure returns; light groups pass `None`. C2.
+        // guard releases when this closure returns; light groups pass `None`.
         let _heavy_guard = (cost >= SERIALIZE_GROUP_COST)
             .then(|| heavy_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         if cost >= HEAVY_GROUP_COST {
@@ -400,7 +400,7 @@ fn group_counts_and_cost(messages: &[EapolMessage]) -> (usize, usize, usize, usi
             MsgType::M4 => m4 += 1,
         }
     }
-    // Saturating arithmetic (CR-22): with the uncapped default a hyperactive
+    // Saturating arithmetic: with the uncapped default a hyperactive
     // group's per-type products can in principle overflow u64; saturating to
     // u64::MAX still sorts the group as "heaviest", the correct scheduling call,
     // instead of panicking under `overflow-checks`.

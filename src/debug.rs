@@ -358,7 +358,7 @@ impl GroupSummary {
                 MsgType::M4 => m4 += 1,
             }
         }
-        // Saturating arithmetic (CR-22): mirrors `pair::group_counts_and_cost`;
+        // Saturating arithmetic: mirrors `pair::group_counts_and_cost`;
         // an uncapped hyperactive group's products can overflow u64, and this
         // survey runs before Phase 4, so it must not panic first.
         let cost = (m1 as u64)

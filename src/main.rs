@@ -343,7 +343,7 @@ fn main() {
         // Fail fast on an unwritable output or spill target. The field failure was
         // a post-Phase-4 EACCES while creating the first aux file -- probing every
         // sink's parent dir plus the temp/spill dir up front turns hours of wasted
-        // work into an immediate, legible error. [C4]
+        // work into an immediate, legible error.
         let temp_dir = std::env::temp_dir();
         let mut probed: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
         let probe_dirs = paths
@@ -430,7 +430,7 @@ fn build_pair_config(cli: &Cli) -> PairConfig {
 /// named probe file. Run at startup for every output sink's parent directory and
 /// the temp/spill directory so an unwritable target aborts the run immediately
 /// instead of after a multi-hour Phase 4 (the field failure was a post-Phase-4
-/// `Permission denied` while creating the first aux file). [C4]
+/// `Permission denied` while creating the first aux file).
 fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
     let probe = dir.join(format!(".wpawolf_probe_{}", std::process::id()));
     std::fs::File::create(&probe)?;
@@ -1004,7 +1004,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // allocation spikes (the fan-out's dedup set + per-group pairs) are invisible
         // to the sampled peak. This 250 ms background sampler folds the true
         // high-water into the same atomic the banner reads. The guard stops and
-        // joins when this block ends, just before `finalize`. [C3]
+        // joins when this block ends, just before `finalize`.
         let _mem_watcher =
             MemWatcher::spawn(mem_monitor.peak_handle(), mem_monitor.threshold_bytes(), mem_monitor.disk_trip_handle());
 

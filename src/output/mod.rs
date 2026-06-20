@@ -712,7 +712,7 @@ impl OutputContext {
         )?;
         // Reconcile the monitor's sticky disk-mode flag for the Phase-5 banner: if
         // the watcher tripped (and drove the mid-stream switch in `emit_inner`),
-        // record that the run went disk-backed. C2.
+        // record that the run went disk-backed.
         mem_monitor.poll_disk_trip();
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
@@ -880,7 +880,7 @@ impl OutputContext {
                     return;
                 }
 
-                // Mid-stream switch to disk-backed dedup when the C2 watcher
+                // Mid-stream switch to disk-backed dedup when the memory watcher
                 // signalled memory pressure. Sticky: once `disk_dedup` is `Some`
                 // the check is skipped. The in-memory fingerprints already written
                 // are flushed as sentinels into a line-base-seeded `DiskDedup`

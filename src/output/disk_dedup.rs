@@ -113,7 +113,7 @@ impl DiskDedup {
 
     /// Like [`Self::new`] but seeds each sink's line counter from `line_offsets`.
     ///
-    /// Used for a mid-emission switchover (C2): lines were already written to the
+    /// Used for a mid-emission switchover: lines were already written to the
     /// output files in memory-dedup mode, so `record()` must number new lines from
     /// that base. `rewrite_without_lines` indexes *absolute* file lines, so a base
     /// of 0 here would make the cleaning pass remove the wrong lines.

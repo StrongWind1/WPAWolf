@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn time_fallback_emits_when_packet_delta_below_threshold() {
         // Simulate a slow stream: packet delta stays below 2M but wall clock
-        // exceeds 5 s. The reporter must emit (the bug CR-23 fixed).
+        // exceeds 5 s. The reporter must still emit a line in that case.
         let mut r = ProgressReporter::new(true);
         // Backdate `last_print` by 6 seconds to simulate elapsed time.
         r.last_print = Instant::now().checked_sub(std::time::Duration::from_secs(6)).unwrap();

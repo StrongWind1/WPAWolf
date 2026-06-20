@@ -167,7 +167,7 @@ One block / record at a time. I/O buffer 64 KiB (FR-MEM-2). EOF mid-record logs 
 
 `src/link/` strips the radio metadata header; `src/ieee80211/` parses 802.11 frames and tagged parameters.
 
-`src/link/`: `radiotap.rs` (DLT 127, LE, variable `it_len`, multi-word `it_present`; non-zero `it_version` is forgiven and counted, not dropped); `ppi.rs` (DLT 192, `pph_dlt` must be 105); `prism.rs` (DLT 119, host byte order, AVS-within-Prism detection via BE magic `0x80211xxx`); `avs.rs` (DLT 163, BE per spec; hcxtools treats as LE which is a documented bug we refuse to replicate, with the deviation commented at the parse site per the project's wire-spec convention); `sll.rs` (DLT 113 SLL / DLT 276 SLL2, Linux cooked capture, ARPHRD 801 raw / 802 Prism / 803 radiotap dispatch); `fcs.rs` (per-packet CRC-32 FCS resolve via the `0x2144DF1C` residue check, five counted outcomes); `recover.rs` (tiered recovery for corrupt link-layer headers: Tier 2 recomputes the radiotap length from `it_present`, Tier 3 scans for the CRC-32 residue).
+`src/link/`: `radiotap.rs` (DLT 127, LE, variable `it_len`, multi-word `it_present`; non-zero `it_version` is forgiven and counted, not dropped); `ppi.rs` (DLT 192, `pph_dlt` must be 105); `prism.rs` (DLT 119, host byte order, AVS-within-Prism detection via BE magic `0x80211xxx`); `avs.rs` (DLT 163, BE per spec; hcxtools treats as LE which is a documented bug we refuse to replicate, with the deviation commented at the parse site per the project's wire-spec convention); `sll.rs` (DLT 113 SLL / DLT 276 SLL2, Linux cooked capture, ARPHRD 801 raw / 802 Prism / 803 radiotap dispatch); `fcs.rs` (per-packet CRC-32 FCS resolve via the `0x2144DF1C` residue check, five counted outcomes); `recover.rs` (tiered recovery for corrupt link-layer headers: Tier 2 recomputes the radiotap length from `it_present`, Tier 3 scans for the CRC-32 residue; plus a DLT-0 arm that recovers genuine 802.11 frames laid under a zeroed / unspecified IDB link type, trying the radiotap `it_present` layout then raw 802.11 at offset 0 gated on a plausible Frame Control).
 
 `src/ieee80211/`: `frame.rs` (MAC header per `[IEEE 802.11-2024]` §9.2.4.1, address mapping Table 9-60, WDS first-class per §4 invariant 4); `ie.rs` (IE TLV walker for SSID, SSID List tag 84, Mesh ID tag 114, Country, vendor AP names, OWE Transition Mode, CCX1, WPS); `rsn.rs` (RSN IE tag 48: version, group cipher, pairwise list, AKM list, RSN caps, PMKID list, group management cipher per §9.4.2.24); `ft.rs` (MDE tag 54 for MDID, FTE tag 55 subelement 3 for R0KH-ID 1-48 B, subelement 1 for R1KH-ID 6 B per §9.4.2.45, §9.4.2.46); `eapol.rs` (EAPOL-Key per §12.7.2, M1/M2/M3/M4 from Key Information bits per Table 12-10, KDV validation per Table 12-11); `eap.rs` (EAP per RFC 3748 §4, identity Type 1 and inner-method username); `amsdu.rs` (A-MSDU subframe iteration per §9.3.2.2.2); `anqp.rs` (ANQP element parsing for venue / domain / NAI realm extraction).
 
@@ -194,7 +194,7 @@ match frame.subtype {
 }
 ```
 
-`src/store/` holds Phase-3 outputs / Phase-4 inputs: `messages.rs` (`MessageStore = HashMap<MacPair, Vec<EapolMessage>>` per FR-MSG-1, no eviction); `pmkid.rs` (`PmkidStore` with each entry tagging its S1-S20 origin via `PmkidSource`); `essid.rs` (`EssidMap`, multi-entry per AP for SSID changes); `auxiliary.rs` (`EssidSet`, `ProbeEssidSet`, `WordlistStore`, `IdentitySet`, `UsernameSet`, `DeviceInfoStore`, lazy-initialised, zero overhead if the corresponding flag is unset).
+`src/store/` holds Phase-3 outputs / Phase-4 inputs: `messages.rs` (`MessageStore = HashMap<MacPair, Vec<EapolMessage>>` per FR-MSG-1, dedup-on-insert, no eviction); `pmkid.rs` (`PmkidStore` with each entry tagging its S1-S20 origin via `PmkidSource`); `essid.rs` (`EssidMap`, multi-entry per AP for SSID changes); `mod.rs` (`MldStore`, the 802.11be link-MAC to MLD-MAC map learned from Multi-Link Elements; drives the additive canonicalization in §5.13); `auxiliary.rs` (`EssidSet`, `ProbeEssidSet`, `WordlistStore`, `IdentitySet`, `UsernameSet`, `DeviceInfoStore`, lazy-initialised, zero overhead if the corresponding flag is unset). All three keyed stores spill to disk under memory pressure (invariant 2); `messages.rs` / `pmkid.rs` own their spill logic and share the binary record format in `disk_messages.rs`.
 
 Phase 3 enforces the §4 invariant 7 rejection rules and emits `[invalid_nonce]` / `[invalid_mic]` / `[invalid_pmkid]` log entries when `--log` is set.
 
@@ -241,20 +241,24 @@ Items 1-5, 9, 10 are all live transport vectors with end-to-end coverage. Items 
 
 - `collapse.rs` reduces the 6 combos to 3 equivalence classes per session when `--dedup-hash-combos` is set (FR-PAIR-5). See §5.
 
+- `mod.rs` schedules per-group pairing. Each group's cost is the saturating sum of the six N#E# cross-products (`group_counts_and_cost`; saturating so a hyperactive group's product cannot overflow `u64` under `overflow-checks`). A group whose cost exceeds `STREAM_PAIR_COST` (2,000,000) is paired in streaming mode, one EAPOL frame at a time via `combos::generate_streaming`, so peak memory is bounded to a single frame's pairs instead of the full cross-product. A group at or above `SERIALIZE_GROUP_COST` (equal to `STREAM_PAIR_COST`) additionally holds an exclusive lock while it pairs, so at most one such mega-group runs at a time and its per-frame transients cannot sum across rayon workers; light groups never touch the lock and stay fully parallel. The opt-in `--max-eapol-per-type` cap (FR-CLI-3) truncates each per-type list before any of this, bounding fan-out without changing the store. In disk mode the whole pass runs single-threaded (`pair_all_groups_disk`), loading one group from the spill file at a time.
+
 `src/output/`:
 
 - `hashcat.rs` formats `WPA*01*` through `WPA*11*` lines. The MIC field in `<EAPOL>` is zeroed at format time per FR-OUT-8.
 - `wordlists.rs` writes `-E`, `-R`, `-W`, `-I`, `-U` files in autohex form (NUL trim per `crate::types::trim_nul_padding`).
 - `device_info.rs` writes `-D` (deduped by MAC, sorted by manufacturer).
-- `dedup.rs` is the in-memory `HashSet<u64>` SipHash-1-3 fingerprint gate. PMKID and EAPOL fingerprints have disjoint field sets prefixed by the hash-line kind byte (see §7). Under memory pressure it hands off to `disk_dedup.rs` (partitioned bucket files plus a post-run cleaning pass); the handoff happens before Phase 4 from the pre-pass estimate, or mid-emission when the `MemWatcher` crosses the 80 % threshold, with per-sink line counts seeded so the cleaning pass still removes the right lines.
+- `dedup.rs` is the in-memory `PerSinkDedup` (one `HashSet<u64>` of SipHash-1-3 fingerprints per sink). PMKID and EAPOL fingerprints have disjoint field sets prefixed by the hash-line kind byte (see §7). Under memory pressure it hands off to `disk_dedup.rs`: hash lines are written through to their files immediately (accepting transient duplicates) while each line's `(0-based line number, fingerprint)` is appended to one of 256 per-sink bucket files (`fingerprint % 256`), and a post-run cleaning pass rewrites every file dropping all but the first occurrence of each fingerprint. The handoff happens either before Phase 4 from the pre-pass cost estimate (`would_spill`), or mid-emission: the `MemWatcher` sets a `disk_trip` flag when sampled RSS crosses 80 %, and the emit loop polls it, seeds the new `DiskDedup` with each sink's current line count (`len_for_sink`), flushes the in-memory fingerprints into the buckets as `u64::MAX` sentinel records (so they count as the already-written first occurrence), drops the in-memory set, and write-throughs from there. The watcher only signals; the emit loop performs the switch.
 
 The two pipelines run strictly in order: the PMKID emission pass runs to completion before the EAPOL pairing pass starts (both within `OutputContext::emit_inner()`). They share only the dedup set and the `BufWriter`. See OUT-1 in §4 invariant 6.
 
 ### §3.5  Phase 5: Report
 
-`src/stats.rs` owns every counter the four earlier phases increment. The Phase 5 report prints the summary unconditionally to stderr at the end of every run. There is no `--stats` toggle: suppressing the summary would hide exactly the information an operator needs to know whether the capture was any good.
+`src/stats.rs` owns every counter the four earlier phases increment. The Phase 5 report prints the summary unconditionally to stdout at the end of every run (FR-CLI-4; stderr stays silent). There is no `--stats` toggle: suppressing the summary would hide exactly the information an operator needs to know whether the capture was any good. The banner is a machine-checked contract: every `Stats` and `FragmentStats` field is catalogued in `STATS.md`, and `make audit-stats` reconciles the two in both directions (see §9).
 
 The summary is hcxpcapngtool-shaped; anyone who has read `hcxpcapngtool` output should be able to read wpawolf output without a glossary. We match hcxpcapngtool's line set as the floor and add more where the upstream tool is missing data. See §9 for the full counter inventory.
+
+Timestamp-derived rows (first / last packet, duration, session time gap max) are computed only from timestamps that pass a plausibility gate: non-zero and below `SANE_EPOCH_CEILING_US` (2100-01-01), via `types::is_plausible_epoch_us`. A capture-tool artifact or container corruption that puts a timestamp near 2^64 is excluded from those accumulators, so the banner cannot show a multi-decade garbage duration. The frame itself is still parsed and paired; only the time accumulators ignore it.
 
 The summary is organised as five banner sections, one per pipeline phase, so an operator can immediately see which phase a parse failure occurred in:
 
@@ -280,7 +284,7 @@ These are the non-negotiable rules of the codebase. Violating any of them is a r
 
 ### 2. Collect-then-pair (no stream pairing, no eviction)
 
-All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. The store has no ring buffer, no eviction, and no per-type cap. The optional `--max-eapol-per-type` flag (off by default) caps only how many messages of each type the pairing engine iterates, never what the store keeps; see §8.8 FR-CLI. If RSS reaches 80 % of system RAM (override via `WPAWOLF_MEM_THRESHOLD`) during Phase 1 ingestion or Phase 4 emission, `MemMonitor` sets a sticky disk-mode flag: `MessageStore` and `PmkidStore` spill to temp-file storage (`src/store/disk_messages.rs`) and Phase 4 streams groups back one at a time, while hash-line dedup spills to partitioned fingerprint bucket files with a post-run cleaning pass (`src/output/disk_dedup.rs`). A background sampler thread (`MemWatcher`) reads RSS every 250 ms during Phase 4, so the dedup can switch from memory to disk mid-emission when a run's distinct-line count outgrows the pre-pass estimate, instead of running out of memory. The run degrades to disk speed instead of aborting, and collect-then-pair semantics hold in both modes.
+All EAPOL messages for an `(AP, STA)` pair go into `HashMap<MacPair, Vec<EapolMessage>>` first. Pairing runs in §3.4 on the complete per-group message set. The store has no ring buffer, no eviction, and no per-type cap. The optional `--max-eapol-per-type` flag (off by default) caps only how many messages of each type the pairing engine iterates, never what the store keeps; see §8.8 FR-CLI. If RSS reaches 80 % of system RAM (override via `WPAWOLF_MEM_THRESHOLD`) during Phase 1 ingestion or Phase 4 emission, `MemMonitor` sets a sticky disk-mode flag: `MessageStore` and `PmkidStore` spill to temp-file storage (each owns its spill/reload logic in `messages.rs` / `pmkid.rs`; the binary record format is shared in `src/store/disk_messages.rs`) and Phase 4 streams groups back one at a time, while hash-line dedup spills to partitioned fingerprint bucket files with a post-run cleaning pass (`src/output/disk_dedup.rs`). A background sampler thread (`MemWatcher`) reads RSS every 250 ms during Phase 4, so the dedup can switch from memory to disk mid-emission when a run's distinct-line count outgrows the pre-pass estimate, instead of running out of memory. The run degrades to disk speed instead of aborting, and collect-then-pair semantics hold in both modes.
 
 This is the single most important architectural difference vs upstream hcxpcapngtool. Their implementation pairs on arrival using a 64-entry shared ring (`MESSAGELIST_MAX = 64`); when the 65th message arrives without a successful pair, the oldest is silently dropped. wpawolf cannot miss a valid pair regardless of message ordering or interleaving from other AP/STA pairs, because pairing never runs on a partial set. The opt-in `--max-eapol-per-type` cap is the one exception, and it stays off by default to preserve this guarantee.
 
@@ -309,10 +313,10 @@ SipHash-1-3( line_kind_byte || PMKID || MAC_AP || MAC_STA || ESSID )
 For EAPOL lines:
 
 ```
-SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID )
+SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || MESSAGE_PAIR )
 ```
 
-This is a global filter. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines. (hcxpcapngtool uses an internal 20-entry look-back ring in `cleanbackhandshake` as a speedup, then a full dedup at write time; the two tools are therefore equivalent at the output boundary.)
+The trailing `message_pair` byte keeps two combos that share identical frame and nonce bytes (e.g. N1E2 vs N3E2 in `--all` mode) from colliding, so both still emit. This is a global filter. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines. (hcxpcapngtool uses an internal 20-entry look-back ring in `cleanbackhandshake` as a speedup, then a full dedup at write time; the two tools are therefore equivalent at the output boundary.)
 
 ### 6. PMKID and EAPOL pipelines are strictly separate (OUT-1)
 
@@ -640,7 +644,7 @@ pub struct EapolMessage {
     pub mic:            MicBytes,       // 16 or 24 B  original MIC (MicBytes { bytes: [u8; 24], len: u8 })
     pub pmkid:          Option<[u8; 16]>,// 17 B PMKID extracted from Key Data
     pub eapol_frame:    Arc<[u8]>,      // raw EAPOL frame, MIC intact (zeroed at output)
-    pub ft:             Option<FtFields>,// MDID + R0KH-ID + R1KH-ID for FT-PSK
+    pub ft:             Option<Box<FtFields>>,// boxed: 8 B vs 58 B inline; MDID + R0KH-ID + R1KH-ID for FT-PSK
     pub akm:            AkmType,        //  1 B  detected from RSN IE context
     pub is_rsn:         bool,           //  1 B  RSN (0x02) vs WPA legacy (0xFE) descriptor
 }
@@ -655,11 +659,17 @@ pub struct FtFields {
 
 `eapol_frame` is `Arc<[u8]>` so Phase 4 pairing threads can share the frame body without heap-cloning the millions of `PairedHash` objects that fan out from the 6-N#E#-combos × multi-handshake-per-session explosion.
 
-Typical size: ~110 B stack + ~140 B shared-heap = ~250 B per message (amortised across combo reuse). With FT fields: ~310 B. Oversized FT EAPOL (~500 B): ~460 B.
+`FtFields` is boxed (`Option<Box<FtFields>>`) because over 99.9 % of messages are non-FT: the cold field costs 8 B (a null-pointer-optimised `None`) instead of 58 B inline, which drops the `MessageStore` footprint by roughly a fifth on real captures. Typical size: ~110 B stack + ~140 B shared-heap = ~250 B per non-FT message (amortised across combo reuse); an FT message adds the boxed `FtFields` on the heap. Oversized FT EAPOL frames (~500 B) push the shared-heap share up accordingly.
 
 ### §5.12  Relay (WDS / 4-address) frames
 
 Standard 802.11 frames use three MAC address fields. Mesh and WDS frames use four (To DS = 1, From DS = 1). Both the address interpretation and the BSSID detection change per `[IEEE 802.11-2024]` Table 9-60. wpawolf parses these frames identically and pairs handshakes carried within them without any flag (§4 invariant 4). They are counted in `stats.relay_frames`.
+
+### §5.13  802.11be Multi-Link (MLD) canonicalization
+
+When an AP advertises an 802.11be Multi-Link Element (`[IEEE 802.11-2024]` §9.4.2.321, §35.3), its per-band link MACs all belong to one Multi-Link Device. `MldStore` (`src/store/mod.rs`) learns each `link MAC -> MLD MAC` mapping (first observation wins) from MLEs in Beacons, Probe Responses, and Association Requests. After Phase 1.5 (WDS resolution), `MessageStore`, `PmkidStore`, and `EssidMap` are canonicalized: for every group or entry whose AP or STA maps to a different MLD MAC, an MLD-MAC-keyed copy is **added while the original link-MAC-keyed entry is kept**.
+
+This is additive, not a rewrite, and the distinction is load-bearing. A true multi-link handshake is crackable only under the MLD MAC, while a single-link association to one BSSID of an MLO AP is crackable only under the link MAC (its PTK is derived from the link address). Emitting both is the same "emit every candidate" rule as the six N#E# combos, so whichever is correct is always present. A destructive rewrite onto the MLD MAC would silently drop the single-link case and produce uncrackable lines; this was a real corpus miss before the fix. When no MLE is observed the step is a no-op, byte-identical to pre-MLE behaviour. Per-pair dedup applies to the copies, so an identical PMKID seen under two link addresses collapses within the MLD group. Counters: `mle_basic_seen`, `mle_mld_addrs_learned`, `mld_groups_merged`, `essid_link_macs_merged` (see `STATS.md`). Canonicalization runs in disk mode too.
 
 WDS classification runs in **Phase 1.5** (`src/extract/wds.rs`) after the `essid_map` is fully populated, then walks every deferred frame through a three-tier resolution ladder. Tier 3 always succeeds for syntactically valid EAPOL frames, so resolution does **not** depend on `essid_map` being populated; a capture with no Beacon / Probe Response still recovers every valid WDS handshake.
 
@@ -997,7 +1007,7 @@ Parse Linux cooked capture headers (DLT 113 SLL, 16-byte header; DLT 276 SLL2, 2
 Validate FCS presence by CRC-32 on every frame, every DLT. The 802.11 FCS is standard CRC-32 (ISO 3309 / IEEE 802.3); `crc32(data || fcs)` always equals the residue constant `0x2144DF1C`, so one pass over the stripped payload proves whether a trailing FCS is present. `link::fcs::resolve` combines the CRC verdict with the link-layer header's FCS flag (radiotap Flags bit `0x10`) and the BADFCS flag (radiotap Flags bit `0x40`, `IEEE80211_RADIOTAP_F_BADFCS`) into five outcomes, each with its own §9.2 counter: header and CRC agree (strip), CRC detected an unannounced FCS (strip; the header was wrong), BADFCS flagged (strip; frame was received corrupt on the air), CRC mismatch with no flag (strip; trust the header), neither (no strip). This replaces the earlier radiotap-flag-only tail-strip: frames whose header never announced an FCS previously fed 4 trailing checksum bytes to the IE walker as body data.
 
 #### FR-LL-9
-Attempt tiered recovery before dropping a frame whose link-layer strip failed (`src/link/recover.rs`). Tier 2 (`recovered_tier2`): when radiotap `it_len` is corrupt, recompute the expected header length from the `it_present` bitmask field sizes and natural alignment; bail to Tier 3 when the variable-size TLV (bit 28) or vendor-namespace (bit 30) bits are set. Tier 3 (`recovered_tier3`): scan byte offsets 0-144 (the largest known link-layer header, Prism) for the CRC-32 residue match that proves where the 802.11 frame plus FCS starts; minimum 14-byte slice (10-byte minimal control frame + 4-byte FCS) to reject null/FF-padding false positives. Only frames failing all tiers increment `link_errors` and route to the `plcp_error` log category.
+Attempt tiered recovery before dropping a frame whose link-layer strip failed (`src/link/recover.rs`). Tier 2 (`recovered_tier2`): when radiotap `it_len` is corrupt, recompute the expected header length from the `it_present` bitmask field sizes and natural alignment; bail to Tier 3 when the variable-size TLV (bit 28) or vendor-namespace (bit 30) bits are set. Tier 3 (`recovered_tier3`): scan byte offsets 0-144 (the largest known link-layer header, Prism) for the CRC-32 residue match that proves where the 802.11 frame plus FCS starts; minimum 14-byte slice (10-byte minimal control frame + 4-byte FCS) to reject null/FF-padding false positives. DLT-0 recovery (`recovered_dlt0`): for a packet whose interface reports DLT 0 (LINKTYPE_NULL / unspecified), attempt the radiotap `it_present` layout when byte 0 reads as radiotap version 0, then raw 802.11 at offset 0 gated on a plausible Frame Control (protocol-version bits B0-B1 == 0, `[IEEE 802.11-2024]` §9.2.4.1.1); a mis-guess yields no hashes because the downstream `EtherType 0x888E` / EAPOL and garbage-pattern gates reject non-handshake bytes. Only frames failing all tiers increment `link_errors` and route to the `plcp_error` log category.
 
 ### §8.3  802.11 frame parsing: FR-80211-*
 
@@ -1135,10 +1145,10 @@ Extract ALL PMKIDs regardless of AKM type. No filtering based on hashcat support
 ### §8.5  EAPOL message storage: FR-MSG-*
 
 #### FR-MSG-1
-Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. No per-type cap on the store; the opt-in `--max-eapol-per-type` flag caps pairing fan-out only (FR-CLI-3), never what the store keeps. At 80 % of system RAM the store spills to disk (invariant 2) rather than aborting.
+Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. No per-type cap on the store; the opt-in `--max-eapol-per-type` flag caps pairing fan-out only (FR-CLI-3), never what the store keeps. At 80 % of system RAM the store spills to disk (invariant 2) rather than aborting. The only in-store reduction is dedup-on-insert: a byte-identical `(msg_type, akm, eapol_frame)` retransmission is collapsed at `MessageStore::add` time (`Admission::Duplicate`). That is a dedup, not an eviction; it never drops a message that would pair differently, and the global SipHash set would have collapsed the resulting lines anyway. The index is released by `finish_ingest()` before Phase 4.
 
 #### FR-MSG-2
-Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay_counter (u64), nonce (32 B), mic (16 B), KDV (0/1/2/3), eapol_frame (heap, no upper bound), eapol_frame_len, pmkid (16 B optional), FT fields (MDID 2 B, R0KH-ID up to 48 B, R1KH-ID 6 B), AKM type from context.
+Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay_counter (u64), nonce (32 B), mic (16 or 24 B per Table 12-11), KDV (0/1/2/3), eapol_frame (heap, no upper bound), pmkid (16 B optional), FT fields (boxed; MDID 2 B, R0KH-ID up to 48 B, R1KH-ID 6 B), AKM type from context, and `is_rsn` (RSN vs WPA-legacy descriptor).
 
 #### FR-MSG-3
 No memory ceiling. Memory scales with EAPOL message count, not file size. Typical 100 GB capture with <1M EAPOL messages: <250 MiB. The disk-backed fallback (invariant 2) is the backstop for degenerate inputs, not the OS OOM killer.
@@ -1165,13 +1175,15 @@ Pairing constraints (output filters, all off by default):
   - M1->M4: `RC_M4 - RC_M1` within tolerance
 
 #### FR-PAIR-4
-Within each combo type, prefer the pair with the smallest time gap. If time gaps are equal, prefer smallest RC gap.
+By default every pair that passes the constraints is emitted (the global SipHash dedup and the optional `--dedup-hash-combos` collapse handle reduction; there is no single-pair-per-combo selection). When `--dedup-hash-combos` collapses an equivalence class, the survivor is the pair with the smallest replay-counter gap magnitude (`rc_gap_magnitude`), with authorized-combo preference as the tiebreak (N3E2 > N1E2, N2E3 > N4E3, N3E4 > N1E4). See §5.8.
+
+The optional `--max-eapol-per-type=N` cap (FR-CLI-3, default off) is the one exception: it truncates each per-type message list to N entries before the combo loops run, bounding fan-out to N**2 per combo. It changes only what pairing iterates, never the store (FR-MSG-1).
 
 #### FR-PAIR-5
 Hash combo deduplication. Within a single handshake session (same ANonce across M1/M3): N1E2 == N3E2 (same M2 EAPOL); N2E3 == N4E3 (same M3 EAPOL); N1E4 == N3E4 (same M4 EAPOL). When `--dedup-hash-combos` is set, emit only one hash per equivalence class. Survivor chosen by smallest RC gap then authorized combo preference (N3E2 > N1E2, N2E3 > N4E3, N3E4 > N1E4). See §5.8.
 
 #### FR-PAIR-6
-Detect nonce endianness. Compare replay counters across M1->M2 or M3->M4. If the relationship only makes sense under byte-swap, set the LE (`0x20`) or BE (`0x40`) flag in message_pair. If RC relationship is ambiguous, set NC flag (`0x80`).
+Detect nonce endianness from the M1/M3 **nonce** bytes (not the replay counters): when two nonces share their first 28 bytes but differ in the trailing 4, bytes 30-31 differing indicates an LE router (`0x20`) and bytes 28-29 differing a BE router (`0x40`). This detection runs unconditionally. Independently, under `--rc-drift` a replay-counter relationship that only resolves under a byte-swap also sets LE|BE together with NC. The NC flag (`0x80`) itself fires from the three-source rule in §5.7 (M1 present for the session, endianness drift detected, or a per-pair RC deviation).
 
 #### FR-PAIR-7
 Invalid value rejection (unconditional, not a flag). Per §4 invariant 7:
@@ -1249,13 +1261,16 @@ EAPOL frame MIC zeroing for output. The EAPOL-Key frame stored in `<EAPOL>` must
 Before writing any hash line, check it against a global deduplication set (§4 invariant 5).
 
 #### FR-DEDUP-2
-Dedup key is a 64-bit SipHash of the significant fields. PMKID lines: `PMKID || MAC_AP || MAC_STA || ESSID`. EAPOL lines: `MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID`. Both prefixed by the line-kind byte to prevent cross-pipeline aliasing.
+Dedup key is a 64-bit SipHash of the significant fields. PMKID lines: `PMKID || MAC_AP || MAC_STA || ESSID`. EAPOL lines: `MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || MESSAGE_PAIR`. Both prefixed by the line-kind byte to prevent cross-pipeline aliasing.
 
 #### FR-DEDUP-3
 If two hash lines differ only in ESSID (AP changed SSID), both are emitted (different ESSID = different salt = different hash).
 
 #### FR-DEDUP-4
 If two hash lines differ only in message_pair bits 3-7 (flags), keep the one with the most informative flags (prefer LE/BE detection over NC-mandatory).
+
+#### FR-DEDUP-5
+Disk-backed dedup (`src/output/disk_dedup.rs`). When the in-memory `PerSinkDedup` would exceed the memory threshold (the pre-Phase-4 `would_spill` byte estimate, or a mid-emission `disk_trip` from the `MemWatcher`), dedup spills to disk: each hash line is written through to its output file immediately and its `(0-based line number, u64 fingerprint)` is appended to one of 256 per-sink bucket files (`fingerprint % 256`, 16 bytes/record LE). After emission, a cleaning pass loads each bucket, groups by fingerprint, and rewrites every output file keeping only the first occurrence of each. Fingerprints already deduped in memory before a mid-emission switch are flushed as `line_number == u64::MAX` sentinels and count as the first occurrence, so their later write-through duplicates are removed; the new `DiskDedup` is seeded with each sink's current line count so the cleaning pass indexes absolute file lines correctly. Output is set-identical to memory-mode dedup; only line order may differ (hashcat is order-insensitive). Bucket directories are temp files deleted on drop.
 
 
 ### §8.8  CLI: FR-CLI-*
@@ -1496,11 +1511,21 @@ pub struct EapolMessage { /* see §5.11 */ }
 pub struct FtFields { /* see §5.11 */ }
 
 pub struct MessageStore {
+    // memory mode
     groups: HashMap<MacPair, Vec<EapolMessage>>,
+    dedup: HashMap<MacPair, HashSet<(MsgType, AkmType, Arc<[u8]>)>>, // insert-dedup index, freed by finish_ingest()
     total_count: usize,
+    // disk mode (engaged at 80% RSS): spill file + per-group offset index
+    disk_index: HashMap<MacPair, Vec<MessageRef>>,
+    disk_writer: Option<BufWriter<File>>,
+    disk_path: Option<PathBuf>,
+    disk_offset: u64,
+    disk_mode: bool,
 }
 
-pub struct DedupSet { seen: HashSet<u64> }
+pub struct DedupSet { seen: HashSet<u64> }            // sink-independent inventory counter (hash_type_found)
+pub struct PerSinkDedup { sets: [HashSet<u64>; 9] }   // the per-sink output gate, one set per hash sink
+pub struct DiskDedup { /* 256 bucket files per sink; mid-stream fallback for PerSinkDedup */ }
 ```
 
 `HashMap` and `HashSet` use the default SipHash-1-3 hasher, safe against HashDoS from crafted MACs.
