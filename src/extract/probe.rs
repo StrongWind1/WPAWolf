@@ -23,7 +23,7 @@ use super::common::{BROADCAST_MAC, insert_essid};
 /// Extracts SSIDs (IE id=0 and SSID List IE), WPS device metadata, and (S14/S15)
 /// PMKIDs from any RSN IE PMKID List. IEs start at `body[0]` (no fixed fields).
 /// Directed probe requests (non-broadcast DA) update the ESSID map; broadcast probes
-/// only update the global ESSID set. See `ARCHITECTURE.md §8 FR-MGMT-*`.
+/// only update the global ESSID set. See `ARCHITECTURE.md §8.3 FR-80211-2`.
 pub fn process_probe_req(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

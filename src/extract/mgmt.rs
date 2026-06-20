@@ -59,7 +59,7 @@ fn scan_ies_for_wordlist(ies: &[u8], scan_ies_store: &mut WordlistScanIesStore, 
 /// PMKIDs from AssocRequest/ReassocRequest RSN IEs, SSIDs from Probe Requests and
 /// Action Neighbor Report Requests, WPS device metadata, country codes, and SSID
 /// List entries. Unhandled subtypes increment counters for visibility.
-/// See `ARCHITECTURE.md §8 FR-MGMT-*`.
+/// See `ARCHITECTURE.md §8.3 FR-80211-2`.
 pub fn process_mgmt(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

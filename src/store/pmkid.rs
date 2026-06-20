@@ -286,9 +286,8 @@ impl PmkidStore {
         self.groups.values().map(Vec::len).sum()
     }
 
-    /// Drops every PMKID entry. Used by `--per-file` mode after the per-file
-    /// emit. The map's capacity is preserved across files so the next file
-    /// reuses the existing buckets.
+    /// Drops every PMKID entry, reclaiming store memory for reuse. The map's
+    /// capacity is preserved so a subsequent refill reuses the existing buckets.
     pub fn clear(&mut self) {
         self.groups.clear();
         self.disk_index.clear();

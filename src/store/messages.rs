@@ -236,12 +236,9 @@ impl MessageStore {
         if self.disk_mode { self.disk_index.len() } else { self.groups.len() }
     }
 
-    /// Drops every group and resets the total-message counter.
-    ///
-    /// Used by `--per-file` mode to reclaim store memory after each input
-    /// file's hashes have been emitted. The map's capacity is *not* shrunk so
-    /// the next file reuses the existing buckets (saves a re-alloc when the
-    /// per-file pair count is similar across files).
+    /// Drops every group and resets the total-message counter, reclaiming store
+    /// memory for reuse. The map's capacity is *not* shrunk, so a subsequent
+    /// refill reuses the existing buckets and saves a re-allocation.
     pub fn clear(&mut self) {
         self.groups.clear();
         self.dedup.clear();

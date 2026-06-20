@@ -28,7 +28,7 @@ use super::common::{BEACON_FIXED, SUBTYPE_BEACON, insert_essid};
 /// Extracts SSIDs, AKM types, SSID List entries, Country codes, WPS device metadata,
 /// Mesh IDs, vendor AP names, OWE Transition SSIDs, Cisco CCX1 AP names, Time Zone
 /// strings, and (S16/S17) any non-zero PMKID from the RSN IE PMKID List (vendor
-/// firmware deviation). See `ARCHITECTURE.md §8 FR-MGMT-*`.
+/// firmware deviation). See `ARCHITECTURE.md §8.3 FR-80211-2`.
 pub fn process_beacon_or_probe_resp(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

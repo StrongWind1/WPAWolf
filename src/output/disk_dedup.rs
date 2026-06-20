@@ -92,7 +92,7 @@ impl DiskDedupSink {
 // --- DiskDedup ---
 
 /// Monotonic counter for unique temp directory names when multiple `DiskDedup`
-/// instances are created in the same process (e.g. `--per-file` mode, tests).
+/// instances are created in the same process (e.g. a mid-stream switch, tests).
 static INSTANCE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Disk-backed deduplication coordinator for all output sinks.

@@ -21,7 +21,7 @@ use super::common::{is_eapol_key_packet, is_eapol_llc, is_preauth_llc, mesh_cont
 /// using the direction-based tree (Tier 1). For WDS relay frames (ToDS=1, FromDS=1),
 /// defers EAPOL classification to Phase 1.5 by storing in `pending_eapol`.
 /// Falls back to EAP parsing for identity/username extraction when the corresponding
-/// output flags are set. See `ARCHITECTURE.md §8 FR-DATA-*`.
+/// output flags are set. See `ARCHITECTURE.md §8.3 FR-80211-3`.
 pub fn process_data(
     mac_hdr: &frame::MacHeader,
     body: &[u8],

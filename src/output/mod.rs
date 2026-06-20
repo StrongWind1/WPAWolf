@@ -561,18 +561,15 @@ pub fn run_output(
 
 // --- OutputContext ---
 
-/// Stateful output pipeline driver -- supports both single-pass (`run_output`)
-/// and per-file (`--per-file`) modes.
+/// Stateful output pipeline driver.
 ///
-/// In single-pass mode `run_output` constructs a context, calls `emit` once
-/// over the fully populated stores, and finalizes. In `--per-file` mode the
-/// caller constructs the context once, calls `emit` after each input file
-/// (with the per-file store contents), then calls `finalize` after the last
-/// file. Sinks stay open across `emit` calls, dedup state accumulates across
-/// files (so duplicates across captures still collapse), and the per-AP
-/// timestamp ranges needed for `[essid_not_found_summary]` are captured
-/// during `emit` so they survive the post-emit `MessageStore::clear` /
-/// `PmkidStore::clear` calls.
+/// `run_output` constructs a context, calls `emit` once over the fully
+/// populated stores, and `finalize`s. The context is designed to tolerate
+/// repeated `emit` calls as well: sinks stay open across calls, dedup state
+/// accumulates (so duplicates across batches still collapse), and the per-AP
+/// timestamp ranges needed for `[essid_not_found_summary]` are captured during
+/// `emit` (when the stores are fully available) rather than re-scanned in
+/// `finalize`.
 pub struct OutputContext {
     stats: OutputStats,
     dedup: PerSinkDedup,
@@ -588,12 +585,12 @@ pub struct OutputContext {
     /// ESSID to derive the PMK), so they go to `--log` only -- nothing
     /// reaches a hash sink. Map value is the count of would-have-been-emitted
     /// lines per AP; the distinct-AP count is the map's `len()`. Accumulates
-    /// across `emit` calls in `--per-file` mode.
+    /// across repeated `emit` calls.
     unresolved_drops: HashMap<crate::types::MacAddr, u64>,
     /// Per-AP `(first_seen_us, last_seen_us)` ranges captured during `emit`
     /// for every AP appearing in `unresolved_drops`. Captured here (rather
-    /// than re-scanned in `finalize`) so the values survive the per-file
-    /// `MessageStore::clear` / `PmkidStore::clear` between batches.
+    /// than re-scanned in `finalize`) so the values are available even after
+    /// the stores spill to disk.
     timestamp_ranges: HashMap<crate::types::MacAddr, (u64, u64)>,
 }
 
@@ -625,9 +622,9 @@ impl OutputContext {
     }
 
     /// Captures per-AP timestamp ranges for the unresolved set into
-    /// `timestamp_ranges`, merging by min/max. Called after each `emit` so
-    /// the values are available even if `MessageStore` / `PmkidStore` are
-    /// cleared between calls (per-file mode).
+    /// `timestamp_ranges`, merging by min/max. Called at the end of `emit` so
+    /// the values are available even after `MessageStore` / `PmkidStore` spill
+    /// to disk.
     fn capture_timestamp_ranges(&mut self, message_store: &MessageStore, pmkid_store: &PmkidStore) {
         if self.unresolved_drops.is_empty() {
             return;
@@ -651,9 +648,8 @@ impl OutputContext {
     }
 
     /// Runs PMKID + EAPOL emission for the current contents of
-    /// `message_store` / `pmkid_store`. Safe to call multiple times across
-    /// `--per-file` batches; sinks, dedup, and unresolved-drop bookkeeping
-    /// accumulate.
+    /// `message_store` / `pmkid_store`. Safe to call multiple times; sinks,
+    /// dedup, and unresolved-drop bookkeeping accumulate across calls.
     ///
     /// # Errors
     ///
@@ -1058,10 +1054,10 @@ impl OutputContext {
 
         // --- Per-AP unresolved-SSID summary ---
         //
-        // Timestamp ranges were captured during `emit` (so per-file mode
-        // sees correct values even after the stores are cleared). Walk the
-        // accumulated `timestamp_ranges` plus `unresolved_drops` in
-        // sorted-by-MAC order so the log lines are deterministic across runs.
+        // Timestamp ranges were captured during `emit` (so the values are
+        // correct even after the stores spill to disk). Walk the accumulated
+        // `timestamp_ranges` plus `unresolved_drops` in sorted-by-MAC order so
+        // the log lines are deterministic across runs.
         if !self.unresolved_drops.is_empty() {
             let mut aps: Vec<crate::types::MacAddr> = self.unresolved_drops.keys().copied().collect();
             aps.sort_unstable_by_key(|m| m.0);
