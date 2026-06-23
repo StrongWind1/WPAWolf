@@ -4,7 +4,7 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ## Releases
 
-### v1.0.0 (unreleased)
+### v1.0.0 (2026-06-23)
 
 Rayon-based parallel pairing with streaming per-group fan-out, automatic disk-backed fallback under memory pressure, Linux cooked capture (SLL/SLL2) support, per-packet CRC-32 FCS validation with tiered recovery of corrupt link-layer headers, out-of-order MSDU fragment reassembly, a `--log` triage redesign, and removal of `--per-file`. This release also adds: spilling the stores to disk instead of aborting in Phase 4 (so memory-pressured runs degrade rather than OOM); a per-eapol-frame streaming pairing path so a single corpus-scale rotating-ANonce group finishes on disk instead of materializing a multi-TB pair set; O(1) exact dedup-on-insert in `MessageStore`; best-effort DLT-0 (unspecified link type) frame recovery; and input-timestamp sanitization so corrupt capture clocks no longer poison the duration / session-gap banner rows. No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v0.3.10 for any capture.
 
