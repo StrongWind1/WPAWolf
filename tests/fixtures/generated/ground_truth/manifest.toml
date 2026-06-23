@@ -420,34 +420,130 @@ forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n1e2.pcap"
-description = "N1E2 -- ANonce(M1) + EAPOL(M2)"
+path = "20_pmkid_sites/s08_psk_sha384_probe_req.pcap"
+description = "PSK-SHA384 client-side PMKID via directed Probe Request RSN IE (AKM 20)"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 2
+expected_hashes = [
+    "WPA*08*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "20_pmkid_sites/s10_ft_psk_sha384_auth_seq1.pcap"
+description = "FT-PSK-SHA384 client-side PMK-R1Name via FT Auth seq=1 (AKM 19)"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 2
+expected_hashes = [
+    "WPA*10*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [wpa1]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
 expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n1e4.pcap"
+description = "N1E4 -- ANonce(M1) + EAPOL(M4) [wpa1]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [wpa1]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [wpa1]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [wpa1]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa1_n3e4.pcap"
+description = "N3E4 -- ANonce(M3) + EAPOL(M4) [wpa1]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*01*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/wpa2_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [wpa2]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*03*",
     "WPA*02*",
-    "WPA*03*",
 ]
 forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n1e4.pcap"
-description = "N1E4 -- ANonce(M1) + EAPOL(M4)"
+path = "6_combos/wpa2_n1e4.pcap"
+description = "N1E4 -- ANonce(M1) + EAPOL(M4) [wpa2]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
 expected_hashes = [
+    "WPA*03*",
     "WPA*02*",
-    "WPA*03*",
 ]
 forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n3e2.pcap"
-description = "N3E2 -- ANonce(M3) + EAPOL(M2)"
+path = "6_combos/wpa2_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [wpa2]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
@@ -458,8 +554,8 @@ forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n2e3.pcap"
-description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS)"
+path = "6_combos/wpa2_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [wpa2]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
@@ -470,8 +566,8 @@ forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n4e3.pcap"
-description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS)"
+path = "6_combos/wpa2_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [wpa2]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
@@ -482,13 +578,257 @@ forbidden_hashes = [
 ]
 
 [[fixture]]
-path = "6_combos/n3e4.pcap"
-description = "N3E4 -- ANonce(M3) + EAPOL(M4)"
+path = "6_combos/wpa2_n3e4.pcap"
+description = "N3E4 -- ANonce(M3) + EAPOL(M4) [wpa2]"
 container = "pcap"
 link_type = "radiotap"
 packet_count = 3
 expected_hashes = [
     "WPA*03*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+    "WPA*04*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n1e4.pcap"
+description = "N1E4 -- ANonce(M1) + EAPOL(M4) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+    "WPA*04*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk256_n3e4.pcap"
+description = "N3E4 -- ANonce(M3) + EAPOL(M4) [psk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*05*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk256_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [ftpsk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*07*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk256_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [ftpsk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*07*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk256_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [ftpsk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*07*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk256_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [ftpsk256]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*07*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+    "WPA*08*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n1e4.pcap"
+description = "N1E4 -- ANonce(M1) + EAPOL(M4) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+    "WPA*08*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/psk384_n3e4.pcap"
+description = "N3E4 -- ANonce(M3) + EAPOL(M4) [psk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*09*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk384_n1e2.pcap"
+description = "N1E2 -- ANonce(M1) + EAPOL(M2) [ftpsk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*11*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk384_n3e2.pcap"
+description = "N3E2 -- ANonce(M3) + EAPOL(M2) [ftpsk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*11*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk384_n2e3.pcap"
+description = "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS) [ftpsk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*11*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "6_combos/ftpsk384_n4e3.pcap"
+description = "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS) [ftpsk384]"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*11*",
 ]
 forbidden_hashes = [
 ]
@@ -996,5 +1336,31 @@ expected_hashes = [
 forbidden_hashes = [
     "WPA*02*",
     "WPA*03*",
+]
+
+[[fixture]]
+path = "edge/endian_rc_m2_swapped.pcap"
+description = "Replay-counter endianness: M2 RC byte-swapped (LE firmware)"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*02*",
+    "WPA*03*",
+]
+forbidden_hashes = [
+]
+
+[[fixture]]
+path = "edge/endian_rc_m1_swapped.pcap"
+description = "Replay-counter endianness: M1 RC byte-swapped (BE-on-LE firmware)"
+container = "pcap"
+link_type = "radiotap"
+packet_count = 3
+expected_hashes = [
+    "WPA*02*",
+    "WPA*03*",
+]
+forbidden_hashes = [
 ]
 

@@ -1,0 +1,61 @@
+# cargo-deny policy for the wpawolf-fixturegen crate.
+#
+# Mirrors the workspace-root deny.toml, with two scoped relaxations the
+# fixturegen graph requires and the wpawolf root does not:
+#
+#   * BSD-3-Clause is allowed -- `subtle` (constant-time slice compare in the
+#     crypto known-answer-test asserts) is licensed BSD-3-Clause, an
+#     OSI-approved, FSF Free/Libre, permissive licence.
+#   * Wildcard *path* dependencies are allowed -- the generator path-deps
+#     `wpawolf` to stay locked to its enum layout (the whole point of the
+#     workspace); a path dependency carries no version to constrain.
+#
+# Keeping this scoped to the fixturegen leaves the root policy strict.
+
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 3
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = [ "https://github.com/rustsec/advisory-db" ]
+ignore = [ ]
+maximum-db-staleness = "P1D"
+git-fetch-with-cli = true
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+yanked = "deny"
+
+[licenses]
+allow = [ "Apache-2.0", "MIT", "Unicode-3.0", "BSD-3-Clause" ]
+unused-allowed-license = "deny"
+confidence-threshold = 0.95
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[[bans.deny]]
+crate = "openssl"
+wrappers = [ ]
+
+[[bans.deny]]
+crate = "openssl-sys"
+wrappers = [ ]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
+allow-git = [ ]
+
+[sources.allow-org]
+github = [ ]
+gitlab = [ ]
+bitbucket = [ ]

@@ -313,9 +313,9 @@ fn aes_cmac_128(key: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
 //
 //   PMK-R0   = first N bits of  KDF-Hash(PMK,    "FT-R0", S0,        L_R0)
 //   PMK-R0Salt = trailing 128 bits of the same KDF output
-//   PMK-R0Name = Truncate-128(SHA-256("FT-R0N" || PMK-R0Salt))
-//   PMK-R1   = KDF-Hash(PMK-R0, "FT-R1",  R1KH-ID || SPA, 256)
-//   PMK-R1Name = Truncate-128(SHA-256("FT-R1N" || PMK-R0Name || R1KH-ID || SPA))
+//   PMK-R0Name = Truncate-128(Hash("FT-R0N" || PMK-R0Salt))   Hash per AKM
+//   PMK-R1   = KDF-Hash(PMK-R0, "FT-R1",  R1KH-ID || SPA, hashlen)
+//   PMK-R1Name = Truncate-128(Hash("FT-R1N" || PMK-R0Name || R1KH-ID || SPA))
 //   PTK_FT   = KDF-Hash(PMK-R1, "FT-PTK", SNonce || ANonce || BSSID || SPA, L_PTK)
 //
 // `S0` for PMK-R0 is `SSIDlength(1) || SSID || MDID(2) || R0KHlength(1) ||
@@ -338,11 +338,32 @@ pub struct FtContext<'a> {
     pub r1kh_id: [u8; 6],
 }
 
+/// Truncate-128 of the AKM family hash over `input` -- the FT Name
+/// construction. `[IEEE 802.11-2024]` §12.7.1.6.3 / §12.7.1.6.4: `PMKR0Name` and
+/// `PMKR1Name` use the hash algorithm of the negotiated AKM (Table 9-190) --
+/// SHA-256 for AKM 4 (FT-PSK), SHA-384 for AKM 19 (FT-PSK-SHA384). The 128-bit
+/// truncation is identical; only the underlying hash changes.
+///
+/// # Errors
+///
+/// Returns [`Error::UnsupportedSpec`] for non-FT hash families.
+fn ft_name_truncate_128(family: HashFamily, input: &[u8]) -> Result<[u8; 16]> {
+    use sha2::Digest;
+    let digest: Vec<u8> = match family {
+        HashFamily::Sha256 => Sha256::digest(input).to_vec(),
+        HashFamily::Sha384 => Sha384::digest(input).to_vec(),
+        _ => return Err(Error::UnsupportedSpec("FT Name hash only defined for SHA-256 / SHA-384")),
+    };
+    let mut out = [0u8; 16];
+    out.copy_from_slice(digest.get(..16).ok_or(Error::InvalidWireFormat("hash output shorter than 16 bytes"))?);
+    Ok(out)
+}
+
 /// Derive `PMK-R0` and `PMK-R0Name` per `[IEEE 802.11-2024]` §13.4.4.
 ///
 /// The KDF runs at 384 bits (SHA-256) or 512 bits (SHA-384). The leading 32 /
 /// 48 bytes are `PMK-R0`; the trailing 16 bytes are the `PMK-R0Salt` that
-/// feeds the SHA-256 hash for `PMK-R0Name`.
+/// feeds the AKM family hash (SHA-256 / SHA-384) for `PMK-R0Name`.
 ///
 /// # Errors
 ///
@@ -371,23 +392,22 @@ pub fn derive_pmk_r0(family: HashFamily, pmk: &[u8], ctx: &FtContext<'_>, sta: [
         .get(pmk_r0_len..pmk_r0_len + 16)
         .and_then(|s| s.try_into().ok())
         .ok_or(Error::InvalidWireFormat("KDF short: PMK-R0-Salt"))?;
-    let mut hasher_input = Vec::with_capacity(6 + 16);
-    hasher_input.extend_from_slice(b"FT-R0N");
-    hasher_input.extend_from_slice(&salt);
-    use sha2::Digest;
-    let pmk_r0_name_full: [u8; 32] = Sha256::digest(&hasher_input).into();
-    let mut pmk_r0_name = [0u8; 16];
-    pmk_r0_name
-        .copy_from_slice(pmk_r0_name_full.get(..16).ok_or(Error::InvalidWireFormat("SHA-256 output truncation"))?);
+    let mut name_input = Vec::with_capacity(6 + 16);
+    name_input.extend_from_slice(b"FT-R0N");
+    name_input.extend_from_slice(&salt);
+    // PMKR0Name uses the AKM family hash (SHA-384 for AKM 19), not a fixed
+    // SHA-256. [IEEE 802.11-2024] §12.7.1.6.3 line 108004.
+    let pmk_r0_name = ft_name_truncate_128(family, &name_input)?;
     Ok((pmk_r0, pmk_r0_name))
 }
 
 /// Derive `PMK-R1` and `PMK-R1Name` per `[IEEE 802.11-2024]` §13.4.4.
 ///
 /// `PMK-R1` is 32 bytes (SHA-256) or 48 bytes (SHA-384); `PMK-R1Name` is
-/// always 16 bytes (the truncated SHA-256 over `"FT-R1N" || PMK-R0Name ||
-/// R1KH-ID || SPA`). `PMK-R1Name` is the value emitted as the `PMKID` in
-/// `WPA*03*` lines.
+/// always 16 bytes (the truncated AKM family hash -- SHA-256 for AKM 4,
+/// SHA-384 for AKM 19 -- over `"FT-R1N" || PMK-R0Name || R1KH-ID || SPA`).
+/// `PMK-R1Name` is the value emitted as the `PMKID` in `WPA*06*` (FT-PSK) /
+/// `WPA*10*` (FT-PSK-SHA384) lines.
 ///
 /// # Errors
 ///
@@ -413,10 +433,9 @@ pub fn derive_pmk_r1(
     name_input.extend_from_slice(pmk_r0_name);
     name_input.extend_from_slice(&r1kh_id);
     name_input.extend_from_slice(&sta);
-    use sha2::Digest;
-    let full: [u8; 32] = Sha256::digest(&name_input).into();
-    let mut pmk_r1_name = [0u8; 16];
-    pmk_r1_name.copy_from_slice(full.get(..16).ok_or(Error::InvalidWireFormat("SHA-256 output truncation"))?);
+    // PMKR1Name uses the AKM family hash (SHA-384 for AKM 19), not a fixed
+    // SHA-256. [IEEE 802.11-2024] §12.7.1.6.4 lines 108029/108037.
+    let pmk_r1_name = ft_name_truncate_128(family, &name_input)?;
     Ok((pmk_r1, pmk_r1_name))
 }
 
@@ -424,7 +443,7 @@ pub fn derive_pmk_r1(
 ///
 /// `PTK = KDF-Hash(PMK-R1, "FT-PTK", SNonce || ANonce || BSSID || SPA, L)`
 /// where `L` is `48` bytes (SHA-256) or `88` bytes (SHA-384). Note this is a
-/// *different* PRF input layout from the non-FT PTK: SNonce precedes ANonce,
+/// *different* PRF input layout from the non-FT PTK: `SNonce` precedes `ANonce`,
 /// and BSSID precedes SPA -- without the lexicographic min/max ordering the
 /// non-FT 4-way handshake uses.
 ///
@@ -629,5 +648,41 @@ mod tests {
     fn ct_eq_matches_eq() {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
+    }
+
+    /// FT key-hierarchy Name KAT: `PMKR0Name` / `PMKR1Name` for both AKM
+    /// families. Vectors from the independent Python stdlib oracle
+    /// (`tools/fixturegen/scripts`; PMK = `PBKDF2-HMAC-SHA1("IEEE","IEEE")`,
+    /// SSID `"IEEE"`, STA = `STA_KAT`, MDID `0x1234`-LE, R0KH-ID `"r0kh"`,
+    /// R1KH-ID `06:06:06:06:06:06`). Locks the family-dependent Name hash --
+    /// regression guard for the bug where both Names hardcoded SHA-256
+    /// regardless of AKM. `[80211-2024 §12.7.1.6.3/.6.4]`: the Name hash is the
+    /// AKM's hash (SHA-256 for AKM 4, SHA-384 for AKM 19).
+    #[test]
+    fn ft_names_kat_per_family() {
+        const MDID: [u8; 2] = [0x34, 0x12];
+        const R0KH: &[u8] = b"r0kh";
+        const R1KH: [u8; 6] = [0x06; 6];
+        // (family, expected PMKR0Name, expected PMKR1Name).
+        let cases: &[(HashFamily, [u8; 16], [u8; 16])] = &[
+            (
+                HashFamily::Sha256,
+                [0x15, 0xba, 0xbe, 0xd8, 0x41, 0x41, 0x98, 0x00, 0xa9, 0x72, 0xad, 0x3f, 0x08, 0x97, 0x47, 0x66],
+                [0xc9, 0x34, 0x49, 0xb5, 0x9b, 0x8a, 0xd6, 0x7b, 0xd6, 0x3a, 0x44, 0x7f, 0xbb, 0x04, 0xbc, 0xc9],
+            ),
+            (
+                HashFamily::Sha384,
+                [0xa3, 0x37, 0x47, 0x8e, 0x43, 0x9f, 0xf6, 0x8b, 0x61, 0x5d, 0x95, 0xa8, 0x16, 0x02, 0xfe, 0xa4],
+                [0x93, 0x54, 0xfb, 0x08, 0xe7, 0x23, 0xb1, 0x53, 0x59, 0xfb, 0xb5, 0x67, 0x0a, 0xe9, 0xae, 0xb3],
+            ),
+        ];
+        let pmk = derive_pmk(b"IEEE", b"IEEE").expect("derive_pmk");
+        for (family, want_r0, want_r1) in cases {
+            let ctx = FtContext { ssid: b"IEEE", mdid: MDID, r0kh_id: R0KH, r1kh_id: R1KH };
+            let (pmk_r0, r0_name) = derive_pmk_r0(*family, &pmk, &ctx, STA_KAT).expect("derive_pmk_r0");
+            assert!(ct_eq(&r0_name, want_r0), "PMKR0Name mismatch for {family:?}");
+            let (_, r1_name) = derive_pmk_r1(*family, &pmk_r0, &r0_name, R1KH, STA_KAT).expect("derive_pmk_r1");
+            assert!(ct_eq(&r1_name, want_r1), "PMKR1Name mismatch for {family:?}");
+        }
     }
 }

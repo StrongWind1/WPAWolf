@@ -11,7 +11,7 @@
 //! - **`11_types/`** -- one fixture per [`HashType`](crate::types::HashType);
 //!   exercises every (AKM, KDV, MIC width, source) combination wpawolf can
 //!   classify.
-//! - **`20_pmkid_sites/`** -- one fixture per [`PmkidSource`] S1-S20.
+//! - **`20_pmkid_sites/`** -- one fixture per [`PmkidSource`](crate::types::PmkidSource) S1-S20.
 //! - **`6_combos/`** -- one fixture per N#E# pairing combo.
 //! - **`edge/`** -- one fixture per defensive edge case
 //!   (NULL/`0xFF` sentinels, FCS strip, container variants, ...).
@@ -34,7 +34,7 @@ use crate::frame::eapol::{
 use crate::frame::ie::{FteInputs, ampe_with_pmkid, fte, mde, osen_ie, rsn_ie, ssid as ssid_ie, wpa1_vendor_ie};
 use crate::frame::kde::pmkid as pmkid_kde;
 use crate::frame::probe::{probe_request, probe_request_broadcast_to_ap};
-use crate::handshake::{FT_MDID, FT_R0KH_ID, FT_R1KH_ID, Handshake, Inputs};
+use crate::handshake::{FT_MDID, FT_R0KH_ID, FT_R1KH_ID, Handshake, Inputs, build_frame};
 use crate::linklayer::{LinkType, avs, ppi, prism, prism_wrapping_avs, radiotap, sll, sll2};
 use crate::pcap_writer::{Packet, PcapMagic};
 
@@ -119,11 +119,12 @@ const fn sta_mac(idx: u8) -> [u8; 6] {
 // (more S-sites, more combos, more edge cases) does not require renumbering.
 const IDX_TYPES_BASE: u8 = 0x10; // 11_types/: 0x10..=0x1A
 const IDX_PMKID_BASE: u8 = 0x20; // 20_pmkid_sites/: 0x20..=0x33
-const IDX_COMBO_BASE: u8 = 0x40; // 6_combos/: 0x40..=0x45
+const IDX_COMBO_BASE: u8 = 0x90; // 6_combos/: 0x90.. (one AP/STA pair per EAPOL family x N#E# combo)
 const IDX_LINK_LAYERS: u8 = 0x50; // link_layers/: shared across all 7 variants
 const IDX_CONTAINERS: u8 = 0x60; // containers/: shared across all 14 variants
 const IDX_EDGE_BASE: u8 = 0x70; // edge/: 0x70+
 const IDX_AKM_VARIANTS: u8 = 0x80; // 20_pmkid_sites/sNN_<akm>.pcap variants: 0x80+
+const IDX_ENDIAN_BASE: u8 = 0xB0; // edge/endian_rc_*: 0xB0.. (RC-endianness variants, after combos)
 // edge/multi_file_a + edge/multi_file_b share this idx so wpawolf can pair
 // across the two files (FR-PAIR-CROSS-FILE).
 const IDX_EDGE_MULTI_FILE: u8 = 0x7E;
@@ -160,10 +161,12 @@ pub fn all() -> Result<Vec<Fixture>> {
     out.extend(types_section()?);
     out.extend(pmkid_section()?);
     out.extend(pmkid_akm_variants_section()?);
+    out.extend(pmkid_sha384_variants_section()?);
     out.extend(combo_section()?);
     out.extend(link_layers_section()?);
     out.extend(containers_section()?);
     out.extend(edge_section()?);
+    out.extend(endianness_variants_section()?);
     Ok(out)
 }
 
@@ -354,7 +357,7 @@ fn types_section() -> Result<Vec<Fixture>> {
 /// the carrier frame is parsed -- without this, the PMKID would be stored
 /// with `AkmType::Unknown` and dropped by the FR-OUT-3 emit gate. The
 /// builders for S3 / S4 / S16 / S17 do not need a separate beacon because
-/// the carrier frame is itself a Beacon / ProbeResp / AssocReq with an
+/// the carrier frame is itself a Beacon / `ProbeResp` / `AssocReq` with an
 /// inline RSN IE that primes the AKM map at the same point.
 ///
 /// `(S-number, file-stem, description, frame-builder)` -- one row per S1-S20.
@@ -460,7 +463,7 @@ fn s_site_ssid(s: u8) -> Vec<u8> {
 ///
 /// The `SPA` argument to `HMAC-SHA1` must match the STA MAC wpawolf
 /// records for the entry, *not* the wire `addr1`. For management frames
-/// with `ToDS = FromDS = 0` (Beacon S16, ProbeResp S17) wpawolf records
+/// with `ToDS = FromDS = 0` (Beacon S16, `ProbeResp` S17) wpawolf records
 /// `sta = addr2 = BSSID`, so the PMKID derivation uses `ap` for both
 /// arguments. The other WPA2 sites (S1-S4, S14, S15) all have
 /// `sta = addr2 = STA-MAC` and use the regular `(ap, sta)` pair.
@@ -502,25 +505,27 @@ fn s_site_pmkid(s: u8, ap: [u8; 6], sta: [u8; 6], synthetic: &[u8; 16]) -> Resul
 /// coverage if a regression broke the resolver for a non-WPA2 AKM, are:
 ///
 /// - S4  Reassociation Request (no Reassoc in type fixtures)
-/// - S14 Probe Request directed   (no ProbeReq in type fixtures)
-/// - S17 Probe Response           (no ProbeResp in type fixtures)
+/// - S14 Probe Request directed   (no `ProbeReq` in type fixtures)
+/// - S17 Probe Response           (no `ProbeResp` in type fixtures)
 ///
 /// We add a single PSK-SHA-256 (AKM 6) variant for each of these three.
 /// hashcat 22000 cracks PSK-SHA-256 EAPOL but not its PMKID (kernel uses
-/// HMAC-SHA1 only); the manifest expected_hashes therefore checks for the
+/// HMAC-SHA1 only); the manifest `expected_hashes` therefore checks for the
 /// per-AKM prefix `WPA*04*` (PSK-SHA-256 PMKID) on the combined sink,
 /// which proves the AKM was resolved correctly even if the legacy 22000
 /// sink can't crack the line. Per-fixture AP / STA MAC pairs come from
 /// `IDX_AKM_VARIANTS + i` so they cannot pollinate the existing AKM=2
 /// S-sites at corpus-wide processing time.
 fn pmkid_akm_variants_section() -> Result<Vec<Fixture>> {
+    // Closure-style entry: (suffix index, file stem, description, AKM byte,
+    // builder closure that takes `(ap, sta, akm, ssid, pmkid)` and returns the
+    // frame sequence). The type alias is declared before the first statement
+    // so clippy's `items_after_statements` lint is satisfied.
+    type Builder = fn(ap: [u8; 6], sta: [u8; 6], akm: u8, ssid: &[u8], pmkid: &[u8; 16]) -> Vec<Vec<u8>>;
+
     let mut out = Vec::new();
     let synthetic: [u8; 16] = [0u8; 16]; // unused for these wired AKMs
 
-    // Closure-style entry: (suffix index, file stem, description, AKM byte,
-    // builder closure that takes `(ap, sta, akm, ssid, pmkid)` and returns
-    // the frame sequence).
-    type Builder = fn(ap: [u8; 6], sta: [u8; 6], akm: u8, ssid: &[u8], pmkid: &[u8; 16]) -> Vec<Vec<u8>>;
     // Tuple: (idx, file stem, short SSID (<=32 B), description, AKM byte, builder).
     let entries: &[(u8, &str, &str, &str, u8, Builder)] = &[
         (
@@ -587,59 +592,268 @@ fn pmkid_akm_variants_section() -> Result<Vec<Fixture>> {
     Ok(out)
 }
 
-/// Build one fixture per N#E# pairing combo.
+/// SHA-384 PMKID client-side variants for types 8 (PSK-SHA384) and 10
+/// (FT-PSK-SHA384).
 ///
-/// All six combos share the same crypto-derivation parameters but each gets
-/// its own AP/STA MAC pair (`IDX_COMBO_BASE + i`) so wpawolf cannot pair an
-/// M1 from one combo's pcap with an M2 from another's when the corpus is
-/// processed in one invocation.
-fn combo_section() -> Result<Vec<Fixture>> {
-    let combos: [(&str, &str, fn(&Handshake) -> Vec<Vec<u8>>); 6] = [
-        ("n1e2", "N1E2 -- ANonce(M1) + EAPOL(M2)", |h| vec![h.m1.clone(), h.m2.clone()]),
-        ("n1e4", "N1E4 -- ANonce(M1) + EAPOL(M4)", |h| vec![h.m1.clone(), h.m4.clone()]),
-        ("n3e2", "N3E2 -- ANonce(M3) + EAPOL(M2)", |h| vec![h.m2.clone(), h.m3.clone()]),
-        ("n2e3", "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS)", |h| vec![h.m2.clone(), h.m3.clone()]),
-        ("n4e3", "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS)", |h| vec![h.m3.clone(), h.m4.clone()]),
-        ("n3e4", "N3E4 -- ANonce(M3) + EAPOL(M4)", |h| vec![h.m3.clone(), h.m4.clone()]),
-    ];
-    let mut out = Vec::with_capacity(combos.len());
-    for (i, (name, descr, frame_picker)) in combos.iter().enumerate() {
-        let idx = IDX_COMBO_BASE + u8::try_from(i).unwrap_or(0);
-        let ap = ap_mac(idx);
-        let sta = sta_mac(idx);
-        let inputs = Inputs {
-            psk: PSK.to_vec(),
-            ssid: format!("wpawolf-{name}").into_bytes(),
-            ap,
-            sta,
-            kdf_family: HashFamily::Sha1,
-            mic_family: HashFamily::Sha1,
-            akm_byte: 2,
-            a_nonce: ANONCE,
-            s_nonce: SNONCE,
-            replay_counter: 7,
-            kdv: 2,
-            wpa1: false,
-        };
-        let h = Handshake::all(&inputs)?;
-        let beacon_frame = beacon(ap, &inputs.ssid, &rsn_ie(2, None));
-        let mut frames = vec![beacon_frame];
-        frames.extend(frame_picker(&h));
-        // Per the per-fixture sweep: N1E2 / N1E4 carry M1 so they emit both
-        // PMKID (Type 02) and EAPOL (Type 03); the M3-only / M4-only combos
-        // (N3E2, N2E3, N4E3, N3E4) emit just the EAPOL hash because the
-        // PMKID source frame is absent from the fixture's packet sequence.
-        let expected =
-            if matches!(*name, "n1e2" | "n1e4") { wpa2_baseline_prefixes() } else { vec!["WPA*03*".to_owned()] };
+/// Their type fixtures (`11_types/typeNN`) surface only an AP-side PMKID
+/// (the M1 KDE / `AssocReq` path recorded with the AP-side flag). These add the
+/// client-side source so both the AP-side (`0x01` / `0x10`) and client-side
+/// (`0x04` / `0x20`) PMKID representations exist for the SHA-384 families,
+/// matching the symmetry the WPA2 / PSK-SHA256 / FT-SHA256 families already
+/// have via the S1-S20 sweep. Per-fixture AP/STA pairs from
+/// `IDX_AKM_VARIANTS + n` so they cannot pollinate other fixtures.
+fn pmkid_sha384_variants_section() -> Result<Vec<Fixture>> {
+    let mut out = Vec::new();
+
+    // Type 8: PSK-SHA384 (AKM 20) client-side PMKID in an Association Request
+    // RSN IE. STA = addr2, so the recorded SPA is the real STA MAC and the
+    // PMKID is HMAC-SHA384(PMK, "PMK Name" || AP || STA)[0..16].
+    {
+        let ap = ap_mac(IDX_AKM_VARIANTS + 3);
+        let sta = sta_mac(IDX_AKM_VARIANTS + 3);
+        let ssid = b"wpawolf-s08-384";
+        let pmk = derive_pmk(PSK, ssid)?;
+        let pmkid = derive_pmkid(HashFamily::Sha384, &pmk, ap, sta)?;
+        // Probe Request is wpawolf's client-flagged (0x04) PMKID source; the
+        // Association Request path is flagged AP-side (0x01), which the type
+        // fixture's M1 KDE already covers. Use a directed Probe Request so
+        // type 8 gains the client-side (0x04) representation.
+        let bcn = beacon_for_akm(ap, ssid, 20);
+        let probe = probe_request(ap, sta, ssid, Some(&rsn_ie(20, Some(&pmkid))));
         out.push(Fixture {
-            path: PathBuf::from(format!("6_combos/{name}.pcap")),
+            path: PathBuf::from("20_pmkid_sites/s08_psk_sha384_probe_req.pcap"),
             container: Container::Pcap(PcapMagic::LeMicro),
             link_type: LinkType::Radiotap,
-            description: (*descr).to_owned(),
-            packets: wrap_with_radiotap(&frames),
-            expected_hashes: expected,
+            description: "PSK-SHA384 client-side PMKID via directed Probe Request RSN IE (AKM 20)".to_owned(),
+            packets: wrap_with_radiotap(&[bcn, probe]),
+            expected_hashes: vec!["WPA*08*".to_owned()],
             forbidden_hashes: Vec::new(),
         });
+    }
+
+    // Type 10: FT-PSK-SHA384 (AKM 19) client-side PMK-R1Name in an FT Auth
+    // seq=1 (STA->AP) frame, with MDE + FTE so the FT emit gate fires. The
+    // PMK-R1Name uses the SHA-384 FT chain (post-D1 fix); recorded SPA = STA.
+    {
+        let ap = ap_mac(IDX_AKM_VARIANTS + 4);
+        let sta = sta_mac(IDX_AKM_VARIANTS + 4);
+        let ssid = b"wpawolf-s10-384";
+        let pmk = derive_pmk(PSK, ssid)?;
+        let ctx = FtContext { ssid, mdid: FT_MDID, r0kh_id: FT_R0KH_ID, r1kh_id: FT_R1KH_ID };
+        let (pmk_r0, pmk_r0_name) = derive_pmk_r0(HashFamily::Sha384, &pmk, &ctx, sta)?;
+        let (_, pmk_r1_name) = derive_pmk_r1(HashFamily::Sha384, &pmk_r0, &pmk_r0_name, FT_R1KH_ID, sta)?;
+        let bcn = beacon_for_akm(ap, ssid, 19);
+        let mut ies = Vec::new();
+        ies.extend_from_slice(&rsn_ie(19, Some(&pmk_r1_name)));
+        ies.extend_from_slice(&ft_pmkid_subelements());
+        let auth_frame = auth(ap, sta, ap, ALGO_FT, 1, &ies);
+        out.push(Fixture {
+            path: PathBuf::from("20_pmkid_sites/s10_ft_psk_sha384_auth_seq1.pcap"),
+            container: Container::Pcap(PcapMagic::LeMicro),
+            link_type: LinkType::Radiotap,
+            description: "FT-PSK-SHA384 client-side PMK-R1Name via FT Auth seq=1 (AKM 19)".to_owned(),
+            packets: wrap_with_radiotap(&[bcn, auth_frame]),
+            expected_hashes: vec!["WPA*10*".to_owned()],
+            forbidden_hashes: Vec::new(),
+        });
+    }
+
+    Ok(out)
+}
+
+/// One row of the N#E# combo table.
+struct Combo {
+    /// File-stem fragment (`n1e2` ...).
+    name: &'static str,
+    /// Human-readable description.
+    descr: &'static str,
+    /// Picks the two EAPOL frames this combo pairs from a full handshake.
+    picker: fn(&Handshake) -> Vec<Vec<u8>>,
+    /// `true` if the pair carries M1 (so the M1 KDE also yields a PMKID line).
+    carries_m1: bool,
+    /// `true` if the EAPOL/MIC frame is M4. M4 carries no FTE, so FT families
+    /// cannot attach FT context to an M4-anchored pair and emit no FT EAPOL
+    /// line -- these combos are skipped for FT (a structural limit, not a gap).
+    eapol_from_m4: bool,
+}
+
+/// One EAPOL hash family (the six odd `HashType`s) the combo sweep covers.
+struct ComboFamily {
+    /// Odd `HashType` number (1, 3, 5, 7, 9, 11).
+    type_n: u8,
+    /// File-stem fragment identifying the AKM family.
+    tag: &'static str,
+    kdf: HashFamily,
+    mic: HashFamily,
+    akm: u8,
+    kdv: u8,
+    wpa1: bool,
+}
+
+/// Build one fixture per (EAPOL family x N#E# pairing combo).
+///
+/// Every odd `HashType` (the six EAPOL families: WPA1, WPA2, PSK-SHA256,
+/// FT-PSK, PSK-SHA384, FT-PSK-SHA384) is swept across all six N#E# combos so
+/// the corpus emits every reachable combo for every family -- not just WPA2.
+/// Each (family, combo) gets its own AP/STA MAC pair (`IDX_COMBO_BASE + n`) so
+/// wpawolf cannot cross-pair frames between fixtures in a whole-corpus run.
+///
+/// FT families (AKM 4 / 19) skip the two M4-anchored combos (N1E4, N3E4): an
+/// M4-only EAPOL pair carries no FTE, so wpawolf cannot classify it as FT and
+/// emits nothing -- a structural property of the FT 4-way handshake, recorded
+/// here rather than papered over with a dead fixture.
+fn combo_section() -> Result<Vec<Fixture>> {
+    let combos: [Combo; 6] = [
+        Combo {
+            name: "n1e2",
+            descr: "N1E2 -- ANonce(M1) + EAPOL(M2)",
+            picker: |h| vec![h.m1.clone(), h.m2.clone()],
+            carries_m1: true,
+            eapol_from_m4: false,
+        },
+        Combo {
+            name: "n1e4",
+            descr: "N1E4 -- ANonce(M1) + EAPOL(M4)",
+            picker: |h| vec![h.m1.clone(), h.m4.clone()],
+            carries_m1: true,
+            eapol_from_m4: true,
+        },
+        Combo {
+            name: "n3e2",
+            descr: "N3E2 -- ANonce(M3) + EAPOL(M2)",
+            picker: |h| vec![h.m2.clone(), h.m3.clone()],
+            carries_m1: false,
+            eapol_from_m4: false,
+        },
+        Combo {
+            name: "n2e3",
+            descr: "N2E3 -- SNonce(M2) + EAPOL(M3) (APLESS)",
+            picker: |h| vec![h.m2.clone(), h.m3.clone()],
+            carries_m1: false,
+            eapol_from_m4: false,
+        },
+        Combo {
+            name: "n4e3",
+            descr: "N4E3 -- SNonce(M4) + EAPOL(M3) (APLESS)",
+            picker: |h| vec![h.m3.clone(), h.m4.clone()],
+            carries_m1: false,
+            eapol_from_m4: false,
+        },
+        Combo {
+            name: "n3e4",
+            descr: "N3E4 -- ANonce(M3) + EAPOL(M4)",
+            picker: |h| vec![h.m3.clone(), h.m4.clone()],
+            carries_m1: false,
+            eapol_from_m4: true,
+        },
+    ];
+    let families: [ComboFamily; 6] = [
+        ComboFamily { type_n: 1, tag: "wpa1", kdf: HashFamily::Sha1, mic: HashFamily::Md5, akm: 2, kdv: 1, wpa1: true },
+        ComboFamily {
+            type_n: 3,
+            tag: "wpa2",
+            kdf: HashFamily::Sha1,
+            mic: HashFamily::Sha1,
+            akm: 2,
+            kdv: 2,
+            wpa1: false,
+        },
+        ComboFamily {
+            type_n: 5,
+            tag: "psk256",
+            kdf: HashFamily::Sha256,
+            mic: HashFamily::AesCmac128,
+            akm: 6,
+            kdv: 3,
+            wpa1: false,
+        },
+        ComboFamily {
+            type_n: 7,
+            tag: "ftpsk256",
+            kdf: HashFamily::Sha256,
+            mic: HashFamily::AesCmac128,
+            akm: 4,
+            kdv: 3,
+            wpa1: false,
+        },
+        ComboFamily {
+            type_n: 9,
+            tag: "psk384",
+            kdf: HashFamily::Sha384,
+            mic: HashFamily::Sha384,
+            akm: 20,
+            kdv: 0,
+            wpa1: false,
+        },
+        ComboFamily {
+            type_n: 11,
+            tag: "ftpsk384",
+            kdf: HashFamily::Sha384,
+            mic: HashFamily::Sha384,
+            akm: 19,
+            kdv: 0,
+            wpa1: false,
+        },
+    ];
+    let mut out = Vec::new();
+    let mut idx = IDX_COMBO_BASE;
+    for fam in &families {
+        let is_ft = matches!(fam.akm, 4 | 19);
+        for combo in &combos {
+            if is_ft && combo.eapol_from_m4 {
+                // FT EAPOL classification requires the EAPOL/MIC frame ITSELF to
+                // carry the FTE -- wpawolf runs `extract_ft_fields` per message,
+                // and M4 has empty Key Data. So an M4-anchored pair is never
+                // emitted as an FT hash, confirmed empirically: the full-session
+                // FT type fixtures (type07 / type11) carry M1-M4 + FTE in M2/M3
+                // yet emit only the M2/M3-anchored combos {N1E2,N3E2,N2E3,N4E3}.
+                // Real FT M4 carries no FTE, so this is correct behaviour, not a
+                // fixture gap; these two combos are not in the set wpawolf can
+                // generate for an FT AKM.
+                continue;
+            }
+            let ap = ap_mac(idx);
+            let sta = sta_mac(idx);
+            idx = idx.wrapping_add(1);
+            let ssid = format!("wpawolf-{}-{}", fam.tag, combo.name);
+            let inputs = Inputs {
+                psk: PSK.to_vec(),
+                ssid: ssid.as_bytes().to_vec(),
+                ap,
+                sta,
+                kdf_family: fam.kdf,
+                mic_family: fam.mic,
+                akm_byte: fam.akm,
+                a_nonce: ANONCE,
+                s_nonce: SNONCE,
+                replay_counter: 7,
+                kdv: fam.kdv,
+                wpa1: fam.wpa1,
+            };
+            let h = Handshake::all(&inputs)?;
+            let beacon_rsn = if fam.wpa1 { wpa1_vendor_ie() } else { rsn_ie(fam.akm, None) };
+            let mut frames = vec![beacon(ap, ssid.as_bytes(), &beacon_rsn)];
+            frames.extend((combo.picker)(&h));
+            // The EAPOL prefix is always expected: every family emits all its
+            // reachable combos. (WPA1 included now that its M2 carries the WPA1
+            // IE, so the classifier no longer mislabels M2 as M4.)
+            let mut expected = vec![format!("WPA*{:02}*", fam.type_n)];
+            // PMKID from the M1 KDE: non-FT families surface it from M1 alone;
+            // FT families need MDE+FTE co-located with the PMKID (absent from a
+            // bare M1+M2 combo), so no FT PMKID emits here; WPA1 has none.
+            if combo.carries_m1 && !fam.wpa1 && !is_ft {
+                expected.push(format!("WPA*{:02}*", fam.type_n - 1));
+            }
+            out.push(Fixture {
+                path: PathBuf::from(format!("6_combos/{}_{}.pcap", fam.tag, combo.name)),
+                container: Container::Pcap(PcapMagic::LeMicro),
+                link_type: LinkType::Radiotap,
+                description: format!("{} [{}]", combo.descr, fam.tag),
+                packets: wrap_with_radiotap(&frames),
+                expected_hashes: expected,
+                forbidden_hashes: Vec::new(),
+            });
+        }
     }
     Ok(out)
 }
@@ -1026,7 +1240,7 @@ fn edge_section() -> Result<Vec<Fixture>> {
         // first so its TLV iteration still finds it; the trailing padding is
         // wrapped as a vendor KDE (`tag 0xDD`, opaque bytes) so the parser
         // skips over it cleanly.
-        let pmkid_kde = h.pmkid.as_ref().map(|p| crate::frame::kde::pmkid(p)).unwrap_or_default();
+        let pmkid_kde = h.pmkid.as_ref().map(crate::frame::kde::pmkid).unwrap_or_default();
         let mut padded_kd = pmkid_kde;
         let padding = vec![0xCDu8; 320];
         padded_kd.push(0xDD); // Vendor KDE tag.
@@ -1477,6 +1691,77 @@ fn baseline_inputs(ssid: &[u8], ap: [u8; 6], sta: [u8; 6]) -> Inputs {
     }
 }
 
+/// Replay-counter endianness variants -- the `FLAG_LE` (0x20) / `FLAG_BE`
+/// (0x40) message-pair bits.
+///
+/// Some embedded AP firmware writes the EAPOL replay counter in the wrong byte
+/// order. wpawolf's pairing engine (`src/pair/constraints.rs::within_rc`)
+/// matches such a pair only after byte-swapping the RC, and flags the survivor
+/// `FLAG_LE` / `FLAG_BE` so hashcat knows the endianness was resolved. The flag
+/// fires only under `--rc-drift` (a finite RC tolerance); in the default WIDE
+/// mode the unbounded tolerance matches natively and no endianness flag is set.
+/// These fixtures provide the byte-swapped-RC captures; the EAPOL hash itself
+/// is identical and crackable in either mode (the MIC covers the swapped bytes
+/// as-is). The `--rc-drift` assertion lives in the endianness integration test.
+fn endianness_variants_section() -> Result<Vec<Fixture>> {
+    // (file stem, description, swap_m2): swap_m2=true byte-swaps the M2 (uplink)
+    // RC, false byte-swaps the M1 (downlink) RC -- the two sides let wpawolf
+    // resolve the match from opposite directions.
+    let cases: [(&str, &str, bool); 2] = [
+        ("endian_rc_m2_swapped", "Replay-counter endianness: M2 RC byte-swapped (LE firmware)", true),
+        ("endian_rc_m1_swapped", "Replay-counter endianness: M1 RC byte-swapped (BE-on-LE firmware)", false),
+    ];
+    let mut out = Vec::with_capacity(cases.len());
+    for (i, (stem, descr, swap_m2)) in cases.iter().enumerate() {
+        let idx = IDX_ENDIAN_BASE + u8::try_from(i).unwrap_or(0);
+        let ap = ap_mac(idx);
+        let sta = sta_mac(idx);
+        let ssid = format!("wpawolf-{stem}");
+        let inputs = baseline_inputs(ssid.as_bytes(), ap, sta);
+        let h = Handshake::all(&inputs)?;
+        let bcn = beacon(ap, ssid.as_bytes(), &rsn_ie(2, None));
+        // N1E2 pair (M1 + M2). `build` writes the replay counter big-endian, so
+        // passing `replay_counter.swap_bytes()` yields the reversed wire bytes,
+        // and the MIC is computed over them.
+        let (m1, m2) = if *swap_m2 {
+            let m2 = build_frame(
+                &inputs,
+                EapolMsg::M2,
+                inputs.replay_counter.swap_bytes(),
+                inputs.s_nonce,
+                rsn_ie(2, None),
+                &h.kck,
+                true,
+            )?;
+            (h.m1.clone(), m2)
+        } else {
+            let m1_kd = h.pmkid.as_ref().map(pmkid_kde).unwrap_or_default();
+            let m1 = build_frame(
+                &inputs,
+                EapolMsg::M1,
+                inputs.replay_counter.swap_bytes(),
+                inputs.a_nonce,
+                m1_kd,
+                &h.kck,
+                false,
+            )?;
+            (m1, h.m2.clone())
+        };
+        out.push(Fixture {
+            path: PathBuf::from(format!("edge/{stem}.pcap")),
+            container: Container::Pcap(PcapMagic::LeMicro),
+            link_type: LinkType::Radiotap,
+            description: (*descr).to_owned(),
+            packets: wrap_with_radiotap(&[bcn, m1, m2]),
+            // Default WIDE-mode run emits the WPA2 EAPOL pair (+ M1 KDE PMKID);
+            // the FLAG_LE / FLAG_BE bits surface only under `--rc-drift`.
+            expected_hashes: wpa2_baseline_prefixes(),
+            forbidden_hashes: Vec::new(),
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1534,8 +1819,14 @@ mod tests {
             "at least 3 PMKID AKM-variant fixtures, got {}",
             counts.pmkid_akm_variants
         );
-        assert_eq!(counts.combo, 6, "6 N#E# combo fixtures");
-        assert_eq!(counts.link, 7, "7 link-layer fixtures");
+        assert_eq!(
+            counts.combo, 32,
+            "32 N#E# combo fixtures (6 EAPOL families x 6 combos; FT families skip the 2 M4-anchored combos)"
+        );
+        assert_eq!(
+            counts.link, 11,
+            "11 link-layer fixtures (raw, radiotap x2, prism, avs, ppi, prism-wrapping-avs, sll x2, sll2 x2)"
+        );
         // 10 pcap magics + pcapng LE + pcapng BE + 2 gzipped variants.
         assert_eq!(counts.container, 14, "14 container fixtures");
         assert!(counts.edge > 0, "at least one edge fixture");
