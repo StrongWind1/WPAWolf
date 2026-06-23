@@ -3,7 +3,7 @@
 //! Uses a `HashSet<u64>` of `SipHash` fingerprints to guarantee global uniqueness across
 //! all emitted hash lines. Fingerprint inputs differ by hash-line type to prevent aliasing:
 //! - PMKID lines: `kind_byte(01/03) || PMKID || MAC_AP || MAC_STA || ESSID`
-//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID`
+//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || message_pair`
 //!
 //! Replaces hcxpcapngtool's 20-entry look-back window with O(1) global lookup. At 1 M
 //! unique hashes the set occupies approximately 56 MiB. See `ARCHITECTURE.md §4`.
@@ -126,6 +126,23 @@ impl SinkId {
     pub const fn as_index(self) -> usize {
         self as usize
     }
+
+    /// Converts a numeric index back to a `SinkId`, or `None` if out of range.
+    #[must_use]
+    pub const fn from_index(idx: usize) -> Option<Self> {
+        match idx {
+            0 => Some(Self::Out22000),
+            1 => Some(Self::Out37100),
+            2 => Some(Self::OutCombined),
+            3 => Some(Self::OutWpa1),
+            4 => Some(Self::OutWpa2),
+            5 => Some(Self::OutPskSha256),
+            6 => Some(Self::OutFt),
+            7 => Some(Self::OutPskSha384),
+            8 => Some(Self::OutFtPskSha384),
+            _ => None,
+        }
+    }
 }
 
 /// Per-sink deduplication filter.
@@ -153,14 +170,58 @@ impl PerSinkDedup {
         Self::default()
     }
 
-    /// Pre-sizes every per-sink `HashSet` to hold at least `capacity` entries
-    /// without reallocating. Eliminates the transient memory spike from
-    /// hashbrown's power-of-2 resize doubling, where both old and new tables
-    /// are alive simultaneously during the copy.
-    pub fn reserve(&mut self, capacity: usize) {
-        for set in &mut self.sets {
-            set.reserve(capacity);
+    /// Pre-sizes per-sink `HashSet`s to hold at least `capacity` entries
+    /// without reallocating. Only reserves for sinks whose index appears in
+    /// `active_sinks`. Eliminates the transient memory spike from hashbrown's
+    /// power-of-2 resize doubling, where both old and new tables are alive
+    /// simultaneously during the copy.
+    pub fn reserve(&mut self, capacity: usize, active_sinks: &[bool; SinkId::COUNT]) {
+        for (idx, set) in self.sets.iter_mut().enumerate() {
+            if active_sinks.get(idx).copied().unwrap_or(false) {
+                set.reserve(capacity);
+            }
         }
+    }
+
+    /// Flushes all in-memory fingerprints to a `DiskDedup`'s bucket files.
+    ///
+    /// Each fingerprint is recorded with `line_number = u64::MAX` (sentinel)
+    /// so the cleaning pass knows these were already deduped in memory and
+    /// don't correspond to output lines that need removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on I/O failure writing to bucket files.
+    pub fn flush_to_buckets(&self, disk_dedup: &mut super::disk_dedup::DiskDedup) -> crate::types::Result<()> {
+        for (idx, set) in self.sets.iter().enumerate() {
+            if set.is_empty() {
+                continue;
+            }
+            let Some(sink) = SinkId::from_index(idx) else { continue };
+            disk_dedup.flush_hashset(sink, set)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces all internal `HashSet`s with empty ones, freeing memory.
+    /// Called after `flush_to_buckets` during mid-emission switchover.
+    pub fn drain(&mut self) {
+        self.sets = Default::default();
+    }
+
+    /// Returns the number of fingerprints recorded for `sink`. In memory mode a
+    /// line is written iff its fingerprint was newly inserted, so this equals the
+    /// number of lines already written to that sink's file -- the line base a
+    /// mid-emission `DiskDedup` must start counting from.
+    #[must_use]
+    pub fn len_for_sink(&self, sink: SinkId) -> usize {
+        self.sets.get(sink.as_index()).map_or(0, HashSet::len)
+    }
+
+    /// Returns `true` when no fingerprints have been recorded for any sink.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sets.iter().all(HashSet::is_empty)
     }
 
     /// Returns `true` if this PMKID entry is new for `sink` and records the fingerprint.

@@ -85,7 +85,7 @@ fn default_run_prints_at_least_one_progress_line() {
     assert!(line.contains("pmkids="), "missing pmkids= field: {line}");
 
     // Closing Phase 1 banner is still present.
-    assert!(stdout_contents.contains("=== Phase 1 -- Ingest"), "expected Phase 1 banner; got:\n{stdout_contents}");
+    assert!(stdout_contents.contains("=== Phase 1: Ingest"), "expected Phase 1 banner; got:\n{stdout_contents}");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn quiet_flag_suppresses_progress_lines_but_keeps_banner() {
     );
     // Closing banner is still required.
     assert!(
-        stdout_contents.contains("=== Phase 1 -- Ingest"),
+        stdout_contents.contains("=== Phase 1: Ingest"),
         "even with --quiet the closing banner must be intact; got:\n{stdout_contents}"
     );
 }

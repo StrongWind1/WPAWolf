@@ -107,10 +107,12 @@ pub struct FileMetadata {
 pub const fn dlt_name(dlt: u16) -> &'static str {
     match dlt {
         105 => "DLT_IEEE802_11",
+        113 => "DLT_LINUX_SLL",
         127 => "DLT_IEEE802_11_RADIO",
         119 => "DLT_PRISM_HEADER",
         163 => "DLT_IEEE802_11_RADIO_AVS",
         192 => "DLT_PPI",
+        276 => "DLT_LINUX_SLL2",
         _ => "DLT_UNKNOWN",
     }
 }
@@ -293,7 +295,7 @@ fn has_capture_magic(path: &Path) -> bool {
 /// are sorted lexicographically and emitted before subdirectories are
 /// descended -- this gives a deterministic traversal that does not depend
 /// on filesystem iteration order. Entries that cannot be `stat`'d are
-/// reported as warnings on stderr and skipped.
+/// reported as warnings on stdout and skipped.
 fn collect_capture_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
@@ -343,7 +345,7 @@ fn collect_capture_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Resul
 ///   supported capture magic (see `is_capture_magic`) are collected in
 ///   deterministic order (sorted within each directory, files before
 ///   subdirectories). Filename extensions are ignored.
-/// - missing / unreadable -- a warning is printed on stderr and the argument
+/// - missing / unreadable -- a warning is printed on stdout and the argument
 ///   is skipped, matching the existing per-file open-failure behaviour.
 ///
 /// Symlinks are not followed during directory traversal.

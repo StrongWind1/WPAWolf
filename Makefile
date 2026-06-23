@@ -1,6 +1,6 @@
 .PHONY: fmt fmt-fix lint lint-fix doc dev build check \
         test test-release test-matrix check-parity \
-        audit audit-citations machete \
+        audit audit-citations audit-stats machete \
         ascii-check lf-check hygiene \
         build-linux-musl build-linux-arm-musl \
         build-macos-arm build-macos-x86 build-macos-universal \
@@ -80,6 +80,10 @@ dev:
 build:
 	$(CARGO) build --profile release --all-features
 
+# Alias so `make release` builds the native release binary.
+.PHONY: release
+release: build
+
 # Fast type-check, no codegen.
 check:
 	$(CARGO) check --all-targets --all-features
@@ -117,6 +121,13 @@ audit:
 # the citations that depend on its line numbering.
 audit-citations:
 	./tools/audit_citations.sh
+
+# Verify ARCHITECTURE.md section 9 (the stats banner contract) against the
+# actual counter fields in src/stats.rs and src/store/fragments.rs, both
+# directions. Catches drift when a counter is added, renamed, or removed
+# without updating the catalogue -- the doc-rot class found in the 2026-06 audit.
+audit-stats:
+	./tools/audit_stats.sh
 
 machete:
 	$(CARGO) machete
@@ -341,4 +352,4 @@ clean:
 # -- Gates ---------------------------------------------------------------------
 
 # Full verification gate -- run before every push.
-check-all: fmt lint audit audit-citations check test-matrix doc hygiene machete
+check-all: fmt lint audit audit-citations audit-stats check test-matrix doc hygiene machete

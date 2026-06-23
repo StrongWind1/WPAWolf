@@ -1,8 +1,9 @@
 //! Shared -- binary entry point and Phase 1-5 orchestrator. See ARCHITECTURE.md §3.
 //!
-//! Parses command-line arguments via `clap`, then runs the two-phase pipeline:
-//! Phase 1 collects all EAPOL messages and PMKIDs from every input file into in-memory
-//! stores; Phase 2 pairs messages and writes output files. See `ARCHITECTURE.md §3`.
+//! Parses command-line arguments via `clap`, then runs the collect-then-pair pipeline:
+//! Phases 1-3 collect all EAPOL messages and PMKIDs from every input file into the
+//! stores; Phase 4 pairs messages and writes output files; Phase 5 prints the summary.
+//! See `ARCHITECTURE.md §3`.
 //!
 //! Unfiltered by default: all 6 N#E# combinations, unlimited session window, no
 //! replay-counter check. Add output filter flags (`--rc-drift`, `--dedup-hash-combos`) to
@@ -26,6 +27,7 @@ use wpawolf::{
     ieee80211::frame,
     input, link,
     log::Logger,
+    mem_monitor::{MemMonitor, MemWatcher},
     output::{EssidFilterConfig, OutputPaths, dedup::SinkId},
     pair::combos::PairConfig,
     progress::ProgressReporter,
@@ -156,14 +158,14 @@ struct Cli {
 
     /// Write structured processing log
     ///
-    /// Eleven log categories: malformed_frame, plcp_error, unknown_linktype, unknown_akm, essid_not_found_summary, capture_read_error, skipped_input, invalid_nonce, invalid_mic, invalid_pmkid, essid_control_bytes. Each line carries the rejected bytes in hex for forensic grep.
+    /// Twelve log categories: eight per-event (eapol_key_rejected, invalid_nonce, invalid_mic, invalid_pmkid, unknown_linktype, capture_read_error, skipped_input, essid_not_found_summary) carrying file=/frame= context and rejected bytes in hex for forensic grep, plus four aggregated end-of-run summaries (plcp_error, malformed_frame, essid_control_bytes, unknown_akm).
     #[arg(short = 'l', long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Auxiliary output", display_order = 17)]
     log: Option<std::path::PathBuf>,
 
     // ---- Output filters ----
-    /// Narrow output like hcxpcapngtool (bundle of 5 filters)
+    /// Narrow output like hcxpcapngtool (bundle of 4 filters)
     ///
-    /// Enables: --eapoltimeout=5, --rc-drift=8, --dedup-hash-combos, --per-file, --nc-dedup. Later flags override these defaults.
+    /// Enables: --eapoltimeout=5, --rc-drift=8, --dedup-hash-combos, --nc-dedup. Later flags override these defaults.
     #[arg(short = 's', long, help_heading = "Output filters", display_order = 20)]
     strict: bool,
 
@@ -197,6 +199,12 @@ struct Cli {
     #[arg(long, value_name = "N", help_heading = "Output filters", display_order = 25)]
     nc_tolerance: Option<u8>,
 
+    /// Cap pairing to the first N messages of each type per (AP, STA) [default: unlimited]
+    ///
+    /// Absent or 0 = unlimited (never miss; the store always keeps every message). N > 0 bounds each N#E# combo to N^2 pairs, taming rotating-ANonce groups that would otherwise generate billions of near-duplicate lines. Pairing iterates only the first N messages of each type; nothing is evicted from the store.
+    #[arg(long, value_name = "N", default_value_t = 0, help_heading = "Output filters", display_order = 26)]
+    max_eapol_per_type: usize,
+
     /// Min SSIDs per AP before collapse fires
     ///
     /// APs with N or fewer distinct SSIDs always emit all of them. Raise for CTF captures where many real SSIDs are expected.
@@ -224,7 +232,7 @@ struct Cli {
     // ---- Runtime ----
     /// Number of pairing threads [default: CPU count]
     ///
-    /// Phase 4 worker count. Groups are assigned via LPT scheduling. Use --threads=1 for reproducible single-threaded output.
+    /// Phase 4 worker count. Groups are paired via rayon work-stealing. Use --threads=1 for the serial path.
     #[arg(short = 't', long, value_name = "N", help_heading = "Runtime", display_order = 30)]
     threads: Option<u16>,
 
@@ -233,12 +241,6 @@ struct Cli {
     /// Progress lines print every 5 s during ingestion. This flag silences them. The closing stats banner is unaffected.
     #[arg(short = 'q', long, help_heading = "Runtime", display_order = 31)]
     quiet: bool,
-
-    /// Flush stores after each input file (no cross-file pairing)
-    ///
-    /// MessageStore and PmkidStore clear per file. Bounds RSS for large corpora at the cost of cross-file pairing (< 1% hash yield drop on per-session captures).
-    #[arg(long = "per-file", help_heading = "Runtime", display_order = 32)]
-    per_file: bool,
 
     /// Print per-store memory footprint at end of run
     ///
@@ -256,10 +258,10 @@ struct Cli {
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
-/// turns on the five output filters that together close the volume gap against
+/// turns on the four output filters that together close the volume gap against
 /// hcxpcapngtool default (`--eapoltimeout=5`, `--rc-drift=8`,
-/// `--dedup-hash-combos`, `--per-file`, `--nc-dedup`), but uses later-flag-wins
-/// precedence so an explicit `--eapoltimeout=30` survives past `--strict`. The three boolean
+/// `--dedup-hash-combos`, `--nc-dedup`), but uses later-flag-wins precedence so
+/// an explicit `--eapoltimeout=30` survives past `--strict`. The two boolean
 /// flags can only be turned on, never off, so `--strict` always sets them.
 const fn apply_strict_defaults(cli: &mut Cli) {
     if !cli.strict {
@@ -272,7 +274,6 @@ const fn apply_strict_defaults(cli: &mut Cli) {
         cli.rc_drift = Some(8);
     }
     cli.dedup_hash_combos = true;
-    cli.per_file = true;
     cli.nc_dedup = true;
 }
 
@@ -338,6 +339,26 @@ fn main() {
                 std::process::exit(1);
             }
         }
+
+        // Fail fast on an unwritable output or spill target. The field failure was
+        // a post-Phase-4 EACCES while creating the first aux file -- probing every
+        // sink's parent dir plus the temp/spill dir up front turns hours of wasted
+        // work into an immediate, legible error.
+        let temp_dir = std::env::temp_dir();
+        let mut probed: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
+        let probe_dirs = paths
+            .iter()
+            .map(|p| p.parent().unwrap_or_else(|| std::path::Path::new(".")))
+            .chain(std::iter::once(temp_dir.as_path()));
+        for dir in probe_dirs {
+            if !probed.insert(dir) {
+                continue;
+            }
+            if let Err(e) = probe_dir_writable(dir) {
+                println!("error: cannot write to {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
     }
 
     if let Err(e) = run(&cli) {
@@ -378,6 +399,7 @@ fn strip_and_resolve<'a>(
                 match result.tier {
                     link::recover::RecoveryTier::ComputedFromPresent => stats.recovered_tier2 += 1,
                     link::recover::RecoveryTier::Crc32Scan => stats.recovered_tier3 += 1,
+                    link::recover::RecoveryTier::Dlt0 => stats.recovered_dlt0 += 1,
                 }
                 Some(result.frame)
             } else {
@@ -389,17 +411,74 @@ fn strip_and_resolve<'a>(
     }
 }
 
+/// Builds the Phase-4 pairing config from the parsed CLI. All output filters
+/// default to off (WIDE mode -- "never miss"); see the `Cli` field docs.
+fn build_pair_config(cli: &Cli) -> PairConfig {
+    PairConfig {
+        eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
+        rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
+        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
+        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
+        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
+        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
+        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
+        max_eapol_per_type: cli.max_eapol_per_type, // 0 = unlimited (off by default)
+    }
+}
+
+/// Probes whether `dir` accepts writes by creating and removing a uniquely
+/// named probe file. Run at startup for every output sink's parent directory and
+/// the temp/spill directory so an unwritable target aborts the run immediately
+/// instead of after a multi-hour Phase 4 (the field failure was a post-Phase-4
+/// `Permission denied` while creating the first aux file).
+fn probe_dir_writable(dir: &std::path::Path) -> std::io::Result<()> {
+    let probe = dir.join(format!(".wpawolf_probe_{}", std::process::id()));
+    std::fs::File::create(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Reconciles the two disk-mode authorities before Phase 4.
+///
+/// `emit()` borrows the stores immutably and cannot flush them; `run` owns them
+/// `&mut`. If the predicted Phase-4 hash-line allocation would cross the memory
+/// threshold (or disk mode is already engaged), both stores are spilled to disk
+/// so pairing takes the disk path (`pair_all_groups_disk`), which loads one group
+/// at a time, instead of holding every group in memory. See ARCHITECTURE.md §4
+/// invariant 2 (spill, never drop).
+fn reconcile_disk_mode(
+    output_ctx: &mut wpawolf::output::OutputContext,
+    message_store: &mut MessageStore,
+    pmkid_store: &mut PmkidStore,
+    mem_monitor: &mut MemMonitor,
+) -> wpawolf::types::Result<()> {
+    if output_ctx.would_spill(message_store, pmkid_store, mem_monitor)? {
+        if !message_store.disk_mode() {
+            message_store.flush_to_disk()?;
+        }
+        if !pmkid_store.disk_mode() {
+            pmkid_store.flush_to_disk()?;
+        }
+    }
+    Ok(())
+}
+
 // --- Pipeline ---
 
-/// Runs the full two-phase (Collect + Output) pipeline.
+/// Runs the full collect-then-emit pipeline.
 ///
-/// Phase 1 iterates every input file, dispatches management and data frames to their
-/// respective collectors, and populates all in-memory stores. Phase 2 pairs EAPOL
-/// messages, deduplicates, and writes all requested output files. Returns `Err` only
-/// for I/O failures that should abort the run -- parse errors are logged and skipped.
+/// Phases 1-3 iterate every input file, dispatch management and data frames to their
+/// respective collectors, and populate all in-memory stores. Phase 4 pairs EAPOL
+/// messages, deduplicates, and writes all requested output files; Phase 5 prints the
+/// summary. Returns `Err` only for I/O failures that should abort the run -- parse
+/// errors are logged and skipped.
 fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // --- Debug printer (created once; no-op when --debug is off) ---
     let debug = DebugPrinter::new(cli.debug);
+
+    // Wallclock anchors for the Phase 5 cost block. Phases 1-3 are one streaming
+    // pass over the input set; Phase 4 is the pairing + emit pass.
+    let run_start = std::time::Instant::now();
 
     // --- Initialise stores ---
     let mut message_store = MessageStore::new();
@@ -418,14 +497,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let mut stats = Stats::new();
     let mut logger = Logger::new(cli.log.as_deref())?;
     let mut pending_eapol: Vec<PendingEapol> = Vec::new();
-    // Periodic stderr progress lines during Phase 1. On by default; `--quiet`
+    // Periodic stdout progress lines during Phase 1. On by default; `--quiet`
     // suppresses entirely. The closing stats banner is unaffected. See
     // `wpawolf::progress`.
     let mut progress = ProgressReporter::new(!cli.quiet);
 
     // Per-frame extraction toggles derived from the CLI output flags. See
     // `wpawolf::extract::ExtractConfig`. `scan_ies` is independent of `-W`:
-    // `--wordlist-scan-ies FILE` populates a dedicated `WordlistScanIesStore`,
+    // `--wordlist-scan FILE` populates a dedicated `WordlistScanIesStore`,
     // not the curated `-W` wordlist.
     let extract_cfg = ExtractConfig {
         populate_wordlist: cli.wordlist_output.is_some(),
@@ -446,19 +525,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         )));
     }
 
-    // OOM guard: abort if RSS exceeds 80% of system RAM.
-    let oom_threshold_bytes = wpawolf::progress::total_ram_bytes() * 80 / 100;
+    let mut mem_monitor = MemMonitor::new();
 
-    // --- Phase 2 + 3 setup (moved up so per-file mode can emit inside the loop) ---
-    let pair_config = PairConfig {
-        eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
-        rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
-        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
-        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
-        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
-        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
-        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
-    };
+    // --- Phase 4 (Emit) setup: pair config, output paths, and output context built up front ---
+    let pair_config = build_pair_config(cli);
 
     let paths = OutputPaths {
         out_22000: cli.out_22000.clone(),
@@ -488,9 +558,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         EssidFilterConfig { collapse_min: cli.essid_collapse_min, collapse_ratio: cli.essid_collapse_ratio };
 
     // Hash-output state: opens lazily, accumulates dedup + per-AP unresolved-SSID
-    // bookkeeping across calls. Per-file mode calls `emit` once per file; non-per-file
-    // mode calls it once at end of run. Both modes converge on `finalize` to flush
-    // sinks and write auxiliary outputs.
+    // bookkeeping. `emit` runs once after ingestion completes, then `finalize` flushes
+    // sinks and writes auxiliary outputs.
     let mut output_ctx = wpawolf::output::OutputContext::new(&paths);
 
     // --- Phase 1: Collect ---
@@ -510,12 +579,12 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         let mut reader = match input::open_reader(path) {
             Ok(r) => r,
             Err(e) => {
-                // Route unrecognised-magic files through the log sink instead of stderr:
-                // the corpus-scale failure mode (submission-staging watch directories
-                // leaving sub-4-byte stubs behind) is "expected garbage", not
-                // "operator-affecting error".
+                // Route unrecognised-magic files through the log sink rather than the
+                // console: the corpus-scale failure mode (submission-staging watch
+                // directories leaving sub-4-byte stubs behind) is "expected garbage",
+                // not "operator-affecting error".
                 // Genuine I/O failures (permission denied, disk error) still surface on
-                // stderr so a runaway run doesn't silently misbehave.
+                // stdout so a runaway run doesn't silently misbehave.
                 if matches!(e, wpawolf::types::Error::UnknownFormat(_)) {
                     stats.files_skipped_unknown_format += 1;
                     logger.log_skipped_input(path, &e.to_string());
@@ -530,6 +599,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // every input file so a directory walk can report a count + format /
         // endian / DLT distribution rather than only the last file's values.
         stats.input_file_count += 1;
+        stats.bytes_ingested += file_size;
         let meta = reader.file_metadata();
         // Save before meta fields are moved into stats HashMaps below.
         let file_fmt = meta.format.clone();
@@ -548,15 +618,37 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                     stats.total_packets += 1;
                     frame_in_file += 1;
                     logger.set_frame(frame_in_file);
-                    // Periodic stderr progress line (no-op when --quiet). Cheap on the
-                    // hot path: most calls return after a single u64 comparison.
                     let eapol_total = stats.eapol_m1 + stats.eapol_m2 + stats.eapol_m3 + stats.eapol_m4;
                     progress.tick(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
+                    if mem_monitor.tick_packet() {
+                        if !message_store.disk_mode()
+                            && let Err(e) = message_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush MessageStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                        if !pmkid_store.disk_mode()
+                            && let Err(e) = pmkid_store.flush_to_disk()
+                        {
+                            println!("error: failed to flush PmkidStore to disk: {e}");
+                            std::process::exit(1);
+                        }
+                    }
                     // Timestamp range (epoch microseconds). Initialise first_us on the very first packet.
-                    if stats.timestamp_first_us == 0 && packet.timestamp_us > 0 {
+                    // A zero timestamp is a capture-tool artifact (counted, frame still processed).
+                    if packet.timestamp_us == 0 {
+                        stats.packets_zeroed_timestamp += 1;
+                    }
+                    // Only plausible epochs feed first/last (and thus duration). A
+                    // corrupt timestamp near 2^64 would otherwise render banner
+                    // garbage like `duration 18445039995104`; the frame is still
+                    // processed below regardless.
+                    if stats.timestamp_first_us == 0 && wpawolf::types::is_plausible_epoch_us(packet.timestamp_us) {
                         stats.timestamp_first_us = packet.timestamp_us;
                     }
-                    if packet.timestamp_us > stats.timestamp_last_us {
+                    if wpawolf::types::is_plausible_epoch_us(packet.timestamp_us)
+                        && packet.timestamp_us > stats.timestamp_last_us
+                    {
                         stats.timestamp_last_us = packet.timestamp_us;
                     }
                     // Per-file out-of-sequence detection. `prev_ts_us == 0` skips the
@@ -571,6 +663,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
                     // Get the DLT for this interface.
                     let Some(dlt) = reader.link_type(packet.interface_id) else {
+                        stats.packets_unknown_linktype += 1;
                         logger.log_unknown_linktype(packet.interface_id);
                         continue;
                     };
@@ -583,7 +676,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                             2412..=2484 => stats.band_24ghz += 1,
                             5180..=5825 => stats.band_5ghz += 1,
                             5925..=7125 => stats.band_6ghz += 1,
-                            _ => {},
+                            _ => stats.band_other += 1,
                         }
                     }
 
@@ -629,8 +722,12 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                         _ => continue, // unreachable: parse() returns one of the four types
                     }
 
-                    // Slice the frame body (past MAC header).
+                    // Slice the frame body (past MAC header). The header parsed
+                    // but the captured frame is shorter than its claimed header
+                    // length (snaplen truncation or corrupt length) -- the body,
+                    // and any EAPOL/IE it carried, is unrecoverable.
                     let Some(body) = frame_data.get(mac_hdr.body_offset..) else {
+                        stats.truncated_after_header += 1;
                         continue;
                     };
 
@@ -710,63 +807,20 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check(&format!("Phase 1 file {}/{total_inputs}", file_idx + 1));
 
-            // OOM guard: every 1000 files, check RSS and abort if approaching OOM.
-            if (file_idx + 1) % 1000 == 0 {
-                let rss = wpawolf::progress::current_rss_bytes();
-                if rss > oom_threshold_bytes {
-                    let rss_mib = rss / (1024 * 1024);
-                    let total_mib = wpawolf::progress::total_ram_bytes() / (1024 * 1024);
-                    println!(
-                        "error: approaching OOM -- RSS {rss_mib} MiB / {total_mib} MiB (>= 80%) during Phase 1 ingestion (file {}/{total_inputs}). Reduce input size, use --per-file, or increase available RAM.",
-                        file_idx + 1
-                    );
+            if mem_monitor.check() {
+                if !message_store.disk_mode()
+                    && let Err(e) = message_store.flush_to_disk()
+                {
+                    println!("error: failed to flush MessageStore to disk: {e}");
+                    std::process::exit(1);
+                }
+                if !pmkid_store.disk_mode()
+                    && let Err(e) = pmkid_store.flush_to_disk()
+                {
+                    println!("error: failed to flush PmkidStore to disk: {e}");
                     std::process::exit(1);
                 }
             }
-        }
-
-        // --- Per-file emit (--per-file mode only) ---
-        //
-        // Resolve any deferred WDS frames seen this file (they need an ESSID
-        // context; `essid_map` accumulates across files so even cross-file
-        // ESSID-based resolution still works), MLD-canonicalize the per-file
-        // stores, emit hashes for what we have, then drop the per-file EAPOL
-        // and PMKID state. Auxiliaries (`-E`/`-W`/...), `essid_map`,
-        // `akm_map`, `mld_store`, and the dedup state inside `output_ctx`
-        // accumulate across files. See `ARCHITECTURE.md §3` for the
-        // cross-file pairing tradeoff.
-        if cli.per_file {
-            if !pending_eapol.is_empty() {
-                resolve_wds_eapol(
-                    &pending_eapol,
-                    &essid_map,
-                    &mut akm_map,
-                    &mut message_store,
-                    &mut pmkid_store,
-                    &mut stats,
-                    &mut logger,
-                );
-                pending_eapol.clear();
-            }
-            if !mld_store.is_empty() {
-                let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-                stats.mld_groups_merged = stats.mld_groups_merged.saturating_add(merged);
-                pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            }
-            stats.anonce_m1_m3_mismatch_sessions =
-                stats.anonce_m1_m3_mismatch_sessions.saturating_add(message_store.count_anonce_m1_m3_mismatches());
-            output_ctx.emit(
-                &message_store,
-                &pmkid_store,
-                &essid_map,
-                &akm_map,
-                &pair_config,
-                thread_count,
-                essid_filter,
-                &debug,
-            )?;
-            message_store.clear();
-            pmkid_store.clear();
         }
     }
 
@@ -778,11 +832,23 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         progress.print_now(stats.total_packets, stats.input_file_count, eapol_total, stats.pmkids_found);
     }
 
-    // --- Phase 1.5: Resolve deferred WDS EAPOL frames (non-per-file mode only) ---
+    // Packet-accounting invariant (STATS.md identity 1): every packet in
+    // `total_packets` reached exactly one terminal disposition in the loop above.
+    // A future silent `continue` that drops a packet without a counter, or a
+    // double-count, breaks this. The release banner surfaces it as a BUG row;
+    // here it hard-fails the test suite (debug builds) before it can ship.
+    debug_assert_eq!(
+        stats.packets_accounted(),
+        stats.total_packets,
+        "packet accounting broken (STATS.md identity 1): {} accounted vs {} total",
+        stats.packets_accounted(),
+        stats.total_packets
+    );
+
+    // --- Phase 1.5: Resolve deferred WDS EAPOL frames ---
     // WDS relay frames had ambiguous direction during Phase 1. Now that essid_map is fully
     // populated, resolve them using essid_map lookup, ACK-based AP discovery, or flag fallback.
-    // In `--per-file` mode the resolve already ran per-file inside the ingest loop.
-    if !cli.per_file && !pending_eapol.is_empty() {
+    if !pending_eapol.is_empty() {
         let wds_count = pending_eapol.len();
         resolve_wds_eapol(
             &pending_eapol,
@@ -796,11 +862,36 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         debug.wds_resolved(wds_count, 0);
     }
 
+    // All add() calls are now done (Phase 1 ingest + WDS Phase 1.5). Release the
+    // dedup-on-insert index so it does not occupy memory during Phase 4 pairing.
+    message_store.finish_ingest();
+
     // Snapshot ESSID count before handing off to output.
     // ap_count() returns usize; u64 can represent every possible usize value on supported platforms.
     {
         stats.essid_count = essid_map.ap_count() as u64;
+        // "Changes" = distinct SSID variants per AP minus the initial one, maximum across APs.
+        stats.essid_changes_max = essid_map.max_ssid_variants().saturating_sub(1) as u64;
     }
+
+    // Echo of the resolved output-filter state for the Phase 4 banner, so a WIDE
+    // run and a --strict run are distinguishable from the banner alone.
+    stats.filters_active = {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = cli.eapoltimeout {
+            parts.push(format!("eapoltimeout={s}"));
+        }
+        if let Some(n) = cli.rc_drift {
+            parts.push(format!("rc-drift={n}"));
+        }
+        if cli.dedup_hash_combos {
+            parts.push("dedup-hash-combos".to_owned());
+        }
+        if cli.nc_dedup {
+            parts.push(format!("nc-dedup (tolerance {})", cli.nc_tolerance.unwrap_or(8)));
+        }
+        if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
+    };
 
     // Record output paths in stats so the Phase 4 banner can show configured vs not-configured.
     let path_str = |p: &Option<std::path::PathBuf>| p.as_ref().map_or_else(String::new, |p| p.display().to_string());
@@ -819,33 +910,26 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     stats.identity_list_path = path_str(&cli.identity_output);
     stats.username_list_path = path_str(&cli.username_output);
     stats.device_info_path = path_str(&cli.device_output);
+    stats.wordlist_scan_path = path_str(&cli.wordlist_scan);
 
-    if cli.per_file {
-        // Per-file mode also re-canonicalizes essid_map at end of run because
-        // some link-MAC SSIDs may have been filed under their pre-MLD address
-        // before the corresponding MLE was learned. Cheap because it only
-        // touches the AP-keyed map.
+    {
+        // 802.11be MLD canonicalization: if any Multi-Link Element was seen, ADD an
+        // MLD-keyed copy of every handshake / PMKID / SSID whose link address maps to
+        // an MLD, keeping the original link-keyed form. A true multi-link handshake is
+        // crackable only under the MLD MAC; a single-link association to one BSSID of
+        // an MLD is crackable only under the link MAC -- so both are emitted (the same
+        // "emit every candidate" rule as the six N#E# combos). A destructive rewrite
+        // would silently drop single-link handshakes onto the MLD MAC, producing an
+        // uncrackable line (corpus-confirmed regression vs hcxpcapngtool). When no MLE
+        // was observed this is a no-op, byte-identical to pre-MLE behaviour.
+        // [IEEE 802.11be] §9.4.2.321, §35.3
         if !mld_store.is_empty() {
-            stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
-        }
-    } else {
-        // 802.11be MLD canonicalization: if any Multi-Link Element was seen, rewrite all
-        // MessageStore and PmkidStore keys so link addresses collapse onto the MLD identity.
-        // When no MLE was observed, this is a no-op and byte-identical to pre-MLE behavior.
-        // [IEEE 802.11be] §9.4.2.321
-        if !mld_store.is_empty() {
-            let merged = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            stats.mld_groups_merged = merged;
+            let copied = message_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
+            stats.mld_groups_merged = copied;
             pmkid_store.canonicalize_pairs(|m| mld_store.canonicalize(m));
-            // Fold link-MAC SSIDs into the canonical MLD MAC so essid_map lookups by
-            // canonical AP key (post-canonicalization on the pair side) actually find
-            // them. Without this, hidden-SSID resolution silently fails for any MLD
-            // AP whose SSID was advertised under a band-specific link MAC.
             stats.essid_link_macs_merged = essid_map.canonicalize_pairs(|m| mld_store.canonicalize(m));
         }
 
-        // Capture-quality diagnostic: count sessions whose M1 and M3 ANonce disagree.
-        // Per IEEE 802.11-2024 §12.7.6.4 they must match in the same handshake session.
         stats.anonce_m1_m3_mismatch_sessions = message_store.count_anonce_m1_m3_mismatches();
 
         // Phase 1 complete; log the full store state and the top heavy groups before Phase 4.
@@ -864,9 +948,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             );
             let _ = debug.memory_check("Phase 1 complete");
 
-            if debug.enabled {
+            if debug.enabled && !message_store.disk_mode() {
                 // Build group summaries for the top-25 survey and cost-tier breakdown.
-                // Both come from the same single pass over the store.
+                // Both come from the same single pass over the store. Skipped in disk
+                // mode to avoid loading all groups back into memory.
                 let mut summaries: Vec<GroupSummary> = message_store
                     .groups()
                     .map(|(pair, msgs)| GroupSummary::from_messages(pair.ap, pair.sta, msgs))
@@ -903,7 +988,26 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             debug.phase_start(4, "Emit");
         }
 
-        // Single-pass emit over the fully populated stores.
+        // Phases 1-3 (the streaming pass + WDS resolution) end here.
+        stats.wallclock_p13_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Spill the stores to disk before pairing if memory is tight, so Phase 4
+        // takes the abort-free disk path instead of the hard-aborting in-memory
+        // path. See `reconcile_disk_mode`.
+        reconcile_disk_mode(&mut output_ctx, &mut message_store, &mut pmkid_store, &mut mem_monitor)?;
+
+        message_store.flush_disk_writer();
+        pmkid_store.flush_disk_writer();
+
+        // Keep the `peak RSS` banner honest across the Phase-4 fan-out. The monitor
+        // is polled per-file in Phase 1 but never during pairing/emit, so transient
+        // allocation spikes (the fan-out's dedup set + per-group pairs) are invisible
+        // to the sampled peak. This 250 ms background sampler folds the true
+        // high-water into the same atomic the banner reads. The guard stops and
+        // joins when this block ends, just before `finalize`.
+        let _mem_watcher =
+            MemWatcher::spawn(mem_monitor.peak_handle(), mem_monitor.threshold_bytes(), mem_monitor.disk_trip_handle());
+
         output_ctx.emit(
             &message_store,
             &pmkid_store,
@@ -913,6 +1017,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
             thread_count,
             essid_filter,
             &debug,
+            &mut mem_monitor,
         )?;
 
         debug.phase_done(4, "Emit", "");
@@ -930,12 +1035,21 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         &mut logger,
     )?;
 
+    // The finalize call above flushed every sink, so the Phase 4 wallclock ends
+    // here: run total minus the Phase 1-3 share measured before emit started.
+    stats.wallclock_p4_ms =
+        u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX).saturating_sub(stats.wallclock_p13_ms);
+
     // All usize -> u64: u64 subsumes usize on all supported platforms.
     {
-        stats.hashes_written = (output_stats.pmkids_written + output_stats.pairs_written) as u64;
-        stats.dedup_dropped = output_stats.dedup_dropped as u64;
-        // Total pairs attempted through dedup = written + dropped.
-        stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped) as u64;
+        stats.pmkids_written = output_stats.pmkids_written as u64;
+        stats.dedup_dropped_pairs = output_stats.dedup_dropped_pairs as u64;
+        stats.dedup_dropped_pmkids = output_stats.dedup_dropped_pmkids as u64;
+        stats.dedup_dropped = (output_stats.dedup_dropped_pairs + output_stats.dedup_dropped_pmkids) as u64;
+        stats.emit_dropped_unclassified_akm = output_stats.emit_dropped_unclassified_akm as u64;
+        stats.emit_dropped_ft_no_context = output_stats.emit_dropped_ft_no_context as u64;
+        // Total pairs attempted through dedup = written + pair-side drops.
+        stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped_pairs) as u64;
 
         // Per-combo and flag counters from the output pipeline.
         stats.pairs_written_n1e2 = output_stats.n1e2 as u64;
@@ -950,6 +1064,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.nc_dedup_collapsed_lines = output_stats.nc_dedup_collapsed_lines;
         stats.nc_dedup_cluster_count = output_stats.nc_dedup_cluster_count;
         stats.nc_dedup_max_cluster_size = output_stats.nc_dedup_max_cluster_size;
+        stats.pairs_time_filtered = output_stats.pairs_time_filtered;
+        stats.pairs_rc_filtered = output_stats.pairs_rc_filtered;
+        stats.eapol_messages_capped = output_stats.messages_capped;
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;
@@ -981,12 +1098,36 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // Per-hash-type breakdown -- one bucket per row of the 11-type table in
         // `ARCHITECTURE.md §2`. The output pipeline classifies each emitted
         // line via `HashType::from_akm_and_attack`; copy the resulting tally into
-        // the global stats for `print_summary`.
+        // the global stats for `print_summary`. `hash_type_found` is the
+        // sink-independent inventory; `hash_type_emitted` is what reached a file.
         stats.hash_type_emitted = output_stats.hash_type_emitted;
+        stats.hash_type_found = output_stats.hash_type_found;
+
+        // Auxiliary sink entry counts (filled by `finalize` from the writer returns).
+        stats.entries_essid_list = output_stats.entries_essid as u64;
+        stats.entries_probe_list = output_stats.entries_probe as u64;
+        stats.entries_wordlist = output_stats.entries_wordlist as u64;
+        stats.entries_wordlist_scan = output_stats.entries_wordlist_scan as u64;
+        stats.entries_identity_list = output_stats.entries_identity as u64;
+        stats.entries_username_list = output_stats.entries_username as u64;
+        stats.entries_device_info = output_stats.entries_device as u64;
+
+        // Extraction-side identity/username tallies -- printed in Phase 3 even
+        // when the -I / -U sinks are not configured.
+        stats.identities_extracted = identity_set.len() as u64;
+        stats.usernames_extracted = username_set.len() as u64;
     }
 
     logger.flush()?;
+    message_store.cleanup_disk();
+    pmkid_store.cleanup_disk();
     stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
+
+    // Phase 5 cost block: peak RSS high-water from the memory monitor and the
+    // sticky disk-mode flag (monitor or either store may have tripped it).
+    stats.peak_rss_mib = mem_monitor.peak_rss_bytes() / (1024 * 1024);
+    stats.disk_mode_engaged = mem_monitor.disk_mode() || message_store.disk_mode() || pmkid_store.disk_mode();
+
     stats.print_summary();
 
     // Optional `--mem-stats` block: per-store byte-count table for OOM triage.
@@ -1039,18 +1180,16 @@ mod tests {
         assert_eq!(cli.eapoltimeout, None, "no --strict -> eapoltimeout stays None (unlimited)");
         assert_eq!(cli.rc_drift, None, "no --strict -> rc_drift stays None (off)");
         assert!(!cli.dedup_hash_combos, "no --strict -> dedup_hash_combos stays off");
-        assert!(!cli.per_file, "no --strict -> per_file stays off");
         assert!(!cli.nc_dedup, "no --strict -> nc_dedup stays off");
     }
 
     #[test]
-    fn strict_alone_enables_all_five_bundled_filters() {
+    fn strict_alone_enables_all_four_bundled_filters() {
         let cli = parse_with_strict(&["--strict"]);
         assert!(cli.strict);
         assert_eq!(cli.eapoltimeout, Some(5), "--strict -> 5 s session window");
         assert_eq!(cli.rc_drift, Some(8), "--strict -> RC drift tolerance 8");
         assert!(cli.dedup_hash_combos, "--strict -> dedup_hash_combos on");
-        assert!(cli.per_file, "--strict -> per_file on");
         assert!(cli.nc_dedup, "--strict -> nc_dedup on");
     }
 
@@ -1062,7 +1201,6 @@ mod tests {
         assert_eq!(cli.eapoltimeout, Some(30), "explicit user value must override --strict default");
         assert_eq!(cli.rc_drift, Some(8), "untouched filters still take strict defaults");
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 
@@ -1072,7 +1210,6 @@ mod tests {
         assert_eq!(cli.rc_drift, Some(4), "explicit --rc-drift=4 wins over strict's 8");
         assert_eq!(cli.eapoltimeout, Some(5));
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 
@@ -1081,19 +1218,16 @@ mod tests {
         let cli = parse_with_strict(&["--strict", "--eapoltimeout=60", "--rc-drift=2"]);
         assert_eq!(cli.eapoltimeout, Some(60));
         assert_eq!(cli.rc_drift, Some(2));
-        assert!(cli.dedup_hash_combos, "strict still enables the three boolean filters");
-        assert!(cli.per_file);
+        assert!(cli.dedup_hash_combos, "strict still enables the two boolean filters");
         assert!(cli.nc_dedup);
     }
 
     #[test]
     fn strict_idempotent_with_already_set_bools() {
-        // --strict --per-file --dedup-hash-combos --nc-dedup is the same as --strict alone.
-        let cli = parse_with_strict(&["--strict", "--per-file", "--dedup-hash-combos", "--nc-dedup"]);
+        let cli = parse_with_strict(&["--strict", "--dedup-hash-combos", "--nc-dedup"]);
         assert_eq!(cli.eapoltimeout, Some(5));
         assert_eq!(cli.rc_drift, Some(8));
         assert!(cli.dedup_hash_combos);
-        assert!(cli.per_file);
         assert!(cli.nc_dedup);
     }
 

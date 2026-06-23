@@ -137,7 +137,7 @@ impl std::fmt::Display for MsgType {
 /// PSK) and `Wpa2Psk` (WPA2 AKM 2), and splitting the SHA-256 / SHA-384 variants
 /// (`FtPsk` vs `FtPskSha384`, `PskSha256` vs `PskSha384`) keeps each row pinned
 /// to a single hash family even when two suites share an output mode today.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AkmType {
     /// Legacy WPA1 PSK (Wi-Fi Alliance WPA vendor IE OUI `00:50:F2`, type 1, AKM 2).
     /// HMAC-MD5 MIC, PRF-SHA1 PTK, no PMKID. Outputs to hashcat mode 22000 as type 1.
@@ -181,6 +181,34 @@ impl AkmType {
     #[must_use]
     pub const fn is_psk_sha256(self) -> bool {
         matches!(self, Self::PskSha256)
+    }
+
+    /// Encodes as a `u8` for binary serialization.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::Wpa1 => 0,
+            Self::Wpa2Psk => 1,
+            Self::FtPsk => 2,
+            Self::FtPskSha384 => 3,
+            Self::PskSha256 => 4,
+            Self::PskSha384 => 5,
+            Self::Unknown => 255,
+        }
+    }
+
+    /// Decodes from a `u8` produced by [`Self::to_byte`].
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::Wpa1,
+            1 => Self::Wpa2Psk,
+            2 => Self::FtPsk,
+            3 => Self::FtPskSha384,
+            4 => Self::PskSha256,
+            5 => Self::PskSha384,
+            _ => Self::Unknown,
+        }
     }
 }
 
@@ -434,6 +462,60 @@ pub enum PmkidSource {
     OsenIe,
 }
 
+impl PmkidSource {
+    /// Encodes as a `u8` for binary serialization.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Self::M1KeyData => 0,
+            Self::M2RsnIe => 1,
+            Self::AssocRequest => 2,
+            Self::ReassocRequest => 3,
+            Self::FtAuthStaToAp => 4,
+            Self::FtAuthApToSta => 5,
+            Self::FilsAuthStaToAp => 6,
+            Self::FilsAuthApToSta => 7,
+            Self::PasnAuthStaToAp => 8,
+            Self::PasnAuthApToSta => 9,
+            Self::FtActionRequest => 10,
+            Self::FtActionResponse => 11,
+            Self::FtActionConfirm => 12,
+            Self::ProbeRequest => 13,
+            Self::BeaconRsnIe => 14,
+            Self::ProbeRespRsnIe => 15,
+            Self::MeshPeeringOpen => 16,
+            Self::MeshPeeringConfirm => 17,
+            Self::OsenIe => 18,
+        }
+    }
+
+    /// Decodes from a `u8` produced by [`Self::to_byte`].
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Self {
+        match b {
+            1 => Self::M2RsnIe,
+            2 => Self::AssocRequest,
+            3 => Self::ReassocRequest,
+            4 => Self::FtAuthStaToAp,
+            5 => Self::FtAuthApToSta,
+            6 => Self::FilsAuthStaToAp,
+            7 => Self::FilsAuthApToSta,
+            8 => Self::PasnAuthStaToAp,
+            9 => Self::PasnAuthApToSta,
+            10 => Self::FtActionRequest,
+            11 => Self::FtActionResponse,
+            12 => Self::FtActionConfirm,
+            13 => Self::ProbeRequest,
+            14 => Self::BeaconRsnIe,
+            15 => Self::ProbeRespRsnIe,
+            16 => Self::MeshPeeringOpen,
+            17 => Self::MeshPeeringConfirm,
+            18 => Self::OsenIe,
+            _ => Self::M1KeyData, // fallback for unknown bytes
+        }
+    }
+}
+
 // --- Error type ---
 
 /// All errors produced by wpawolf.
@@ -445,6 +527,19 @@ pub enum PmkidSource {
 pub enum Error {
     /// An underlying I/O operation failed.
     Io(std::io::Error),
+    /// An I/O operation failed, carrying the path and operation that triggered
+    /// it. Preferred over [`Self::Io`] at file open / create sites so the message
+    /// names *which* path and *what* operation failed -- a bare `std::io::Error`
+    /// carries neither, which left a post-Phase-4 EACCES on an aux file
+    /// undiagnosable in the field.
+    IoWithContext {
+        /// The filesystem path the operation targeted.
+        path: std::path::PathBuf,
+        /// Short verb phrase naming the operation, e.g. `"create ESSID list"`.
+        operation: &'static str,
+        /// The underlying OS error.
+        source: std::io::Error,
+    },
     /// The file's magic bytes do not match any supported format.
     UnknownFormat(String),
     /// An unknown CLI flag was passed.
@@ -469,10 +564,23 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Wraps an [`std::io::Error`] with the path and operation that produced it,
+    /// so the operator-facing message is actionable. Use at `File::create` /
+    /// `create_dir_all` sites where the path is known but would otherwise be lost.
+    #[must_use]
+    pub fn io(source: std::io::Error, path: impl Into<std::path::PathBuf>, operation: &'static str) -> Self {
+        Self::IoWithContext { path: path.into(), operation, source }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::IoWithContext { path, operation, source } => {
+                write!(f, "I/O error: {operation} {}: {source}", path.display())
+            },
             Self::UnknownFormat(hex) => write!(f, "unrecognised file format (magic bytes: {hex})"),
             Self::UnknownOption(flag) => write!(f, "unknown option: {flag}"),
             Self::MissingArgument(flag) => write!(f, "{flag} requires an argument"),
@@ -489,7 +597,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(e) => Some(e),
+            Self::Io(e) | Self::IoWithContext { source: e, .. } => Some(e),
             _ => None,
         }
     }
@@ -909,6 +1017,29 @@ pub fn format_autohex(bytes: &[u8]) -> String {
     }
 }
 
+// --- Timestamp plausibility ---
+
+/// Upper bound on a plausible capture timestamp, in epoch microseconds.
+///
+/// `2100-01-01T00:00:00Z`. Capture-tool / container corruption can yield a
+/// timestamp near `u64::MAX` (e.g. a pcapng `ts_high` / `ts_low` underflow);
+/// feeding such a value into the duration and session-gap statistics renders
+/// nonsense like `duration 18445039995104`. Frames carrying an implausible
+/// timestamp are still parsed and paired -- only the stats min / max / gap
+/// accumulators ignore them.
+pub const SANE_EPOCH_CEILING_US: u64 = 4_102_444_800_000_000;
+
+/// Returns `true` when `ts_us` is a usable capture epoch.
+///
+/// "Usable" means non-zero and below [`SANE_EPOCH_CEILING_US`]. Zero is excluded
+/// because a zeroed timestamp is a capture-tool artifact, not a real clock
+/// reading, and pairing it against a real timestamp would manufacture a
+/// multi-decade gap.
+#[must_use]
+pub const fn is_plausible_epoch_us(ts_us: u64) -> bool {
+    ts_us > 0 && ts_us < SANE_EPOCH_CEILING_US
+}
+
 // --- Display helpers ---
 
 /// Formats a byte count as a human-readable string (B / KiB / MiB / GiB) with
@@ -977,6 +1108,25 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn io_with_context_display_and_source() {
+        let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied (os error 13)");
+        let err = Error::io(inner, std::path::Path::new("/out/wwE.txt"), "create ESSID list");
+        let msg = err.to_string();
+        assert!(msg.contains("create ESSID list"), "operation in message: {msg}");
+        assert!(msg.contains("/out/wwE.txt"), "path in message: {msg}");
+        assert!(msg.contains("Permission denied"), "source in message: {msg}");
+        assert!(std::error::Error::source(&err).is_some(), "source() must expose the inner io::Error");
+    }
+
+    #[test]
+    fn is_plausible_epoch_us_bounds() {
+        assert!(!is_plausible_epoch_us(0), "zero (zeroed clock) is implausible");
+        assert!(is_plausible_epoch_us(1_700_000_000_000_000), "a 2023-era epoch-us is plausible");
+        assert!(!is_plausible_epoch_us(SANE_EPOCH_CEILING_US), "the ceiling itself is excluded");
+        assert!(!is_plausible_epoch_us(u64::MAX), "near-2^64 container corruption is implausible");
+    }
 
     #[test]
     fn encode_hex_empty() {

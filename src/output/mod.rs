@@ -10,6 +10,7 @@
 
 pub mod dedup;
 pub mod device_info;
+pub mod disk_dedup;
 pub mod hashcat;
 pub mod wordlists;
 
@@ -132,8 +133,15 @@ pub struct OutputStats {
     pub pmkids_written: usize,
     /// Total *logical* EAPOL pairs that survived dedup at least once across all sinks.
     pub pairs_written: usize,
-    /// Total *logical* hashes suppressed by every configured sink's dedup.
-    pub dedup_dropped: usize,
+    /// Logical EAPOL pairs suppressed by every configured sink's dedup.
+    pub dedup_dropped_pairs: usize,
+    /// Logical PMKID hashes suppressed by every configured sink's dedup.
+    pub dedup_dropped_pmkids: usize,
+    /// Hashes dropped at emit because the AKM could not be mapped to one of the
+    /// 11 types (`HashType::from_akm_and_attack` returned None).
+    pub emit_dropped_unclassified_akm: usize,
+    /// FT hashes dropped at emit because the FT context (R0KH-ID) was missing.
+    pub emit_dropped_ft_no_context: usize,
 
     /// Per-sink line counts (passed each sink's dedup, written to disk if configured).
     pub lines_per_sink: PerSinkCounts,
@@ -170,6 +178,15 @@ pub struct OutputStats {
     /// Largest single NC-dedup cluster observed. Equal to
     /// `NcDedupStats::max_cluster_size` across `pair_all_groups`.
     pub nc_dedup_max_cluster_size: u64,
+    /// Candidate pairs dropped by the `--eapoltimeout` filter, summed across all
+    /// groups (`NcDedupStats::time_filtered`). Zero in WIDE mode.
+    pub pairs_time_filtered: u64,
+    /// Candidate pairs dropped by the `--rc-drift` filter, summed across all
+    /// groups (`NcDedupStats::rc_filtered`). Zero in WIDE mode.
+    pub pairs_rc_filtered: u64,
+    /// Messages excluded from pairing by the `--max-eapol-per-type` cap, summed
+    /// across all groups (`NcDedupStats::messages_capped`). Zero when off.
+    pub messages_capped: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
@@ -178,6 +195,15 @@ pub struct OutputStats {
     /// sinks it was fanned out to. Merged into `Stats::hash_type_emitted` after
     /// `run_output` returns.
     pub hash_type_emitted: HashMap<HashType, u64>,
+
+    /// Unique crackable hashes *found* in the capture, keyed by `HashType`,
+    /// counted independently of which output sinks are configured. A hash whose
+    /// only candidate sinks are unconfigured (e.g. the SHA-384 family with just
+    /// `--22000-out`) is absent from `hash_type_emitted` but still counted here,
+    /// so the banner reports the full 11-type inventory of the capture's content.
+    /// Deduped via `found_dedup` in memory mode; pre-dedup (write-through) in
+    /// disk mode, matching `hash_type_emitted`.
+    pub hash_type_found: HashMap<HashType, u64>,
 
     /// Hash lines emitted with an empty SSID because `essid_map` had no entry for
     /// the AP. Surfaces the residual hidden-SSID gap after Beacon, Probe Response,
@@ -188,6 +214,22 @@ pub struct OutputStats {
     /// Distinct AP MACs that triggered at least one `essid_unresolved_emissions`.
     /// Lower bound on the number of "truly hidden" APs in the capture.
     pub essid_unresolved_aps: u64,
+
+    // --- auxiliary sink entry counts (filled by `finalize`) ---
+    /// Entries written to the `-E` ESSID list.
+    pub entries_essid: usize,
+    /// Entries written to the `-R` probe-ESSID list.
+    pub entries_probe: usize,
+    /// Entries written to the `-W` combined wordlist.
+    pub entries_wordlist: usize,
+    /// Entries written to the `--wordlist-scan` IE-scan wordlist.
+    pub entries_wordlist_scan: usize,
+    /// Entries written to the `-I` identity list.
+    pub entries_identity: usize,
+    /// Entries written to the `-U` username list.
+    pub entries_username: usize,
+    /// Entries written to the `-D` device-info table.
+    pub entries_device: usize,
 }
 
 impl OutputStats {
@@ -222,7 +264,9 @@ impl LazySink {
     /// Returns a writable handle, creating (and truncating) the file on first call.
     fn writer(&mut self) -> Result<&mut BufWriter<std::fs::File>> {
         if self.writer.is_none() {
-            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(&self.path)?));
+            let file = std::fs::File::create(&self.path)
+                .map_err(|e| crate::types::Error::io(e, self.path.clone(), "create hash sink"))?;
+            self.writer = Some(BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file));
         }
         // The branch above guarantees Some.
         Ok(self.writer.as_mut().unwrap_or_else(|| unreachable!()))
@@ -266,12 +310,28 @@ impl HashSinks {
         self.sinks.iter().any(Option::is_some)
     }
 
+    /// Returns a boolean mask of which sinks have a configured path.
+    fn active_mask(&self) -> [bool; SinkId::COUNT] {
+        let mut mask = [false; SinkId::COUNT];
+        for (i, s) in self.sinks.iter().enumerate() {
+            if let Some(m) = mask.get_mut(i) {
+                *m = s.is_some();
+            }
+        }
+        mask
+    }
+
     /// Flushes every sink whose file has actually been created.
     fn flush_all(&mut self) -> Result<()> {
         for s in self.sinks.iter_mut().flatten() {
             s.flush()?;
         }
         Ok(())
+    }
+
+    /// Returns the output path for a given sink, if configured.
+    fn path(&self, sink: SinkId) -> Option<PathBuf> {
+        self.sinks.get(sink.as_index()).and_then(Option::as_ref).map(|s| s.path.clone())
     }
 }
 
@@ -362,11 +422,13 @@ fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sin
 fn fan_out(
     sinks: &mut HashSinks,
     dedup: &mut PerSinkDedup,
+    dd: &mut Option<disk_dedup::DiskDedup>,
     stats: &mut OutputStats,
     ht: HashType,
     item: FanItem<'_>,
 ) -> Result<bool> {
     let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
+    let disk_mode = dd.is_some();
 
     // Pre-build the EAPOL body once (prefix-independent) if any sink will accept it.
     let eapol_body: Option<Vec<u8>> = match item {
@@ -389,9 +451,16 @@ fn fan_out(
         let idx = sink.as_index();
         let Some(slot) = sinks.sinks.get_mut(idx) else { continue };
         let Some(lazy) = slot.as_mut() else { continue };
-        let accepted = match item {
-            FanItem::Pmkid { entry, essid, .. } => dedup.check_pmkid(sink, entry, essid),
-            FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
+
+        // In disk mode: always accept (write-through), record fingerprint to buckets.
+        // In memory mode: use in-memory HashSet dedup gate.
+        let accepted = if disk_mode {
+            true
+        } else {
+            match item {
+                FanItem::Pmkid { entry, essid, .. } => dedup.check_pmkid(sink, entry, essid),
+                FanItem::Eapol { pair, essid, .. } => dedup.check_eapol(sink, pair, essid),
+            }
         };
         if accepted {
             let writer = lazy.writer()?;
@@ -411,6 +480,13 @@ fn fan_out(
             }
             if let Some(c) = stats.lines_per_sink.get_mut(idx) {
                 *c += 1;
+            }
+            if let Some(disk) = dd.as_mut() {
+                let fp = match item {
+                    FanItem::Pmkid { entry, essid, .. } => dedup::pmkid_fingerprint(entry, essid),
+                    FanItem::Eapol { pair, essid, .. } => dedup::eapol_fingerprint(pair, essid),
+                };
+                disk.record(sink, fp)?;
             }
             any_written = true;
         } else if let Some(c) = stats.dropped_per_sink.get_mut(idx) {
@@ -456,9 +532,20 @@ pub fn run_output(
     essid_filter: EssidFilterConfig,
     logger: &mut Logger,
     debug: &DebugPrinter,
+    mem_monitor: &mut crate::mem_monitor::MemMonitor,
 ) -> Result<OutputStats> {
     let mut ctx = OutputContext::new(paths);
-    ctx.emit(message_store, pmkid_store, essid_map, akm_map, pair_config, thread_count, essid_filter, debug)?;
+    ctx.emit(
+        message_store,
+        pmkid_store,
+        essid_map,
+        akm_map,
+        pair_config,
+        thread_count,
+        essid_filter,
+        debug,
+        mem_monitor,
+    )?;
     ctx.finalize(
         paths,
         essid_set,
@@ -474,33 +561,36 @@ pub fn run_output(
 
 // --- OutputContext ---
 
-/// Stateful output pipeline driver -- supports both single-pass (`run_output`)
-/// and per-file (`--per-file`) modes.
+/// Stateful output pipeline driver.
 ///
-/// In single-pass mode `run_output` constructs a context, calls `emit` once
-/// over the fully populated stores, and finalizes. In `--per-file` mode the
-/// caller constructs the context once, calls `emit` after each input file
-/// (with the per-file store contents), then calls `finalize` after the last
-/// file. Sinks stay open across `emit` calls, dedup state accumulates across
-/// files (so duplicates across captures still collapse), and the per-AP
-/// timestamp ranges needed for `[essid_not_found_summary]` are captured
-/// during `emit` so they survive the post-emit `MessageStore::clear` /
-/// `PmkidStore::clear` calls.
+/// `run_output` constructs a context, calls `emit` once over the fully
+/// populated stores, and `finalize`s. The context is designed to tolerate
+/// repeated `emit` calls as well: sinks stay open across calls, dedup state
+/// accumulates (so duplicates across batches still collapse), and the per-AP
+/// timestamp ranges needed for `[essid_not_found_summary]` are captured during
+/// `emit` (when the stores are fully available) rather than re-scanned in
+/// `finalize`.
 pub struct OutputContext {
     stats: OutputStats,
     dedup: PerSinkDedup,
     sinks: HashSinks,
+    disk_dedup: Option<disk_dedup::DiskDedup>,
+    /// Sink-independent global dedup set used only to count `hash_type_found`:
+    /// every classified hash is fingerprinted here so the 11-type inventory
+    /// reflects what the capture contains, not just what reached a configured
+    /// sink. Unused in disk mode (found falls back to write-through counting).
+    found_dedup: dedup::DedupSet,
     /// APs whose hash lines we declined to emit because no ESSID was ever
     /// observed for them. Such lines are not crackable (hashcat needs the
     /// ESSID to derive the PMK), so they go to `--log` only -- nothing
     /// reaches a hash sink. Map value is the count of would-have-been-emitted
     /// lines per AP; the distinct-AP count is the map's `len()`. Accumulates
-    /// across `emit` calls in `--per-file` mode.
+    /// across repeated `emit` calls.
     unresolved_drops: HashMap<crate::types::MacAddr, u64>,
     /// Per-AP `(first_seen_us, last_seen_us)` ranges captured during `emit`
     /// for every AP appearing in `unresolved_drops`. Captured here (rather
-    /// than re-scanned in `finalize`) so the values survive the per-file
-    /// `MessageStore::clear` / `PmkidStore::clear` between batches.
+    /// than re-scanned in `finalize`) so the values are available even after
+    /// the stores spill to disk.
     timestamp_ranges: HashMap<crate::types::MacAddr, (u64, u64)>,
 }
 
@@ -524,15 +614,17 @@ impl OutputContext {
             stats: OutputStats::default(),
             dedup: PerSinkDedup::new(),
             sinks: HashSinks::open(paths),
+            disk_dedup: None,
+            found_dedup: dedup::DedupSet::new(),
             unresolved_drops: HashMap::new(),
             timestamp_ranges: HashMap::new(),
         }
     }
 
     /// Captures per-AP timestamp ranges for the unresolved set into
-    /// `timestamp_ranges`, merging by min/max. Called after each `emit` so
-    /// the values are available even if `MessageStore` / `PmkidStore` are
-    /// cleared between calls (per-file mode).
+    /// `timestamp_ranges`, merging by min/max. Called at the end of `emit` so
+    /// the values are available even after `MessageStore` / `PmkidStore` spill
+    /// to disk.
     fn capture_timestamp_ranges(&mut self, message_store: &MessageStore, pmkid_store: &PmkidStore) {
         if self.unresolved_drops.is_empty() {
             return;
@@ -541,12 +633,11 @@ impl OutputContext {
         let mut batch: HashMap<crate::types::MacAddr, (u64, u64)> = HashMap::new();
         message_store.fold_timestamp_range_into(&wanted, &mut batch);
         for entry in pmkid_store.iter() {
-            if !wanted.contains(&entry.ap) {
-                continue;
+            if wanted.contains(&entry.ap) {
+                let r = batch.entry(entry.ap).or_insert((u64::MAX, 0));
+                r.0 = r.0.min(entry.timestamp);
+                r.1 = r.1.max(entry.timestamp);
             }
-            let r = batch.entry(entry.ap).or_insert((u64::MAX, 0));
-            r.0 = r.0.min(entry.timestamp);
-            r.1 = r.1.max(entry.timestamp);
         }
         // Merge this batch's ranges into the accumulator with min/max.
         for (ap, (first, last)) in batch {
@@ -557,9 +648,8 @@ impl OutputContext {
     }
 
     /// Runs PMKID + EAPOL emission for the current contents of
-    /// `message_store` / `pmkid_store`. Safe to call multiple times across
-    /// `--per-file` batches; sinks, dedup, and unresolved-drop bookkeeping
-    /// accumulate.
+    /// `message_store` / `pmkid_store`. Safe to call multiple times; sinks,
+    /// dedup, and unresolved-drop bookkeeping accumulate across calls.
     ///
     /// # Errors
     ///
@@ -574,21 +664,37 @@ impl OutputContext {
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
+        mem_monitor: &mut crate::mem_monitor::MemMonitor,
     ) -> Result<()> {
         // Pre-size the dedup sets so hashbrown never resizes mid-run. Without
         // this, a resize from 2^31 to 2^32 slots requires both tables to be
         // alive simultaneously (54 GiB transient spike at ~2B entries).
+        // Only reserve for sinks that have a configured output path (fixes the
+        // 9x over-allocation when only 1-2 sinks are active).
+        // Skip pre-sizing entirely if the allocation would exceed the memory
+        // threshold -- the sets will grow incrementally instead.
         let estimated_pairs = crate::pair::estimate_total_cost(message_store);
         let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
         if estimated_hashes > 0 {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
-            )]
-            let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
-            self.dedup.reserve(cap);
+            let active = self.sinks.active_mask();
+            let active_count = active.iter().filter(|&&a| a).count() as u64;
+            let estimated_bytes = estimated_hashes.saturating_mul(12).saturating_mul(active_count);
+            if mem_monitor.would_exceed(estimated_bytes) {
+                mem_monitor.force_disk_mode();
+                if self.disk_dedup.is_none() {
+                    self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+                }
+            } else if self.disk_dedup.is_none() {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
+                )]
+                let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
+                self.dedup.reserve(cap, &active);
+            }
         }
 
+        let disk_trip = mem_monitor.disk_trip_handle();
         self.emit_inner(
             message_store,
             pmkid_store,
@@ -598,9 +704,55 @@ impl OutputContext {
             thread_count,
             essid_filter,
             debug,
+            &disk_trip,
         )?;
+        // Reconcile the monitor's sticky disk-mode flag for the Phase-5 banner: if
+        // the watcher tripped (and drove the mid-stream switch in `emit_inner`),
+        // record that the run went disk-backed.
+        mem_monitor.poll_disk_trip();
         self.capture_timestamp_ranges(message_store, pmkid_store);
         Ok(())
+    }
+
+    /// Decides, before Phase 4, whether this run must go disk-backed and, if so,
+    /// arms the disk-backed dedup. Returns `true` when disk mode is already
+    /// engaged or the predicted hash-line allocation would cross the memory
+    /// threshold, so the caller can flush the stores to disk and route pairing to
+    /// the abort-free disk path (`pair_all_groups_disk`). Mirrors the pre-size
+    /// estimate in [`Self::emit`]; `emit` then skips its own pre-size because
+    /// `disk_dedup` is already set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the disk-backed dedup temp files cannot be created.
+    pub fn would_spill(
+        &mut self,
+        message_store: &MessageStore,
+        pmkid_store: &PmkidStore,
+        mem_monitor: &mut crate::mem_monitor::MemMonitor,
+    ) -> Result<bool> {
+        let active = self.sinks.active_mask();
+        if mem_monitor.disk_mode() {
+            if self.disk_dedup.is_none() {
+                self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+            }
+            return Ok(true);
+        }
+        let estimated_pairs = crate::pair::estimate_total_cost(message_store);
+        let estimated_hashes = estimated_pairs.saturating_add(pmkid_store.total_count() as u64);
+        if estimated_hashes == 0 {
+            return Ok(false);
+        }
+        let active_count = active.iter().filter(|&&a| a).count() as u64;
+        let estimated_bytes = estimated_hashes.saturating_mul(12).saturating_mul(active_count);
+        if mem_monitor.would_exceed(estimated_bytes) {
+            mem_monitor.force_disk_mode();
+            if self.disk_dedup.is_none() {
+                self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn emit_inner(
@@ -613,11 +765,14 @@ impl OutputContext {
         thread_count: usize,
         essid_filter: EssidFilterConfig,
         debug: &DebugPrinter,
+        disk_trip: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
         let any_sink = self.sinks.any_configured();
         let stats = &mut self.stats;
         let dedup = &mut self.dedup;
         let sinks = &mut self.sinks;
+        let disk_dedup = &mut self.disk_dedup;
+        let found_dedup = &mut self.found_dedup;
         let unresolved_drops = &mut self.unresolved_drops;
 
         // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
@@ -628,13 +783,6 @@ impl OutputContext {
         // because the PMK is derived from PSK+SSID -- a different SSID is a different PMK.
         if any_sink {
             for entry in pmkid_store.iter() {
-                // Per-source extractors may store entry.akm = Unknown when the
-                // extraction site has no AKM context (e.g. AMPE element in a Mesh
-                // Peering action frame, OSEN IE in an Association Request). When
-                // the BSS still advertises a PSK AKM in its Beacon, fall back on
-                // akm_map.get_best so the PMKID is still crackable. Without this
-                // fallback the PMKID parses successfully and counts in stats but
-                // never emits a hashcat line -- silent loss for the operator.
                 let resolved_akm = if matches!(entry.akm, AkmType::Unknown)
                     || HashType::from_akm_and_attack(entry.akm, true).is_none()
                 {
@@ -643,27 +791,24 @@ impl OutputContext {
                 } else {
                     entry.akm
                 };
-                let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else { continue };
+                let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else {
+                    stats.emit_dropped_unclassified_akm += 1;
+                    continue;
+                };
                 let ssids = essid_map.ssids_for_emit(&entry.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                 let is_ft = ht.is_ft();
 
-                // For FT-PSK PMKIDs, only write when we have complete FT context (R0KH-ID required).
-                // hashcat mode 37100 requires MDID + R0KH-ID + R1KH-ID to crack the PMK chain.
-                // [hcxpcapngtool:2541] condition: mdidlen!=0 && r0khidlen!=0 && r1khidlen!=0
                 let ft_ctx: Option<&FtFields> = if is_ft {
-                    match entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                        Some(ft) => Some(ft),
-                        None => continue, // FT-PSK PMKID without FT context -- not crackable
+                    if let Some(ft) = entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                        Some(ft)
+                    } else {
+                        stats.emit_dropped_ft_no_context += 1;
+                        continue;
                     }
                 } else {
                     None
                 };
 
-                // An empty `ssids` slice means we never observed a beacon / probe-resp /
-                // assoc for this AP. A hash line with a NULL ESSID is not crackable
-                // (hashcat needs the ESSID to derive the PMK), so we drop the would-be
-                // emission, track the AP for the per-AP `[essid_not_found_summary]`
-                // log line at the end of the run, and continue with the next entry.
                 if ssids.is_empty() {
                     *unresolved_drops.entry(entry.ap).or_insert(0) += 1;
                     stats.essid_unresolved_emissions += 1;
@@ -671,13 +816,19 @@ impl OutputContext {
                 }
 
                 for essid in ssids {
-                    let item = FanItem::Pmkid { entry, ft: ft_ctx, essid };
-                    let written = fan_out(sinks, dedup, stats, ht, item)?;
+                    // Inventory count (sink-independent): tally this type as found
+                    // whether or not a sink is configured to accept it. Deduped in
+                    // memory; counted write-through in disk mode (like `emitted`).
+                    if disk_dedup.is_some() || found_dedup.check_pmkid(&entry, essid) {
+                        *stats.hash_type_found.entry(ht).or_insert(0) += 1;
+                    }
+                    let item = FanItem::Pmkid { entry: &entry, ft: ft_ctx, essid };
+                    let written = fan_out(sinks, dedup, disk_dedup, stats, ht, item)?;
                     if written {
                         stats.pmkids_written += 1;
                         *stats.hash_type_emitted.entry(ht).or_insert(0) += 1;
                     } else {
-                        stats.dedup_dropped += 1;
+                        stats.dedup_dropped_pmkids += 1;
                     }
                 }
             }
@@ -689,18 +840,28 @@ impl OutputContext {
         // inside the streaming callback, then dropped -- peak memory is one
         // group's pairs at a time instead of the full cross-product.
         let pairs_written_before = stats.pairs_written;
-        let dedup_dropped_before = stats.dedup_dropped;
+        let dedup_dropped_before = stats.dedup_dropped_pairs;
 
         #[allow(clippy::items_after_statements, reason = "EmitState must be defined after Pipeline 1 borrows are used")]
         struct EmitState<'a> {
             sinks: &'a mut HashSinks,
             dedup: &'a mut PerSinkDedup,
+            disk_dedup: &'a mut Option<disk_dedup::DiskDedup>,
+            found_dedup: &'a mut dedup::DedupSet,
             stats: &'a mut OutputStats,
             unresolved_drops: &'a mut HashMap<crate::types::MacAddr, u64>,
             first_error: Option<crate::types::Error>,
         }
 
-        let emit_state = std::sync::Mutex::new(EmitState { sinks, dedup, stats, unresolved_drops, first_error: None });
+        let emit_state = std::sync::Mutex::new(EmitState {
+            sinks,
+            dedup,
+            disk_dedup,
+            found_dedup,
+            stats,
+            unresolved_drops,
+            first_error: None,
+        });
         let total_pairs_processed = std::sync::atomic::AtomicUsize::new(0);
 
         let nc_stats =
@@ -715,18 +876,62 @@ impl OutputContext {
                     return;
                 }
 
+                // Mid-stream switch to disk-backed dedup when the memory watcher
+                // signalled memory pressure. Sticky: once `disk_dedup` is `Some`
+                // the check is skipped. The in-memory fingerprints already written
+                // are flushed as sentinels into a line-base-seeded `DiskDedup`
+                // (`len_for_sink` == lines already in each file), then the ~57 GB
+                // set is dropped. `fan_out` auto-routes to write-through disk dedup
+                // from here, and `finalize`'s cleaning pass removes the dupes.
+                if any_sink && guard.disk_dedup.is_none() && disk_trip.load(std::sync::atomic::Ordering::Relaxed) {
+                    let active = guard.sinks.active_mask();
+                    let mut offsets = [0usize; SinkId::COUNT];
+                    for (i, off) in offsets.iter_mut().enumerate() {
+                        if let Some(sink) = SinkId::from_index(i) {
+                            *off = guard.dedup.len_for_sink(sink);
+                        }
+                    }
+                    match disk_dedup::DiskDedup::new_with_offsets(&active, &offsets) {
+                        Ok(mut new_dd) => {
+                            if let Err(e) = guard.dedup.flush_to_buckets(&mut new_dd) {
+                                guard.first_error = Some(e);
+                                return;
+                            }
+                            guard.dedup.drain();
+                            *guard.disk_dedup = Some(new_dd);
+                        },
+                        Err(e) => {
+                            guard.first_error = Some(e);
+                            return;
+                        },
+                    }
+                }
+
                 if any_sink {
-                    let EmitState { sinks: s, dedup: d, stats: st, unresolved_drops: ud, first_error } = &mut *guard;
+                    let EmitState {
+                        sinks: s,
+                        dedup: d,
+                        disk_dedup: dd,
+                        found_dedup: fd,
+                        stats: st,
+                        unresolved_drops: ud,
+                        first_error,
+                    } = &mut *guard;
                     for pair in &pairs {
-                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else { continue };
+                        let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
+                            st.emit_dropped_unclassified_akm += 1;
+                            continue;
+                        };
                         let ssids =
                             essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                         let is_ft = ht.is_ft();
 
                         let ft_ctx: Option<&FtFields> = if is_ft {
-                            match pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
-                                Some(ft) => Some(ft),
-                                None => continue,
+                            if let Some(ft) = pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
+                                Some(ft)
+                            } else {
+                                st.emit_dropped_ft_no_context += 1;
+                                continue;
                             }
                         } else {
                             None
@@ -739,8 +944,12 @@ impl OutputContext {
                         }
 
                         for essid in ssids {
+                            // Inventory count (sink-independent), as in Pipeline 1.
+                            if dd.is_some() || fd.check_eapol(pair, essid) {
+                                *st.hash_type_found.entry(ht).or_insert(0) += 1;
+                            }
                             let item = FanItem::Eapol { pair, ft: ft_ctx, essid };
-                            match fan_out(s, d, st, ht, item) {
+                            match fan_out(s, d, dd, st, ht, item) {
                                 Ok(written) => {
                                     if written {
                                         st.pairs_written += 1;
@@ -764,7 +973,7 @@ impl OutputContext {
                                         }
                                         st.rc_gap_max = st.rc_gap_max.max(pair.rc_gap_magnitude);
                                     } else {
-                                        st.dedup_dropped += 1;
+                                        st.dedup_dropped_pairs += 1;
                                     }
                                 },
                                 Err(e) => {
@@ -798,13 +1007,16 @@ impl OutputContext {
         es.stats.nc_dedup_collapsed_lines += nc_stats.collapsed_lines;
         es.stats.nc_dedup_cluster_count += nc_stats.cluster_count;
         es.stats.nc_dedup_max_cluster_size = es.stats.nc_dedup_max_cluster_size.max(nc_stats.max_cluster_size);
+        es.stats.pairs_time_filtered += nc_stats.time_filtered;
+        es.stats.pairs_rc_filtered += nc_stats.rc_filtered;
+        es.stats.messages_capped += nc_stats.messages_capped;
 
         let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
         debug.phase4_pairs_generated(total_pairs);
         debug.emit_fan_out_done(
             total_pairs,
             es.stats.pairs_written - pairs_written_before,
-            es.stats.dedup_dropped - dedup_dropped_before,
+            es.stats.dedup_dropped_pairs - dedup_dropped_before,
             es.stats.nc_dedup_collapsed_lines,
             es.stats.nc_dedup_cluster_count,
         );
@@ -830,15 +1042,22 @@ impl OutputContext {
         device_store: &DeviceInfoStore,
         logger: &mut Logger,
     ) -> Result<OutputStats> {
-        // Flush hash writers before opening auxiliary outputs.
+        // Flush hash writers before the cleaning pass.
         self.sinks.flush_all()?;
+
+        // Run the disk dedup cleaning pass if active. This rewrites each output
+        // file to remove duplicate lines that were accepted in write-through mode.
+        if let Some(mut dd) = self.disk_dedup.take() {
+            let sinks_ref = &self.sinks;
+            dd.clean_all(|sink| sinks_ref.path(sink))?;
+        }
 
         // --- Per-AP unresolved-SSID summary ---
         //
-        // Timestamp ranges were captured during `emit` (so per-file mode
-        // sees correct values even after the stores are cleared). Walk the
-        // accumulated `timestamp_ranges` plus `unresolved_drops` in
-        // sorted-by-MAC order so the log lines are deterministic across runs.
+        // Timestamp ranges were captured during `emit` (so the values are
+        // correct even after the stores spill to disk). Walk the accumulated
+        // `timestamp_ranges` plus `unresolved_drops` in sorted-by-MAC order so
+        // the log lines are deterministic across runs.
         if !self.unresolved_drops.is_empty() {
             let mut aps: Vec<crate::types::MacAddr> = self.unresolved_drops.keys().copied().collect();
             aps.sort_unstable_by_key(|m| m.0);
@@ -853,45 +1072,61 @@ impl OutputContext {
 
         // --- Auxiliary outputs ---
         //
-        // Per CLAUDE.md rule 12 ("I/O errors abort"), every auxiliary writer must
-        // explicitly `flush()?` before its `BufWriter` is dropped. `BufWriter`'s
+        // Per the I/O-errors-abort invariant (ARCHITECTURE.md §4 invariant 10),
+        // every auxiliary writer must explicitly `flush()?` before its
+        // `BufWriter` is dropped. `BufWriter`'s
         // `Drop` impl swallows flush errors silently, so without an explicit flush
         // a disk-full mid-write or a closed-pipe event would silently truncate the
         // file and the process would still exit `0`.
 
         if let Some(path) = &paths.essid_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_essid_list(essid_set, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create ESSID list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_essid = write_essid_list(essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.probe_essid_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_probe_essid_list(probe_essid_set, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create probe-ESSID list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_probe = write_probe_essid_list(probe_essid_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_wordlist(wordlist_store, &mut f)?;
+            let file =
+                std::fs::File::create(path).map_err(|e| crate::types::Error::io(e, path.clone(), "create wordlist"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_wordlist = write_wordlist(wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.wordlist_scan {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create IE-scan wordlist"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_wordlist_scan =
+                write_wordlist_scan(scan_ies_store, essid_set, probe_essid_set, wordlist_store, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.identity_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_identities(identity_set, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create identity list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_identity = write_identities(identity_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.username_list {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_usernames(username_set, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create username list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_username = write_usernames(username_set, &mut f)?;
             f.flush()?;
         }
         if let Some(path) = &paths.device_info {
-            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, std::fs::File::create(path)?);
-            write_device_info(device_store, &mut f)?;
+            let file = std::fs::File::create(path)
+                .map_err(|e| crate::types::Error::io(e, path.clone(), "create device-info list"))?;
+            let mut f = BufWriter::with_capacity(OUTPUT_BUF_CAPACITY, file);
+            self.stats.entries_device = write_device_info(device_store, &mut f)?;
             f.flush()?;
         }
 
@@ -938,6 +1173,7 @@ mod tests {
         let paths = OutputPaths::default();
         let mut logger = Logger::new(None).unwrap();
 
+        let mut mem_monitor = crate::mem_monitor::MemMonitor::new();
         let stats = run_output(
             &msg_store,
             &pmkid_store,
@@ -956,6 +1192,7 @@ mod tests {
             EssidFilterConfig::default(),
             &mut logger,
             &DebugPrinter::new(false),
+            &mut mem_monitor,
         )
         .unwrap();
 

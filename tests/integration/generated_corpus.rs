@@ -42,7 +42,7 @@ fn binary_path() -> PathBuf {
 fn run_wpawolf(input: &Path) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let status = Command::new(&bin).arg("-o").arg(&combined).arg(input).status().expect("spawn wpawolf");
     assert!(status.success(), "wpawolf failed on {}", input.display());
@@ -53,7 +53,7 @@ fn run_wpawolf(input: &Path) -> String {
 fn run_wpawolf_multi(inputs: &[&Path]) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let mut cmd = Command::new(&bin);
     cmd.arg("-o").arg(&combined);
@@ -65,9 +65,15 @@ fn run_wpawolf_multi(inputs: &[&Path]) -> String {
     fs::read_to_string(&combined).unwrap_or_default()
 }
 
-/// Per-call nanosecond suffix so parallel test threads don't share temp paths.
-fn nanos_unique() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+/// Per-call unique suffix so parallel test threads -- which all share this
+/// process's PID -- never collide on a temp path. Uses a process-wide atomic
+/// counter, not the wall clock: under heavy `make check-all` load two threads
+/// sampled the same coarse `SystemTime` instant, generated the same `-o` temp
+/// filename, and clobbered each other -- interleaving one fixture's hash lines
+/// into another's output file and tripping the link-layer consistency assertion.
+fn unique_suffix() -> u128 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    u128::from(SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Capture wpawolf's stdout (where the stats summary is printed) for one
@@ -76,7 +82,7 @@ fn nanos_unique() -> u128 {
 fn run_wpawolf_capture_stats(input: &Path) -> String {
     let bin = binary_path();
     let combined =
-        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), nanos_unique()));
+        std::env::temp_dir().join(format!("wpawolf-test-{}-{}.combined", std::process::id(), unique_suffix()));
     let _ = fs::remove_file(&combined);
     let output = Command::new(&bin).arg("-o").arg(&combined).arg(input).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf failed on {}", input.display());
@@ -84,9 +90,103 @@ fn run_wpawolf_capture_stats(input: &Path) -> String {
 }
 
 #[test]
+fn rc_endianness_fixtures_emit_le_be_flags_under_rc_drift() {
+    // The replay-counter-endianness fixtures carry a byte-swapped replay
+    // counter. Under --rc-drift wpawolf resolves the pair via byte-swap and
+    // sets FLAG_LE (0x20) and FLAG_BE (0x40) in the message-pair byte. In the
+    // default WIDE mode the unbounded RC tolerance matches natively, so those
+    // flags are absent -- which is why this assertion runs with --rc-drift.
+    // This pins the last two message-pair flag bits the corpus can produce.
+    let fixtures = [
+        Path::new(CORPUS_ROOT).join("edge/endian_rc_m2_swapped.pcap"),
+        Path::new(CORPUS_ROOT).join("edge/endian_rc_m1_swapped.pcap"),
+    ];
+    let combined =
+        std::env::temp_dir().join(format!("wpawolf-endian-{}-{}.combined", std::process::id(), unique_suffix()));
+    let _ = fs::remove_file(&combined);
+    let mut cmd = Command::new(binary_path());
+    cmd.arg("--rc-drift=8").arg("-o").arg(&combined);
+    for f in &fixtures {
+        assert!(f.exists(), "missing endianness fixture {} -- run wpawolf-fixturegen", f.display());
+        cmd.arg(f);
+    }
+    let status = cmd.status().expect("spawn wpawolf");
+    assert!(status.success(), "wpawolf --rc-drift failed on the endianness fixtures");
+    let content = fs::read_to_string(&combined).unwrap_or_default();
+    // OR the message-pair byte (the final `*`-separated field) of every non-FT
+    // EAPOL line (WPA*03*), then check the LE (0x20) and BE (0x40) bits both
+    // appear across the corpus output. [FLAG_LE / FLAG_BE -- src/pair/mod.rs]
+    let mut flag_bits: u8 = 0;
+    for line in content.lines() {
+        if !line.starts_with("WPA*03*") {
+            continue;
+        }
+        flag_bits |= u8::from_str_radix(line.rsplit('*').next().unwrap_or(""), 16).unwrap_or(0);
+    }
+    assert!(flag_bits & 0x20 != 0, "FLAG_LE (0x20) not set on any endianness EAPOL line under --rc-drift");
+    assert!(flag_bits & 0x40 != 0, "FLAG_BE (0x40) not set on any endianness EAPOL line under --rc-drift");
+}
+
+#[test]
 fn corpus_root_exists() {
     let root = Path::new(CORPUS_ROOT);
     assert!(root.exists(), "missing corpus root -- run wpawolf-fixturegen first");
+}
+
+/// Packet-accounting invariant (STATS.md reconciliation identity 1): every packet
+/// wpawolf reads reaches exactly one terminal disposition, so `total_packets`
+/// equals the sum of the eight per-packet disposition counters. The banner
+/// surfaces any break as a "packets unaccounted (BUG)" / "frames multi-counted
+/// (BUG)" row. This drives the whole generated corpus through the binary -- which
+/// exercises management/data/control/extension frames plus the link-error and
+/// unknown-DLT drop paths -- and asserts neither BUG row ever appears. The spawned
+/// binary is a debug build, so `run()`'s `debug_assert_eq!` is a second backstop:
+/// a break aborts the process and `run_wpawolf_capture_stats`'s success assert
+/// fails.
+#[test]
+fn packet_accounting_holds_across_generated_corpus() {
+    let root = Path::new(CORPUS_ROOT);
+    if !root.exists() {
+        return; // corpus not generated; `corpus_root_exists` covers that case
+    }
+    let banner = run_wpawolf_capture_stats(root);
+    assert!(banner.contains("packets total"), "no banner captured:\n{banner}");
+    assert!(!banner.contains("unaccounted (BUG"), "packet accounting broke:\n{banner}");
+    assert!(!banner.contains("multi-counted (BUG"), "frames were multi-counted:\n{banner}");
+}
+
+/// The per-hash-type breakdown reports what the capture CONTAINS, not just what
+/// reached an output file. The SHA-384 family (types 8-11) has no legacy sink, so
+/// a run with only `--22000-out` writes none of it -- but the banner must still
+/// report those types as *found* (so an operator knows the capture holds crackable
+/// material their flags did not write). Drives a SHA-384 fixture with only
+/// `--22000-out` and asserts the type appears in the found/written block with
+/// written = 0, that "distinct hash types observed" still counts it, and that the
+/// "found but not written" alert fires.
+#[test]
+fn sha384_types_reported_as_found_without_a_matching_sink() {
+    let fixture = Path::new(CORPUS_ROOT).join("11_types/type08_psksha384_pmkid.pcap");
+    if !fixture.exists() {
+        return; // corpus not generated
+    }
+    let bin = binary_path();
+    let out22000 =
+        std::env::temp_dir().join(format!("wpawolf-sha384-{}-{}.22000", std::process::id(), unique_suffix()));
+    let _ = fs::remove_file(&out22000);
+    // ONLY --22000-out -- no -o, no --psk-sha384-out -- so SHA-384 has no sink.
+    let output = Command::new(&bin).arg("--22000-out").arg(&out22000).arg(&fixture).output().expect("spawn wpawolf");
+    assert!(output.status.success(), "wpawolf failed on the SHA-384 fixture");
+    let banner = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    // The SHA-384 PMKID type is found in the capture even though no sink wrote it.
+    assert!(banner.contains("PSK-SHA384-PMKID"), "SHA-384 type missing from found block:\n{banner}");
+    // The inventory counts it; the operator is told to add -o to capture it.
+    assert!(banner.contains("hash types found but not written"), "missing found-not-written alert:\n{banner}");
+    assert!(banner.contains("distinct hash types observed"), "missing distinct-types row:\n{banner}");
+    // Nothing was written to the only configured sink (lazy: file may not exist).
+    let written = fs::read_to_string(&out22000).map_or(0, |s| s.lines().count());
+    assert_eq!(written, 0, "SHA-384 must not reach the --22000-out sink");
+    let _ = fs::remove_file(&out22000);
 }
 
 #[test]
@@ -210,6 +310,41 @@ fn container_fixtures_emit_consistent_output() {
     for o in &outputs[1..] {
         assert_eq!(o, baseline, "container outputs diverge -- regression in src/input/*");
     }
+}
+
+/// Forcing the disk-backed dedup path (`WPAWOLF_MEM_THRESHOLD=0`, which spills
+/// immediately regardless of box RAM) must produce the same hash SET as the
+/// default in-memory path. This guards the disk-dedup + cleaning-pass machinery
+/// that the C2 mid-stream switch reuses (set-equivalence, ARCHITECTURE.md §4
+/// invariant 2). The mid-stream switch's line-base seeding is unit-tested
+/// separately in `output::disk_dedup`.
+#[test]
+fn disk_mode_output_set_matches_memory_mode() {
+    let root = Path::new(CORPUS_ROOT);
+    if !root.exists() {
+        return;
+    }
+    let bin = binary_path();
+    let run = |threshold: Option<&str>| -> Vec<String> {
+        let combined =
+            std::env::temp_dir().join(format!("wpawolf-diskcmp-{}-{}.combined", std::process::id(), unique_suffix()));
+        let _ = fs::remove_file(&combined);
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-o").arg(&combined).arg(root);
+        if let Some(t) = threshold {
+            cmd.env("WPAWOLF_MEM_THRESHOLD", t);
+        }
+        assert!(cmd.status().expect("spawn wpawolf").success(), "wpawolf must exit 0 (threshold={threshold:?})");
+        let mut lines: Vec<String> =
+            fs::read_to_string(&combined).unwrap_or_default().lines().map(str::to_owned).collect();
+        let _ = fs::remove_file(&combined);
+        lines.sort_unstable();
+        lines
+    };
+    let memory = run(None);
+    let disk = run(Some("0"));
+    assert!(!memory.is_empty(), "corpus should produce some hashes");
+    assert_eq!(memory, disk, "disk-backed dedup output set must equal memory-mode output set");
 }
 
 fn walk_dir_no_crash(rel: &str) {

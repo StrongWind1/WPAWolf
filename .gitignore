@@ -4,11 +4,13 @@ docs/
 
 # Top-level tools/ holds local-only scratch space. The wpawolf-fixturegen
 # crate (a workspace member, see tools/fixturegen/Cargo.toml) is committed.
-# tools/audit_citations.sh is the developer-side parity-citation audit
-# (skips cleanly when ref/ is missing) and is also committed.
+# tools/audit_citations.sh (parity-citation audit; skips cleanly when ref/ is
+# missing) and tools/audit_stats.sh (STATS.md vs stats.rs drift gate) are
+# also committed.
 tools/*
 !tools/fixturegen/
 !tools/audit_citations.sh
+!tools/audit_stats.sh
 
 # =============================================================================
 # .gitignore -- Rust/Cargo / VS Code / Linux / macOS / Windows

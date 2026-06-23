@@ -2,7 +2,7 @@
 //!
 //! `DebugPrinter` writes timestamped, phase-annotated lines to stdout. When `enabled = false`
 //! every method is a no-op except `memory_check`, which always fires a `[MEMORY WARNING]` line
-//! when the system's used-RAM fraction exceeds `MEM_WARN_PCT` (80 %).
+//! when the system's used-RAM fraction exceeds `MEM_WARN_PCT_TENTHS` (80 %).
 //!
 //! ## Volume design
 //!
@@ -34,7 +34,7 @@ use crate::types::{MacAddr, MsgType};
 // --- Constants ---
 
 /// Fraction of total RAM (0-100) above which `memory_check` always prints, even
-/// without `--debug`. Matches the threshold described in the `--debug` help text.
+/// without `--debug`. The same 80 % threshold drives the disk-backed fallback.
 const MEM_WARN_PCT_TENTHS: u64 = 800; // 80.0% expressed as tenths
 
 /// Groups above this cost get full per-group logging and a `[HEAVY]` flag in the survey.
@@ -158,7 +158,7 @@ impl DebugPrinter {
     ///
     /// Covers: per-type EAPOL totals, cost-tier group counts, saturation drops, and
     /// the top-`n` groups by pairing cost (from `top_groups`). Shows the exact load
-    /// Phase 4 is about to process so OOM culprits are visible before the crash.
+    /// Phase 4 is about to process, so heavy groups are visible before pairing runs.
     pub fn pre_phase4_store_summary(
         &self,
         m1_total: u64,
@@ -294,7 +294,7 @@ impl DebugPrinter {
 
     /// Checks system RAM on Linux.
     ///
-    /// Always emits `[MEMORY WARNING]` when usage >= `MEM_WARN_PCT`, regardless of
+    /// Always emits `[MEMORY WARNING]` when usage >= `MEM_WARN_PCT_TENTHS`, regardless of
     /// whether `--debug` is set. Below the threshold, emits a regular `[debug]` line only
     /// when `enabled` is true.
     ///
@@ -358,12 +358,16 @@ impl GroupSummary {
                 MsgType::M4 => m4 += 1,
             }
         }
-        let cost = (m1 as u64) * (m2 as u64)
-            + (m1 as u64) * (m4 as u64)
-            + (m3 as u64) * (m2 as u64)
-            + (m2 as u64) * (m3 as u64)
-            + (m4 as u64) * (m3 as u64)
-            + (m3 as u64) * (m4 as u64);
+        // Saturating arithmetic: mirrors `pair::group_counts_and_cost`;
+        // an uncapped hyperactive group's products can overflow u64, and this
+        // survey runs before Phase 4, so it must not panic first.
+        let cost = (m1 as u64)
+            .saturating_mul(m2 as u64)
+            .saturating_add((m1 as u64).saturating_mul(m4 as u64))
+            .saturating_add((m3 as u64).saturating_mul(m2 as u64))
+            .saturating_add((m2 as u64).saturating_mul(m3 as u64))
+            .saturating_add((m4 as u64).saturating_mul(m3 as u64))
+            .saturating_add((m3 as u64).saturating_mul(m4 as u64));
         Self { ap, sta, m1, m2, m3, m4, cost }
     }
 }

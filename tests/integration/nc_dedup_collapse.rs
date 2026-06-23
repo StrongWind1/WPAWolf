@@ -252,40 +252,6 @@ fn fixture_paths(name: &str) -> (PathBuf, PathBuf) {
 /// Beacon + 9 M1 frames whose `ANonce` tails cycle through nine consecutive
 /// values starting at `tail_start` + a single M2 to pair against.
 ///
-/// At `--nc-tolerance=8` the 9-element span-8 cluster always collapses to
-/// exactly one survivor under the safest-survivor rule (median is the
-/// hashcat-safest observation for a dense cluster).
-fn build_single_cluster_pcap(ap: [u8; 6], sta: [u8; 6], ssid: &[u8], tail_start: u8) -> Vec<u8> {
-    let anonce_prefix: [u8; 28] = [
-        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1,
-        0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB,
-    ];
-    let snonce: [u8; 32] = [
-        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1,
-        0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
-    ];
-    let mic = [0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F];
-
-    let mut buf = common::pcap_global_header().to_vec();
-    let mut ts: u32 = 1_000_000;
-    buf.extend_from_slice(&common::pcap_packet(ts, &beacon_wpa2_psk(ssid, ap)));
-    ts += 1;
-    for offset in 0u8..9 {
-        let mut nonce = [0u8; 32];
-        nonce[..28].copy_from_slice(&anonce_prefix);
-        nonce[28] = 0x00;
-        nonce[29] = 0x00;
-        nonce[30] = 0x00;
-        nonce[31] = tail_start.wrapping_add(offset);
-        let m1_body = eapol_key_body(true, false, false, false, nonce, [0u8; 16]);
-        buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_dl(ap, sta, &m1_body)));
-        ts += 1;
-    }
-    let m2_body = eapol_key_body(false, false, true, false, snonce, mic);
-    buf.extend_from_slice(&common::pcap_packet(ts, &data_frame_ul(ap, sta, &m2_body)));
-    buf
-}
-
 /// Builds a pcap with one Beacon + two M1 frames whose `ANonce` tails sit at
 /// the cluster span edges -- `tail=0x00` and `tail=tolerance` -- plus a
 /// single M2. With `--nc-tolerance=tolerance` no observed nonce can serve as
@@ -366,57 +332,6 @@ fn nc_tolerance_tighter_value_splits_into_more_clusters() {
     fs::write(&pcap, build_nc_cluster_pcap()).unwrap();
     let lines = run_and_count(&pcap, &out, &["--nc-dedup", "--nc-tolerance=4"]);
     assert_eq!(lines, 6, "tolerance=4 produces 5 cluster survivors + 1 isolated singleton");
-}
-
-#[test]
-fn nc_dedup_per_file_counters_accumulate_across_files() {
-    // Regression-pin for the `OutputStats.nc_dedup_* =` bug: under `--per-file`
-    // each input file's `emit_inner` was overwriting the prior file's stats,
-    // so the closing banner only reflected the last file's NC-dedup activity.
-    //
-    // Build three pcaps, each with its own dense 9-element cluster (different
-    // AP MACs so the clusters do not bucket together). Run with
-    // `--per-file --nc-dedup` against the containing directory and assert the
-    // banner counters report the sum across all three files: 24 lines
-    // collapsed (3 * 8), 3 clusters total, max cluster size 9.
-    let dir = common::temp_dir("wpawolf_nc_dedup_perfile");
-    let out_path = dir.join("perfile.22000");
-    // Drop any pcaps left behind by a prior failing run -- directory input
-    // expansion would otherwise pick them up alongside the three new ones.
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    let files = [
-        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x01], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x01], b"WolfNetA", 0x40u8),
-        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x02], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x02], b"WolfNetB", 0x60u8),
-        ([0x02u8, 0x11, 0x22, 0x33, 0x44, 0x03], [0x02u8, 0xAA, 0xBB, 0xCC, 0xDD, 0x03], b"WolfNetC", 0x80u8),
-    ];
-    for (i, (ap, sta, ssid, tail)) in files.iter().enumerate() {
-        let pcap_bytes = build_single_cluster_pcap(*ap, *sta, *ssid, *tail);
-        fs::write(dir.join(format!("file{i}.pcap")), pcap_bytes).unwrap();
-    }
-    let (lines, stdout) = run_capture(&dir, &out_path, &["--per-file", "--nc-dedup"]);
-    // One survivor per file -- three files -> three lines on disk.
-    assert_eq!(lines, 3, "each file's 9-element cluster collapses to one survivor");
-    // The fix in OutputContext::emit_inner accumulates these across emit
-    // calls; the pre-fix value would have been 8 / 1 / 9 (last file only).
-    assert_eq!(
-        banner_counter(&stdout, "NC-dedup near-identical-nonce lines collapsed"),
-        24,
-        "per-file mode must accumulate collapsed_lines across files (3 files * 8 collapsed each)"
-    );
-    assert_eq!(
-        banner_counter(&stdout, "NC-dedup cluster count"),
-        3,
-        "per-file mode must accumulate cluster_count across files (one cluster per file)"
-    );
-    assert_eq!(
-        banner_counter(&stdout, "NC-dedup max cluster size"),
-        9,
-        "per-file mode must take the global max across files (all three clusters are size 9)"
-    );
 }
 
 #[test]

@@ -230,6 +230,17 @@ impl EssidMap {
         self.map.len()
     }
 
+    /// Returns the largest number of distinct SSID variants recorded for any
+    /// single AP, or 0 when the map is empty.
+    ///
+    /// Feeds the Phase 3 `ESSID changes (per-AP maximum)` banner row (variants
+    /// minus the initial SSID): the same per-AP fan-out that drives the
+    /// multi-ESSID inflation filter, surfaced as a capture-quality signal.
+    #[must_use]
+    pub fn max_ssid_variants(&self) -> usize {
+        self.map.values().map(Vec::len).max().unwrap_or(0)
+    }
+
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.
     ///
     /// Sums `HashMap` bucket overhead, every `Vec<EssidEntry>` allocation,
@@ -287,23 +298,36 @@ impl EssidMap {
     where
         F: FnMut(MacAddr) -> MacAddr,
     {
-        let old_map = std::mem::take(&mut self.map);
-        let mut merged_link_macs: u64 = 0;
-        for (ap, entries) in old_map {
-            let canon = canonicalize(ap);
-            if canon != ap {
-                merged_link_macs += 1;
-            }
-            for entry in entries {
-                // Reuse the same dedup-by-bytes / earliest-timestamp semantics as
-                // `insert`. The hcx-essid filter was already applied at original
-                // insert time, so re-checking here is a no-op for accepted entries.
-                // The Arc<[u8]> already lives in the interner; `insert` will find
-                // it on the dedup path and reuse the existing entry.
-                self.insert(canon, &entry.essid, entry.timestamp);
+        // Additive: keep every link-MAC SSID entry and ALSO copy it under the
+        // canonical MLD MAC. Both the link-keyed and the MLD-keyed forms of a
+        // handshake now reach output (see `MessageStore::canonicalize_pairs`), so
+        // ESSID resolution must succeed for both: the link-keyed line resolves via
+        // the original entry, the MLD-keyed line via the copy. The prior version
+        // moved the entry to the MLD MAC, which left the link-keyed line with no
+        // SSID and dropped it as uncrackable.
+        //
+        // Not rebuilding the map is also what preserves the per-SSID `count`. The
+        // old `mem::take` + re-insert reset every count to 1 (re-inserting one
+        // entry bumps 0->1, not by its stored count), which silently defeated the
+        // frequency-weighted `ssids_for_emit` collapse -- it cannot pick a dominant
+        // SSID when every variant looks like a count-1 bit-flip. Preserving counts
+        // here restores that collapse, so RF-rotted SSID variants are dropped as
+        // designed (their crackable dominant-SSID sibling is kept).
+        let mut additions: Vec<(MacAddr, Arc<[u8]>, u64)> = Vec::new();
+        let mut copied_link_macs: u64 = 0;
+        for (ap, entries) in &self.map {
+            let canon = canonicalize(*ap);
+            if canon != *ap {
+                copied_link_macs += 1;
+                for entry in entries {
+                    additions.push((canon, Arc::clone(&entry.essid), entry.timestamp));
+                }
             }
         }
-        merged_link_macs
+        for (canon, essid, timestamp) in additions {
+            self.insert(canon, &essid, timestamp);
+        }
+        copied_link_macs
     }
 }
 
@@ -641,11 +665,11 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_pairs_folds_link_macs_into_mld() {
-        // Two link MACs (0x11, 0x22) advertising the same SSID under their own
-        // raw addresses get folded into one MLD canonical key (0xAA). After
-        // canonicalize_pairs, all_for_ap(MLD) returns the SSID; the link MAC
-        // entries no longer exist.
+    fn canonicalize_pairs_copies_link_ssids_to_mld_and_keeps_links() {
+        // Two link MACs (0x11, 0x22) advertising the same SSID get an MLD-keyed
+        // copy (0xAA) added, while the link MAC entries are KEPT. ESSID resolution
+        // must succeed for a handshake emitted under either the link key or the
+        // MLD key, so both forms must carry the SSID.
         let mut m = EssidMap::new();
         let link_a = mac(0x11);
         let link_b = mac(0x22);
@@ -654,16 +678,17 @@ mod tests {
         m.insert(link_b, b"HomeNet", 200); // 6 GHz link MAC, same SSID
         assert_eq!(m.ap_count(), 2);
 
-        let merged = m.canonicalize_pairs(|x| if x == link_a || x == link_b { mld } else { x });
+        let copied = m.canonicalize_pairs(|x| if x == link_a || x == link_b { mld } else { x });
 
-        assert_eq!(merged, 2, "both link MACs should have been merged");
-        assert_eq!(m.ap_count(), 1, "single MLD key remains");
+        assert_eq!(copied, 2, "both link MACs received an MLD copy");
+        assert_eq!(m.ap_count(), 3, "two link keys kept + one MLD key added");
         let entries = m.all_for_ap(&mld);
-        assert_eq!(entries.len(), 1, "duplicate SSID merged into one entry");
+        assert_eq!(entries.len(), 1, "duplicate SSID deduped into one MLD entry");
         assert_eq!(&entries[0].essid[..], b"HomeNet");
         assert_eq!(entries[0].timestamp, 100, "earliest timestamp preserved");
-        assert!(m.all_for_ap(&link_a).is_empty(), "link MAC entry gone after fold");
-        assert!(m.all_for_ap(&link_b).is_empty(), "link MAC entry gone after fold");
+        // Link entries survive so single-link lines still resolve their SSID.
+        assert_eq!(&m.all_for_ap(&link_a)[0].essid[..], b"HomeNet", "link_a entry kept");
+        assert_eq!(&m.all_for_ap(&link_b)[0].essid[..], b"HomeNet", "link_b entry kept");
     }
 
     #[test]

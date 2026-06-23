@@ -14,16 +14,17 @@ use crate::crypto::{
     derive_ptk, kck_from_ptk, mic_len,
 };
 use crate::frame::eapol::{Direction, KeySpec, Message, body_for_mic, build, data_frame, mic_offset};
-use crate::frame::ie::{FteInputs, fte, mde, rsn_ie};
+use crate::frame::ie::{FteInputs, fte, mde, rsn_ie, wpa1_vendor_ie};
 use crate::frame::kde::pmkid as pmkid_kde;
 use crate::{Error, Result};
 
-/// `MDID` used by every FT fixture in the catalog. Stored in wire byte order
-/// (little-endian octets per `[IEEE 802.11-2024]` §9.4.2.45) so it matches
-/// 1) the `MDE` IE bytes emitted in M2 / M3 Key Data and AssocReq, 2) the
-/// raw `mdid` field hashcat reads back from the WPA*03* line, and 3) the
-/// `MDID` octets fed to the FT-R0 KDF -- all three must agree byte-for-byte
-/// or `PMK-R1Name` won't match what `module_37100.c` derives.
+/// `MDID` used by every FT fixture in the catalog.
+///
+/// Stored in wire byte order (little-endian octets per `[IEEE 802.11-2024]`
+/// §9.4.2.45) so it matches the `MDE` IE bytes emitted in M2 / M3 Key Data and
+/// `AssocReq`, the raw `mdid` field hashcat reads back from the `WPA*03*` line,
+/// and the `MDID` octets fed to the FT-R0 KDF -- all three must agree
+/// byte-for-byte or `PMK-R1Name` won't match what `module_37100.c` derives.
 pub const FT_MDID: [u8; 2] = [0x34, 0x12];
 /// `R0KH-ID` used by every FT fixture. See [`FT_MDID`].
 pub const FT_R0KH_ID: &[u8] = b"r0kh";
@@ -137,7 +138,13 @@ impl Handshake {
         // calls `extract_ft_fields(&key.key_data)`; it requires both tag 54
         // and tag 55 to fire). Without this, FT EAPOL hashes (Type 7 / 11)
         // never reach the FT-EAPOL emission gate.
-        let m2_key_data = if inputs.wpa1 { Vec::new() } else { wpa2_or_ft_key_data(inputs, inputs.akm_byte, true) };
+        // WPA1 M2 carries the STA's WPA1 vendor IE in Key Data, as real WPA1
+        // four-way handshakes do. Without it, wpawolf's Tier-1 classifier sees
+        // a MIC'd uplink frame with empty Key Data and labels it M4 (not M2),
+        // so the M2-anchored combos N1E2 / N3E2 / N2E3 never form. RSN (WPA2)
+        // M2 gets its RSN IE the same way.
+        let m2_key_data =
+            if inputs.wpa1 { wpa1_vendor_ie() } else { wpa2_or_ft_key_data(inputs, inputs.akm_byte, true) };
         let m2 = build_frame(inputs, Message::M2, inputs.replay_counter, inputs.s_nonce, m2_key_data, &kck, true)?;
 
         // M3: AP -> STA, ANonce, MIC, Install + Secure. RC = M1.RC + 1. For
@@ -198,8 +205,16 @@ fn wpa2_or_ft_key_data(inputs: &Inputs, akm_byte: u8, include_ft: bool) -> Vec<u
 /// Build one EAPOL-Key wire frame, computing the MIC if requested.
 ///
 /// `with_mic = true` zeroes the MIC, computes HMAC over the EAPOL body, and
-/// patches the result back into the frame in place.
-fn build_frame(
+/// patches the result back into the frame in place. Exposed to the catalog so
+/// the replay-counter-endianness fixtures can build a single message with a
+/// byte-swapped `rc` value -- `build` writes `rc` big-endian, so passing
+/// `rc.swap_bytes()` yields the little-endian wire bytes a buggy AP firmware
+/// emits, and the MIC is computed over those exact bytes (still crackable).
+///
+/// # Errors
+///
+/// Forwards any MIC-computation or framing error.
+pub(crate) fn build_frame(
     inputs: &Inputs,
     msg: Message,
     rc: u64,

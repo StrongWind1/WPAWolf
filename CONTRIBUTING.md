@@ -4,14 +4,14 @@ Thanks for wanting to contribute. `wpawolf` is a narrow-scope tool (WPA/WPA2/WPA
 
 ## Before you write code
 
-1. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) end-to-end. Pay particular attention to §2 (the eleven hash categories), §3 (5-phase pipeline), §4 (critical invariants), and §8 (FR-* wire-level requirements -- find the ID your change relates to).
-2. Skim [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the `WPA*01*` -- `WPA*11*` line format your output must match, and [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8 for the verified per-category hashcat support matrix.
+1. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) end-to-end. Pay particular attention to §2 (the eleven hash categories), §3 (5-phase pipeline), §4 (critical invariants), and §8 (FR-* wire-level requirements; find the ID your change relates to).
+2. Skim [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the `WPA*01*`-`WPA*11*` line format your output must match, and [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8 for the verified per-category hashcat support matrix.
 
 ## Repository layout
 
 ```
 wpawolf/
-├── src/                          Rust source (input/, link/, ieee80211/, store/, pair/, output/)
+├── src/                          Rust source (input/, link/, ieee80211/, extract/, store/, pair/, output/)
 ├── tests/                        Integration tests + binary fixtures (incl. tests/fixtures/generated/ corpus)
 ├── tools/fixturegen/             Workspace crate that emits the test-capture corpus (separate Cargo crate)
 ├── .github/                      CI / Security / Release workflows + issue + PR templates
@@ -26,7 +26,7 @@ wpawolf/
 └── Makefile                      Developer workflow + cross-platform release builds
 ```
 
-The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 904 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
+The project runs strict clippy (pedantic + nursery + cargo) with zero warnings, and the test suite covers 942 cases across lib + binary + integration. An external multi-GB regression dataset (out-of-tree) is exercised opportunistically before each release on real-world traffic that is too noisy or legally encumbered to commit.
 
 ## Before you open a PR
 
@@ -35,7 +35,7 @@ make check-all
 make check-parity   # only when touching pairing / output / extraction
 ```
 
-`make check-all` runs, in order: `fmt`, `clippy` (zero warnings), `cargo deny`, `cargo check`, `cargo test`, `cargo doc` with warnings-as-errors, ASCII hygiene, LF hygiene, and unused-dependency detection. A green `check-all` is required for review.
+`make check-all` runs, in order: `fmt`, `clippy` (zero warnings), `cargo deny`, the `audit-citations` hcxpcapngtool line-citation check, the `audit-stats` banner-contract check ([`STATS.md`](STATS.md) vs `src/stats.rs`, both directions), `cargo check`, `cargo test`, `cargo doc` with warnings-as-errors, ASCII hygiene, LF hygiene, and unused-dependency detection. A green `check-all` is required for review.
 
 `make check-parity` re-runs the superset test against `hcxpcapngtool` with `CI=true` set, which converts a missing or stale oracle from a soft skip into a hard failure. Run this whenever you change anything in `src/pair/`, `src/output/`, `src/store/`, or `src/extract/`.
 
@@ -68,7 +68,7 @@ If hcxpcapngtool is missing or older than 7.0.1, the test prints a clearly-tagge
 
 ## Dependency additions
 
-Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 4 (`flate2`, `clap`, `rayon`, `sysinfo`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
+Require a paragraph-long justification in the PR body addressing the rejected-crate policy in [`ARCHITECTURE.md §4`](ARCHITECTURE.md). Bar is high: target runtime dep count is 5 (`flate2`, `crc32fast`, `clap`, `rayon`, `sysinfo`). Dev-dependencies are less restrictive but still subject to `cargo deny` licence allow-list.
 
 ## Adding a capture fixture
 
@@ -76,7 +76,7 @@ Require a paragraph-long justification in the PR body addressing the rejected-cr
 - Over 1 MiB, keep out-of-tree and reference it from benchmarks only.
 - **Redact** real ESSIDs and client MAC addresses unless the capture comes from a lab network you control. wireshark's *Edit → Preferences → Name Resolution* + `editcap` can help.
 
-The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 75-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values — 117 of 123 lines crack end-to-end through hashcat 7.1.2 with PSK `hashcat!` (the 6 that don't are documented hashcat kernel limitations, see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8.1).
+The companion crate at [`tools/fixturegen/`](tools/fixturegen/) emits a deterministic 79-fixture pcap/pcapng corpus covering every (hash category × PMKID site × N#E# combo × link-layer × edge case) tuple, with cryptographically valid PMK / PMKID / MIC values; every legacy-sink line cracks end-to-end through hashcat 7.1.2 with PSK `hashcat!` except the documented kernel limitations (the PSK-SHA-256 PMKID lines and the two APLESS FT combos; see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §8).
 
 ## Reporting hashcat / hcxtools gaps
 

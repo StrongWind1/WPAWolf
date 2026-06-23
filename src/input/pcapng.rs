@@ -556,7 +556,7 @@ impl<R: Read> PacketReader for PcapngReader<R> {
     ///
     /// Returns `Ok(None)` only at clean EOF. I/O errors propagate as `Err`. Malformed
     /// blocks that can be skipped (short IDB, unregistered EPB interface) are logged to
-    /// stderr and the loop continues.
+    /// stdout and the loop continues.
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         loop {
             match self.read_next_block()? {

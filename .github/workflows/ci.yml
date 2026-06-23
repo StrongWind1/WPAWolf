@@ -21,7 +21,7 @@
 #   cargo test  -- compiles and runs unit + integration tests.
 #   cargo doc   -- builds HTML API documentation from doc-comments.
 #   clippy      -- the Rust linter. Part of the standard toolchain.
-#   MSRV        -- Minimum Supported Rust Version. wpawolf declares 1.85.
+#   MSRV        -- Minimum Supported Rust Version. wpawolf declares 1.95.
 # =============================================================================
 
 name: CI
@@ -226,11 +226,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # msrv -- Minimum Supported Rust Version. Cargo.toml declares
-  # `rust-version = "1.85"`. This job proves we haven't accidentally used a
+  # `rust-version = "1.95"`. This job proves we haven't accidentally used a
   # language feature newer than that.
   # ---------------------------------------------------------------------------
   msrv:
-    name: msrv (1.85)
+    name: msrv (1.95)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -239,14 +239,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.85 toolchain
-        # rust-toolchain.toml pins a different version for primary jobs; here
+      - name: Install Rust 1.95 toolchain
+        # rust-toolchain.toml uses stable (latest) for primary jobs; here
         # we install a second toolchain side-by-side and make it the default
         # for this job only. --profile minimal skips extras.
         run: |
           set -euo pipefail
-          rustup toolchain install 1.85.0 --profile minimal --component clippy
-          rustup default 1.85.0
+          rustup toolchain install 1.95.0 --profile minimal --component clippy
+          rustup default 1.95.0
 
       - name: Cache cargo build artefacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5

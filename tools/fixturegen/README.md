@@ -27,7 +27,7 @@ cargo test -p wpawolf-fixturegen --lib
 ```
 
 Run the language-independent SHA-384 KAT oracle (pure Python stdlib, no
-deps -- cross-checks `crypto.rs` against `hmac` / `hashlib` / `pbkdf2_hmac`):
+deps; cross-checks `crypto.rs` against `hmac` / `hashlib` / `pbkdf2_hmac`):
 
 ```sh
 python3 tools/fixturegen/scripts/verify_sha384.py             # quiet
@@ -72,17 +72,17 @@ mkdir -p /tmp/wpawolf-verify
     tests/fixtures/generated
 
 # 4. Run hashcat (install separately; this repo does not vendor it).
-#    PSK is "hashcat!" (8 chars -- WPA's 8-63 byte minimum).
+#    PSK is "hashcat!" (8 chars, WPA's 8-63 byte minimum).
 #    Use -D 1 to force the CPU OpenCL backend if no GPU is available.
 echo 'hashcat!' > /tmp/wpawolf-verify/wordlist.txt
 
-# 4a. Mode 22000 -- WPA-PBKDF2-PMKID+EAPOL: WPA1 / WPA2 / PSK-SHA256 lines.
+# 4a. Mode 22000: WPA-PBKDF2-PMKID+EAPOL: WPA1 / WPA2 / PSK-SHA256 lines.
 hashcat -m 22000 -D 1 \
     /tmp/wpawolf-verify/all.22000 \
     /tmp/wpawolf-verify/wordlist.txt \
     -O --runtime=120 --potfile-path=/tmp/wpawolf-verify/cracked.22000.pot
 
-# 4b. Mode 37100 -- FT-PSK (802.11r): the AKM-4 (SHA-256) FT lines crack here.
+# 4b. Mode 37100: FT-PSK (802.11r): the AKM-4 (SHA-256) FT lines crack here.
 #     hashcat 37100 only implements the SHA-256 FT chain, so wpawolf no
 #     longer routes FT-PSK-SHA-384 lines into the legacy `WPA*04*` sink --
 #     `legacy_sink_for` in `src/output/mod.rs` skips types 10/11. The
@@ -108,11 +108,11 @@ type, walking the canonical 75-fixture corpus:
 | PSK-SHA-256      |    4 | **does not crack**      | Hashcat 22000 PMKID kernel computes HMAC-SHA-1 only; line carries HMAC-SHA-256-128 PMKID. Lines remain on `--psk-sha256-out` / `-o`. |
 | PSK-SHA-256      |    5 | cracks                  | KDV=3, AES-128-CMAC MIC; `m22000_aux3` branches on the trailing flag byte |
 | FT-PSK (SHA-256) |    6 | cracks                  | PMK-R1Name; mode 37100 `m37100_aux1` kernel                          |
-| FT-PSK (SHA-256) |    7 | partial                 | M2-anchored combos (N1E2 / N3E2 / N3E4) crack; APLESS combos N2E3 / N4E3 (`*13*` / `*14*`) **do not** -- hashcat 37100 hardcodes M2-only nonce ordering in `module_37100.c:702`. See `HASHCAT-CURRENT-FORMATS.md` §8.1. Documented, not fixed -- lines remain on `--ft-out` / `-o`. |
-| PSK-SHA-384      |    8 | n/a                     | `legacy_sink_for` skips writing to `--22000-out` -- no kernel exists for HMAC-SHA-384 PMKID. Lines on `--psk-sha384-out` / `-o`. |
-| PSK-SHA-384      |    9 | n/a                     | `legacy_sink_for` skips -- 24 B HMAC-SHA-384-192 MIC at KDV=0; loader rejects keyver=0. Lines on `--psk-sha384-out` / `-o`. |
-| FT-PSK-SHA-384   |   10 | n/a                     | `legacy_sink_for` skips -- needs FT-KDF-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
-| FT-PSK-SHA-384   |   11 | n/a                     | `legacy_sink_for` skips -- 24 B MIC + FT-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
+| FT-PSK (SHA-256) |    7 | partial                 | M2-anchored combos (N1E2 / N3E2 / N3E4) crack; APLESS combos N2E3 / N4E3 (`*13*` / `*14*`) **do not**; hashcat 37100 hardcodes M2-only nonce ordering in `module_37100.c:702`. See `HASHCAT-CURRENT-FORMATS.md` §8.1. Documented, not fixed; lines remain on `--ft-out` / `-o`. |
+| PSK-SHA-384      |    8 | n/a                     | `legacy_sink_for` skips writing to `--22000-out`; no kernel exists for HMAC-SHA-384 PMKID. Lines on `--psk-sha384-out` / `-o`. |
+| PSK-SHA-384      |    9 | n/a                     | `legacy_sink_for` skips: 24 B HMAC-SHA-384-192 MIC at KDV=0; loader rejects keyver=0. Lines on `--psk-sha384-out` / `-o`. |
+| FT-PSK-SHA-384   |   10 | n/a                     | `legacy_sink_for` skips: needs FT-KDF-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
+| FT-PSK-SHA-384   |   11 | n/a                     | `legacy_sink_for` skips: 24 B MIC + FT-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
 
 End-to-end corpus walk numbers (PSK = `hashcat!`):
 
@@ -120,13 +120,13 @@ End-to-end corpus walk numbers (PSK = `hashcat!`):
 | ----------------- | ------------------: | ---------------: | -----------------: | -------------------------------------------------- |
 | `--22000-out`     |                 108 |               73 |                  5 | Type 4 PSK-SHA-256 PMKID (kernel limitation)       |
 | `--37100-out`     |                  15 |                9 |                  2 | Type 7 APLESS combos N2E3 / N4E3 (kernel limitation) |
-| `-o` combined     |                 147 |        n/a -- per-AKM sink, not fed to hashcat                       |
+| `-o` combined     |                 147 |        n/a: per-AKM sink, not fed to hashcat                       |
 
 Net: of 123 lines routed into hashcat-compatible sinks, **117 cracked**
 (95.1 %). The 7 that did not are all attributable to documented
 hashcat-7.1.2 kernel limitations.
 
-`n/a` -- wpawolf's `legacy_sink_for` in `src/output/mod.rs` deliberately
+`n/a`: wpawolf's `legacy_sink_for` in `src/output/mod.rs` deliberately
 omits these hash types from `--22000-out` / `--37100-out` because no
 compatible hashcat kernel exists. The per-AKM sinks
 (`--psk-sha384-out` / `--ft-psk-sha384-out`) and combined `-o` sink still
@@ -204,20 +204,20 @@ Why emit them at all?
 
 ## Module map
 
-- `crypto.rs` -- PMK (PBKDF2-HMAC-SHA1), PTK (PRF-SHA1 / KDF-SHA-256 /
+- `crypto.rs`: PMK (PBKDF2-HMAC-SHA1), PTK (PRF-SHA1 / KDF-SHA-256 /
   KDF-SHA-384), PMKID (`Truncate-128(HMAC-Hash(PMK, "PMK Name" || AA || SPA))`),
   MIC (HMAC-MD5 / HMAC-SHA1-128 / AES-128-CMAC / HMAC-SHA-384-192). All
   primitives anchored to KATs cross-checked against Python `hashlib` /
   `cryptography`.
-- `frame/` -- typed builders for 802.11 management frames, EAPOL-Key M1-M4,
+- `frame/`: typed builders for 802.11 management frames, EAPOL-Key M1-M4,
   KDEs, RSN IE, RSNXE, MDE, FTE, vendor IEs (WPA1, OSEN, WPS).
-- `linklayer.rs` -- raw 802.11, radiotap (with optional FCS bit), PPI, Prism,
+- `linklayer.rs`: raw 802.11, radiotap (with optional FCS bit), PPI, Prism,
   AVS, and Prism-wrapping-AVS link-layer wrappers.
-- `pcap_writer.rs` -- pcap (10 magic variants) and pcapng (LE/BE sections)
+- `pcap_writer.rs`: pcap (10 magic variants) and pcapng (LE/BE sections)
   serialisers, plus gzip wrapping via `flate2`.
-- `handshake.rs` -- orchestrates a full M1-M4 sequence with valid crypto for
+- `handshake.rs`: orchestrates a full M1-M4 sequence with valid crypto for
   one `(PSK, SSID, AP, STA, AKM)` tuple.
-- `catalog.rs` -- the corpus enumerator: 11 hash-type fixtures + S1-S20
+- `catalog.rs`: the corpus enumerator: 11 hash-type fixtures + S1-S20
   PMKID sources + 6 N#E# combos + edge cases (FCS strip, gzip, pcapng).
 
 ## Reuse, not re-invent
@@ -234,5 +234,5 @@ The crate inherits the workspace `[lints.*]` policy from the repo root:
 `unsafe_code = "forbid"`, full clippy `pedantic + nursery + cargo`, all
 restriction lints (no `unwrap` / `expect` / `panic` / `dbg` / `todo`), and
 `-D warnings` from `.cargo/config.toml`. Run `make check-all` before
-committing -- it gates fmt, clippy zero-warnings, cargo deny, all tests,
+committing; it gates fmt, clippy zero-warnings, cargo deny, all tests,
 rustdoc, ASCII / LF hygiene, and unused-deps detection.

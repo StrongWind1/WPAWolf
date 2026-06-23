@@ -21,7 +21,7 @@ use super::common::{is_eapol_key_packet, is_eapol_llc, is_preauth_llc, mesh_cont
 /// using the direction-based tree (Tier 1). For WDS relay frames (ToDS=1, FromDS=1),
 /// defers EAPOL classification to Phase 1.5 by storing in `pending_eapol`.
 /// Falls back to EAP parsing for identity/username extraction when the corresponding
-/// output flags are set. See `ARCHITECTURE.md §8 FR-DATA-*`.
+/// output flags are set. See `ARCHITECTURE.md §8.3 FR-80211-3`.
 pub fn process_data(
     mac_hdr: &frame::MacHeader,
     body: &[u8],
@@ -39,10 +39,21 @@ pub fn process_data(
     fragment_store: &mut FragmentStore,
     logger: &mut Logger,
 ) {
-    // Count WPA/WEP encrypted data frames (Protected Frame bit set).
+    // Count encrypted data frames (Protected Frame bit set), split WEP vs
+    // WPA-family on the ExtIV bit: byte 3 of the protected body is the KeyID
+    // octet, and bit 5 (0x20) is Extended IV -- 0 for WEP ([IEEE 802.11-2024]
+    // §12.3.4.2), 1 for TKIP/CCMP/GCMP ([IEEE 802.11-2024] §12.5.2.2). Bodies
+    // too short to carry the KeyID octet stay in the WPA bucket (wire-bit
+    // driven, no guessing beyond the flag-defined octet).
     // [IEEE 802.11-2024] §9.2.4.1.1 bit B14
     if mac_hdr.protected {
-        stats.wpa_encrypted_data += 1;
+        if let Some(&key_id_byte) = body.get(3)
+            && key_id_byte & 0x20 == 0
+        {
+            stats.wep_encrypted_data += 1;
+        } else {
+            stats.wpa_encrypted_data += 1;
+        }
     }
 
     // --- 802.11 MSDU fragmentation reassembly ---
@@ -122,7 +133,13 @@ pub fn process_data(
                 stats.mesh_control_frames += 1;
                 Some(body.get(n..).unwrap_or(&[]).to_vec())
             },
-            _ => None,
+            // Reserved Address Extension Mode (11) or a body shorter than the
+            // Mesh Control header: the inner MSDU is unrecoverable. Counted as a
+            // drop instead of vanishing silently. [IEEE 802.11-2024] §9.2.4.8.3
+            _ => {
+                stats.mesh_control_malformed += 1;
+                None
+            },
         }
     } else {
         None

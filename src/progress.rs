@@ -1,4 +1,4 @@
-//! Phase 1 -- periodic stderr progress reporter. See `ARCHITECTURE.md §3.1`.
+//! Phase 1 -- periodic stdout progress reporter. See `ARCHITECTURE.md §3.1`.
 //!
 //! Emits one `[progress]` line per cadence interval during the Phase 1 ingest
 //! loop so an operator running wpawolf against a multi-hour corpus has a live
@@ -47,7 +47,7 @@ const PACKETS_THRESHOLD: u64 = 2_000_000;
 /// 100k packets takes ~50 ms, well within the 5-second print window.
 const CLOCK_CHECK_INTERVAL: u64 = 100_000;
 
-/// Stderr-bound periodic progress reporter for the Phase 1 ingest loop.
+/// Stdout-bound periodic progress reporter for the Phase 1 ingest loop.
 ///
 /// Construct once before the loop starts; call `tick` once per packet (cheap;
 /// most calls return without doing anything) and `print_now` at the end of
@@ -157,6 +157,41 @@ pub fn total_ram_bytes() -> u64 {
     sys.total_memory()
 }
 
+/// Reusable process-RSS sampler holding one persistent `sysinfo::System`.
+///
+/// [`current_rss_bytes`] builds a fresh `System` on every call, which is fine at
+/// the Phase-1 cadence (every 50k packets) but too costly for the Phase-4 memory
+/// watcher that samples every ~250 ms. This sampler refreshes only the current
+/// process's memory on the same cached `System`, so repeated samples are cheap.
+/// The `sysinfo` path is kept (rather than reading `/proc/self/statm`) for the
+/// page-size portability reason behind the original migration off `/proc`.
+pub struct RssSampler {
+    sys: sysinfo::System,
+    pid: sysinfo::Pid,
+}
+
+impl RssSampler {
+    /// Creates a sampler, or `None` when the current PID cannot be determined.
+    #[must_use]
+    pub fn new() -> Option<Self> {
+        let pid = sysinfo::get_current_pid().ok()?;
+        Some(Self { sys: sysinfo::System::new(), pid })
+    }
+
+    /// Samples the current process RSS in bytes, reusing the held `System`.
+    pub fn sample(&mut self) -> u64 {
+        let refresh = sysinfo::ProcessRefreshKind::nothing().with_memory();
+        self.sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[self.pid]), false, refresh);
+        self.sys.process(self.pid).map_or(0, sysinfo::Process::memory)
+    }
+}
+
+impl std::fmt::Debug for RssSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RssSampler").field("pid", &self.pid).finish_non_exhaustive()
+    }
+}
+
 // --- Unit tests ---
 
 #[cfg(test)]
@@ -198,7 +233,7 @@ mod tests {
     #[test]
     fn time_fallback_emits_when_packet_delta_below_threshold() {
         // Simulate a slow stream: packet delta stays below 2M but wall clock
-        // exceeds 5 s. The reporter must emit (the bug CR-23 fixed).
+        // exceeds 5 s. The reporter must still emit a line in that case.
         let mut r = ProgressReporter::new(true);
         // Backdate `last_print` by 6 seconds to simulate elapsed time.
         r.last_print = Instant::now().checked_sub(std::time::Duration::from_secs(6)).unwrap();
