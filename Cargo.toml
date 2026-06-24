@@ -9,10 +9,10 @@ resolver = "3"
 
 [package]
 name = "wpawolf"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100)"
+description = "WPA/WPA2/WPA3 PSK-family (incl. PSK-SHA256/384 and FT-PSK) handshake + PMKID extractor for hashcat (all 11 hash types, modes 22000/37100)"
 license = "Apache-2.0"
 repository = "https://github.com/StrongWind1/WPAWolf"
 homepage = "https://github.com/StrongWind1/WPAWolf"

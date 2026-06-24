@@ -6,7 +6,7 @@ This document is the canonical specification for the wpawolf codebase. Source fi
 
 ## §1  Project scope
 
-wpawolf is a pure-Rust rewrite of `hcxpcapngtool` that reads pcap, pcapng, and gzip-compressed captures and emits hashcat mode 22000 and 37100 hash lines. Scope: WPA1, WPA2, and WPA3-FT-PSK personal handshake extraction plus PMKID extraction from every spec-defined location. Enterprise (EAP-TLS / PEAP), pure SAE, OWE, WEP, DPP / Wi-Fi Easy Connect, and inner-EAP hash harvest are out of scope for v1. DPP frames provision credentials over public-key exchange instead of a PSK handshake, so they yield nothing crackable as a mode 22000 / 37100 hash and are not parsed beyond the generic action-frame counter.
+wpawolf is a pure-Rust rewrite of `hcxpcapngtool` that reads pcap, pcapng, and gzip-compressed captures and emits hashcat mode 22000 and 37100 hash lines. Scope: WPA1, WPA2, and WPA3 personal-PSK handshake extraction (plain PSK, PSK-SHA256/384, and FT-PSK / 802.11r) plus PMKID extraction from every spec-defined location. Enterprise (EAP-TLS / PEAP), pure SAE, OWE, WEP, DPP / Wi-Fi Easy Connect, and inner-EAP hash harvest are out of scope for v1. DPP frames provision credentials over public-key exchange instead of a PSK handshake, so they yield nothing crackable as a mode 22000 / 37100 hash and are not parsed beyond the generic action-frame counter.
 
 Primary design goal: **never miss an extractable hash**. Defaults are unfiltered; operators narrow output via output-filter flags. Every hash a conformant reference extractor produces must also appear in wpawolf output (`tests/integration/superset_test.rs` is the regression oracle).
 

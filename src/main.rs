@@ -46,7 +46,7 @@ use wpawolf::{
 
 // --- CLI ---
 
-/// WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat (modes 22000 and 37100).
+/// WPA/WPA2/WPA3 PSK-family (incl. PSK-SHA256/384 and FT-PSK) handshake + PMKID extractor for hashcat (all 11 hash types, modes 22000/37100).
 ///
 /// Reads pcap, pcapng, and gzip-compressed captures. Wide defaults: all 6 N#E# combos, unlimited session window, no replay-counter check. Garbage nonces/MICs/PMKIDs are always rejected. Use output-filter flags to narrow.
 #[derive(Parser, Debug)]

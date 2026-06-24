@@ -1,7 +1,7 @@
 <h1 align="center">WPAWolf</h1>
 
 <p align="center">
-  <strong>Pull every WPA / WPA2 / WPA3-FT-PSK handshake out of a pcap and hand it to hashcat.</strong>
+  <strong>Pull every WPA / WPA2 / WPA3 PSK-family handshake and PMKID out of a pcap and hand it to hashcat.</strong>
 </p>
 
 <p align="center">
