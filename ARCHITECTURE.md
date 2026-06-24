@@ -766,10 +766,10 @@ After extraction, the PMKID is routed based on the AKM detected from the Beacon 
 | AKM 4 (FT-PSK) with FT fields | `--37100-out`, `-o`, `--ft-out` | type 06 | Requires MDID + R0KH-ID + R1KH-ID |
 | AKM 20 (PSK-SHA384) | `-o`, `--psk-sha384-out` | type 08 | Needs HMAC-SHA384 PMKID kernel |
 | AKM 19 (FT-PSK-SHA384) with FT fields | `-o`, `--ft-psk-sha384-out` | type 10 | Needs FT-KDF-SHA384 chain |
-| AKM 1, 3, 5, 8, 9, 11-18, 21, 24, 25 | counted only | n/a | non-PSK AKM, not crackable from pcap |
-| Unknown | `--22000-out`, `-o`, `--wpa2-out` | type 02 | log AKM value for diagnostics |
+| AKM 1, 3, 5, 8, 9, 11-18, 21, 24, 25 | dropped at emit | n/a | non-PSK AKM -> `AkmType::NotPsk`; a KDV-2/3 handshake / PMKID from one is dropped and counted in `emit_dropped_notpsk_akm` |
+| Unknown (no AKM evidence) | `--22000-out`, `-o`, `--wpa2-out` | type 02 | optimistic default (never-miss); distinct from `NotPsk` |
 
-This is always-on; there is no AKM filter flag. Pure SAE / OWE / enterprise EAP networks produce no PSK-style 4-way handshake and therefore no wpawolf PSK output, not because wpawolf filters on AKM, but because the on-wire EAPOL-Key exchange wpawolf parses does not occur for those schemes.
+This is always-on; there is no AKM filter flag. Enterprise (802.1X / FT-802.1X / CCKM) and SAE networks **do** run a 4-way EAPOL-Key handshake -- their PMK just comes from an EAP / SAE exchange rather than `PBKDF2(PSK, SSID)` -- so wpawolf parses those frames. When the AP advertises a non-PSK AKM and **no** PSK-family suite (2/4/6/19/20), the AKM resolves to `AkmType::NotPsk` and the handshake / PMKID is dropped at emit (counted in `emit_dropped_notpsk_akm`) rather than emitted as an uncrackable PSK line. A mixed PSK + 802.1X AP and a WPA3-transition PSK + SAE AP still emit their genuine PSK clients, because the discriminator is per-`(AP, STA)` and keyed on the presence of a PSK suite, not on the KDV byte. (Earlier releases routed by KDV and mis-emitted these as PSK types -- the false-positive that prompted the `NotPsk` classifier.)
 
 ### §6.5  The 20 PMKID locations: complete inventory
 
@@ -1294,6 +1294,7 @@ Output flags:
 
 | Flag | Long | Description |
 |------|------|-------------|
+|            | `--prefix PREFIX`         | derive a default path for every hash + auxiliary sink (`PREFIX.22000`, `PREFIX.37100`, `PREFIX.combined`, the six per-AKM sinks, `PREFIX.essid` ... `PREFIX.log`); an explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool `--prefix` |
 |            | `--22000-out FILE`        | hashcat mode 22000 (legacy `WPA*01*`/`WPA*02*`; every non-FT hash) |
 |            | `--37100-out FILE`        | hashcat mode 37100 (legacy `WPA*03*`/`WPA*04*`; every FT hash) |
 | `-o FILE`  | `--out FILE`              | combined 11-type classification file (every emitted hash, prefixes `WPA*01*..*11*`) |
@@ -1313,6 +1314,8 @@ Output flags:
 |       | `--log FILE`            | structured processing log |
 
 All string outputs (-E, -R, -W, -I, -U, and string fields of -D) use hashcat / hcxtools autohex format: bytes in printable ASCII range 0x20-0x7E are written as-is; all other byte sequences are encoded as `$HEX[<lowercase hex>]`.
+
+Two sinks pointed at the same real file are rejected up front (silent data loss), but any output may target a `/dev/*` special file (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`) and several sinks may share one -- `wpawolf -o /dev/stdout --22000-out /dev/stdout -E /dev/stdout capture.pcap` streams all three formats to stdout. `/dev/*` targets are exempt from both the duplicate-path rejection and the parent-directory writability probe (whose parent, `/dev`, is not a normal writable directory).
 
 #### FR-CLI-3
 Output-filter and runtime flags (unfiltered defaults):

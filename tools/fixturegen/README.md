@@ -1,10 +1,8 @@
 # wpawolf-fixturegen
 
-Standalone test-capture generator for [wpawolf](../..). Emits pcap and pcapng
-files containing 802.11 management and EAPOL frames covering every code path
-in the wpawolf parser, with cryptographically valid PMK / PMKID / MIC values
-derived from a known PSK so the corpus doubles as a `hashcat -m 22000` /
-`-m 37100` smoke test.
+Standalone test-capture generator for [wpawolf](../..). Emits pcap and pcapng files containing 802.11 management and EAPOL frames covering every code path in the wpawolf parser, with cryptographically valid PMK / PMKID / MIC values derived from a known PSK so the corpus doubles as a `hashcat -m 22000` / `-m 37100` smoke test.
+
+Every EAPOL-Key frame is wire-realistic: Key Type = Pairwise on M1-M4 (a 4-way handshake is never a Group-key exchange), an encrypted GTK Key Data field on M3, and a MIC computed over the actual frame. hcxpcapngtool parses the output, and `tests/integration/superset_test.rs` checks wpawolf against it (by hash identity) across all 11 type fixtures.
 
 ## Quick start
 

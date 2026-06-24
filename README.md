@@ -31,7 +31,7 @@
 - **Garbage-pattern rejection** - nonces / MICs / PMKIDs checked against five pattern classes
 - **Disk-backed fallback** - heavy stores spill to disk at 80 % RAM so corpus-scale runs finish instead of OOMing
 - **Fast** - >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **942 tests**; `make check-all` zero-warning under strict clippy
+- **966 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 
@@ -179,7 +179,7 @@ Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, 
 | `--max-eapol-per-type N` | 0 (off) | cap pairing to the first N messages of each type per (AP, STA); bounds rotating-ANonce fan-out |
 | `--essid-collapse-min N` | 3 | SSID-variant collapse: min distinct SSIDs to trigger |
 | `--essid-collapse-ratio N` | 10 | SSID-variant collapse: top/second ratio threshold |
-| `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --nc-dedup` |
+| `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=100 --dedup-hash-combos --nc-dedup` |
 
 ### Runtime options
 
