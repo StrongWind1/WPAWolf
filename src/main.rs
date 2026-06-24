@@ -70,6 +70,12 @@ struct Cli {
     #[arg(required = true, value_name = "INPUT", value_hint = clap::ValueHint::AnyPath)]
     input_files: Vec<std::path::PathBuf>,
 
+    /// Write every hash + auxiliary output to <PREFIX>.<ext>
+    ///
+    /// Sets a default path for every hash sink (`.22000`, `.37100`, `.combined`, `.wpa1`, `.wpa2`, `.psk-sha256`, `.ft`, `.psk-sha384`, `.ft-psk-sha384`) and every auxiliary sink (`.essid`, `.probe`, `.wordlist`, `.identity`, `.username`, `.device`, `.wordlist-scan`, `.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool --prefix.
+    #[arg(long = "prefix", value_name = "PREFIX", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 0)]
+    prefix: Option<std::path::PathBuf>,
+
     // ---- Hash output ----
     /// Write mode-22000 hashes (non-FT, hashcat-compatible)
     ///
@@ -290,11 +296,63 @@ const fn apply_strict_defaults(cli: &mut Cli) {
     cli.nc_dedup = true;
 }
 
+/// Expand `--prefix PREFIX` into a default path for every hash and auxiliary
+/// sink: each sink left unset gets `PREFIX` + its suffix (e.g. `run.22000`,
+/// `run.essid`). An explicit per-sink flag is never overwritten, so callers can
+/// set the bulk of the outputs by prefix and redirect individual sinks by hand.
+/// Mirrors hcxpcapngtool's `--prefix`.
+fn apply_prefix_defaults(cli: &mut Cli) {
+    let Some(prefix) = cli.prefix.clone() else {
+        return;
+    };
+    // Build `<prefix><suffix>` as an OsString so the prefix is treated as a path
+    // base (a trailing component, not a directory): `run` -> `run.22000`.
+    let derive = |suffix: &str| -> std::path::PathBuf {
+        let mut s = prefix.clone().into_os_string();
+        s.push(suffix);
+        std::path::PathBuf::from(s)
+    };
+    let slots: [(&mut Option<std::path::PathBuf>, &str); 17] = [
+        (&mut cli.out_22000, ".22000"),
+        (&mut cli.out_37100, ".37100"),
+        (&mut cli.out_combined, ".combined"),
+        (&mut cli.out_wpa1, ".wpa1"),
+        (&mut cli.out_wpa2, ".wpa2"),
+        (&mut cli.out_psk_sha256, ".psk-sha256"),
+        (&mut cli.out_ft, ".ft"),
+        (&mut cli.out_psk_sha384, ".psk-sha384"),
+        (&mut cli.out_ft_psk_sha384, ".ft-psk-sha384"),
+        (&mut cli.essid_output, ".essid"),
+        (&mut cli.probe_output, ".probe"),
+        (&mut cli.wordlist_output, ".wordlist"),
+        (&mut cli.identity_output, ".identity"),
+        (&mut cli.username_output, ".username"),
+        (&mut cli.device_output, ".device"),
+        (&mut cli.wordlist_scan, ".wordlist-scan"),
+        (&mut cli.log, ".log"),
+    ];
+    for (slot, suffix) in slots {
+        if slot.is_none() {
+            *slot = Some(derive(suffix));
+        }
+    }
+}
+
+/// A `/dev/*` output target (`/dev/stdout`, `/dev/stderr`, `/dev/null`,
+/// `/dev/fd/N`) is intentionally shareable: any number of sinks may point at the
+/// same one, and its parent (`/dev`) is not a normal writable directory. Such
+/// paths are exempt from both the duplicate-path rejection and the
+/// parent-directory writability probe.
+fn is_shareable_output(p: &std::path::Path) -> bool {
+    p.starts_with("/dev")
+}
+
 // --- Entry point ---
 
 fn main() {
     let mut cli = Cli::parse();
     apply_strict_defaults(&mut cli);
+    apply_prefix_defaults(&mut cli);
 
     // At least one output must be requested.
     let has_output = cli.out_22000.is_some()
@@ -347,6 +405,11 @@ fn main() {
         .collect();
         let mut seen = std::collections::HashSet::with_capacity(paths.len());
         for p in &paths {
+            // `/dev/*` targets (e.g. -o /dev/stdout --22000-out /dev/stdout) are
+            // intentionally shareable across sinks; only real files must be unique.
+            if is_shareable_output(p) {
+                continue;
+            }
             if !seen.insert(*p) {
                 println!("error: duplicate output path: {}", p.display());
                 std::process::exit(1);
@@ -356,11 +419,13 @@ fn main() {
         // Fail fast on an unwritable output or spill target. The field failure was
         // a post-Phase-4 EACCES while creating the first aux file -- probing every
         // sink's parent dir plus the temp/spill dir up front turns hours of wasted
-        // work into an immediate, legible error.
+        // work into an immediate, legible error. `/dev/*` sinks are skipped: their
+        // parent (/dev) is not a normal writable directory, and the targets are fds.
         let temp_dir = std::env::temp_dir();
         let mut probed: std::collections::HashSet<&std::path::Path> = std::collections::HashSet::new();
         let probe_dirs = paths
             .iter()
+            .filter(|p| !is_shareable_output(p))
             .map(|p| p.parent().unwrap_or_else(|| std::path::Path::new(".")))
             .chain(std::iter::once(temp_dir.as_path()));
         for dir in probe_dirs {
@@ -1255,6 +1320,55 @@ mod tests {
         let cli = parse_with_strict(&["--strict", "--nc-tolerance=4"]);
         assert!(cli.nc_dedup, "--strict still enables nc_dedup");
         assert_eq!(cli.nc_tolerance, Some(4), "explicit --nc-tolerance=4 wins through --strict");
+    }
+
+    // --- --prefix expansion ---
+
+    #[test]
+    fn prefix_fills_every_unset_sink() {
+        let mut cli = Cli::try_parse_from(["wpawolf", "--prefix", "/tmp/run", "in.pcap"]).expect("parse");
+        apply_prefix_defaults(&mut cli);
+        let p = |s: &str| Some(std::path::PathBuf::from(s));
+        assert_eq!(cli.out_22000, p("/tmp/run.22000"));
+        assert_eq!(cli.out_37100, p("/tmp/run.37100"));
+        assert_eq!(cli.out_combined, p("/tmp/run.combined"));
+        assert_eq!(cli.out_wpa1, p("/tmp/run.wpa1"));
+        assert_eq!(cli.out_ft_psk_sha384, p("/tmp/run.ft-psk-sha384"));
+        assert_eq!(cli.essid_output, p("/tmp/run.essid"));
+        assert_eq!(cli.wordlist_scan, p("/tmp/run.wordlist-scan"));
+        assert_eq!(cli.log, p("/tmp/run.log"));
+    }
+
+    #[test]
+    fn prefix_does_not_override_explicit_sink() {
+        let mut cli =
+            Cli::try_parse_from(["wpawolf", "--prefix", "/tmp/run", "--22000-out", "/custom/h.22000", "in.pcap"])
+                .expect("parse");
+        apply_prefix_defaults(&mut cli);
+        assert_eq!(cli.out_22000, Some(std::path::PathBuf::from("/custom/h.22000")), "explicit flag wins");
+        assert_eq!(cli.out_37100, Some(std::path::PathBuf::from("/tmp/run.37100")), "unset sink filled by prefix");
+    }
+
+    #[test]
+    fn prefix_absent_leaves_sinks_unset() {
+        let mut cli = Cli::try_parse_from(["wpawolf", "-o", "out.txt", "in.pcap"]).expect("parse");
+        apply_prefix_defaults(&mut cli);
+        assert!(cli.out_22000.is_none(), "no --prefix -> sinks stay as the user set them");
+        assert_eq!(cli.out_combined, Some(std::path::PathBuf::from("out.txt")));
+    }
+
+    // --- /dev/* shareable-output detection ---
+
+    #[test]
+    fn shareable_output_recognises_dev_targets_only() {
+        use std::path::Path;
+        assert!(is_shareable_output(Path::new("/dev/stdout")));
+        assert!(is_shareable_output(Path::new("/dev/stderr")));
+        assert!(is_shareable_output(Path::new("/dev/null")));
+        assert!(is_shareable_output(Path::new("/dev/fd/3")));
+        assert!(!is_shareable_output(Path::new("/tmp/out.22000")), "real file is not shareable");
+        assert!(!is_shareable_output(Path::new("/devious/out")), "a /dev-prefixed real dir must not match");
+        assert!(!is_shareable_output(Path::new("out.txt")), "relative real file is not shareable");
     }
 
     #[test]

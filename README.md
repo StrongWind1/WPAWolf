@@ -161,6 +161,12 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 | `--wordlist-scan FILE` | printable-ASCII runs (>=8 B) from IE bodies; standalone from -W |
 | `--log FILE` | structured processing log |
 
+### `--prefix` and shared `/dev/*` sinks
+
+`--prefix PREFIX` sets a default path for every hash and auxiliary sink at once: each sink left unset writes to `PREFIX` plus its own suffix (`PREFIX.22000`, `PREFIX.37100`, `PREFIX.combined`, `PREFIX.wpa1`, `PREFIX.wpa2`, `PREFIX.psk-sha256`, `PREFIX.ft`, `PREFIX.psk-sha384`, `PREFIX.ft-psk-sha384`, `PREFIX.essid`, `PREFIX.probe`, `PREFIX.wordlist`, `PREFIX.identity`, `PREFIX.username`, `PREFIX.device`, `PREFIX.wordlist-scan`, `PREFIX.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool's `--prefix`.
+
+Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout --22000-out /dev/stdout -E /dev/stdout capture.pcap` streams the extended hashes, the legacy 22000 hashes, and the ESSID list all to stdout. Real files must still be unique - only `/dev/*` targets are exempt from the duplicate-path check.
+
 ### Output filters
 
 | Flag | Default | Meaning |

@@ -58,3 +58,41 @@ fn combined_o_emits_only_eleven_extended_prefixes() {
         assert_eq!(parts.len(), expected, "WPA*{code}* line has {} fields, expected {expected}: {line}", parts.len());
     }
 }
+
+/// Feature: several sinks may all target the same `/dev/*` (e.g. `/dev/stdout`)
+/// without tripping the duplicate-output-path rejection, and `--prefix` derives a
+/// path for every hash + auxiliary sink that has content.
+#[test]
+fn shared_dev_stdout_and_prefix_expansion() {
+    let pcap = common::write_temp_pcap("output_features.pcap", &common::multi_handshake_wpa2_psk_pcap(2));
+
+    // Feature 1: three sinks all pointed at /dev/stdout must not be rejected as
+    // duplicates, and the run must still emit hash lines.
+    let out = Command::new(common::binary_path())
+        .args(["-o", "/dev/stdout", "--22000-out", "/dev/stdout", "-E", "/dev/stdout", "--quiet"])
+        .arg(&pcap)
+        .output()
+        .expect("failed to spawn wpawolf");
+    assert!(out.status.success(), "shared /dev/stdout sinks must not error: {:?}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("duplicate output path"), "shared /dev/stdout wrongly rejected:\n{stdout}");
+    assert!(stdout.contains("WPA*"), "shared /dev/stdout produced no hash lines:\n{stdout}");
+
+    // Feature 2: --prefix fills every sink. Hash sinks are lazy (only types with
+    // content get a file); auxiliary sinks and the populated hash sinks appear.
+    let dir = common::temp_dir("wpawolf_prefix");
+    let prefix = dir.join("run");
+    let status = Command::new(common::binary_path())
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--quiet")
+        .arg(&pcap)
+        .status()
+        .expect("spawn wpawolf");
+    assert!(status.success(), "--prefix run must succeed");
+    for ext in ["22000", "combined", "wpa2", "essid"] {
+        assert!(dir.join(format!("run.{ext}")).exists(), "--prefix did not create run.{ext}");
+    }
+    // A plain WPA2 capture has no FT hashes, so the lazy FT hash sink stays absent.
+    assert!(!dir.join("run.37100").exists(), "empty FT hash sink must not be created by --prefix");
+}
