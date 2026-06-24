@@ -211,6 +211,103 @@ fn superset_pcapng_three_handshakes() {
     assert_wpawolf_supersets_hcxpcapngtool("three_handshakes", "pcapng", &bytes);
 }
 
+// --- 11-type fixture parity (wpawolf-fixturegen output) ---
+
+/// Run wpawolf with the combined `-o` sink so every extended type (including the
+/// FT and SHA-384 families) is captured, regardless of which legacy mode
+/// hcxpcapngtool routes it to.
+fn run_wpawolf_combined(input: &Path, output: &Path) {
+    let _ = fs::remove_file(output);
+    let status = Command::new(common::binary_path())
+        .args(["-o", output.to_str().unwrap()])
+        .arg(input)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("failed to spawn wpawolf");
+    assert!(status.success(), "wpawolf exited with non-zero status: {status}");
+}
+
+/// The hash-identity of a `WPA*` line: `(hash/PMKID/MIC, AP, STA, ESSID)` -- the
+/// `*`-separated fields 2..=5, which are identical between hcxpcapngtool and
+/// wpawolf for the same hash even when the two tools route it to a different mode
+/// and type prefix (FT is `WPA*01*`/`WPA*02*` in hcx mode 22000 but
+/// `WPA*06*`/`WPA*07*` in wpawolf's 11-type scheme). Comparing identities, not
+/// whole lines, makes the parity check robust to that routing difference and to
+/// message-pair-byte conventions.
+fn hash_identities(lines: &[String]) -> HashSet<String> {
+    lines
+        .iter()
+        .filter(|l| l.starts_with("WPA*"))
+        .filter_map(|l| {
+            // Fields after split('*'): 0=WPA, 1=type, 2=hash, 3=ap, 4=sta, 5=essid.
+            let f: Vec<&str> = l.split('*').collect();
+            Some(format!("{}*{}*{}*{}", f.get(2)?, f.get(3)?, f.get(4)?, f.get(5)?))
+        })
+        .collect()
+}
+
+/// wpawolf must be a hash-superset of hcxpcapngtool across all eleven generated
+/// type fixtures: every hash hcxpcapngtool extracts (keyed by PMKID/MIC, AP, STA
+/// and ESSID, independent of which legacy mode it lands in) must also appear in
+/// wpawolf's combined output, and wpawolf must emit the expected 11-type prefix
+/// for each fixture. The SHA-384 family (types 8-11) has no mode-22000
+/// representation, so hcxpcapngtool emits nothing for it -- those fixtures still
+/// exercise the wpawolf-side validation. The fixtures are the wire-realistic
+/// Pairwise frames produced by wpawolf-fixturegen; a regression that reverted them
+/// to Key Type = Group would make hcxpcapngtool reject the EAPOL frames and trip
+/// the parity assertion (and the prefix assertion for the PMKID-bearing types).
+#[test]
+fn superset_11_types_fixtures_by_hash_identity() {
+    if !matches!(probe_oracle(), OracleProbe::Ok) {
+        let msg = "hcxpcapngtool oracle unavailable or too old";
+        assert!(!is_ci(), "CI parity gate: {msg}");
+        eprintln!("skipping superset_11_types: {msg}");
+        return;
+    }
+    let dir = Path::new("tests/fixtures/generated/11_types");
+    if !dir.exists() {
+        return; // corpus not generated; generated_corpus::corpus_root_exists covers it
+    }
+    let expected: &[(&str, &str)] = &[
+        ("type01_wpa1_eapol.pcap", "WPA*01*"),
+        ("type02_wpa2_pmkid.pcap", "WPA*02*"),
+        ("type03_wpa2_eapol.pcap", "WPA*03*"),
+        ("type04_psksha256_pmkid.pcap", "WPA*04*"),
+        ("type05_psksha256_eapol.pcap", "WPA*05*"),
+        ("type06_ftpsk_pmkid.pcap", "WPA*06*"),
+        ("type07_ftpsk_eapol.pcap", "WPA*07*"),
+        ("type08_psksha384_pmkid.pcap", "WPA*08*"),
+        ("type09_psksha384_eapol.pcap", "WPA*09*"),
+        ("type10_ftpsk_sha384_pmkid.pcap", "WPA*10*"),
+        ("type11_ftpsk_sha384_eapol.pcap", "WPA*11*"),
+    ];
+    let tmp = common::temp_dir("wpawolf_superset_11");
+    for (name, prefix) in expected {
+        let cap = dir.join(name);
+        assert!(cap.exists(), "missing fixture {name} -- run wpawolf-fixturegen");
+        let oracle = tmp.join(format!("{name}.oracle.22000"));
+        let actual = tmp.join(format!("{name}.actual.combined"));
+        run_hcxpcapngtool(&cap, &oracle);
+        run_wpawolf_combined(&cap, &actual);
+        let wp_lines = read_lines(&actual);
+        // Validation: wpawolf emits the expected 11-type prefix for this fixture.
+        assert!(
+            wp_lines.iter().any(|l| l.starts_with(prefix)),
+            "{name}: wpawolf did not emit expected {prefix}\n{}",
+            wp_lines.join("\n")
+        );
+        // Parity: every hcxpcapngtool hash identity is present in wpawolf output.
+        let wp_ids = hash_identities(&wp_lines);
+        for id in hash_identities(&read_lines(&oracle)) {
+            assert!(
+                wp_ids.contains(&id),
+                "{name}: hcxpcapngtool hash {id} missing from wpawolf output (superset violation)"
+            );
+        }
+    }
+}
+
 // --- Version-banner parser unit tests ---
 //
 // The probe relies on `parse_version` to compare against MIN_HCXPCAPNGTOOL.

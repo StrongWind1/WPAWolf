@@ -154,7 +154,13 @@ impl Handshake {
         // in the fixture surfaces any future detection-from-M3 path the
         // parser grows.
         let m3_key_data = if inputs.wpa1 || !is_ft_akm(inputs.akm_byte) {
-            Vec::new()
+            // A real M3 carries the GTK in an (encrypted) Key Data field; emitting
+            // an empty field was the "wpa key data is zero" defect. Use a
+            // fixed-length opaque blob -- the field is ciphertext on the wire
+            // (Encrypted Key Data bit set in key_info for RSN), so the bytes are
+            // irrelevant; shaped as one vendor element so wpawolf's defensive
+            // extract_ft_fields() walk over M3 cannot misread it as an MDE+FTE pair.
+            encrypted_gtk_key_data()
         } else {
             wpa2_or_ft_key_data(inputs, inputs.akm_byte, true)
         };
@@ -200,6 +206,25 @@ fn wpa2_or_ft_key_data(inputs: &Inputs, akm_byte: u8, include_ft: bool) -> Vec<u
         }));
     }
     out
+}
+
+/// A fixed-length opaque stand-in for the AES-key-wrapped GTK that a real M3
+/// carries in its (encrypted) Key Data field. Shaped as one vendor element
+/// (tag 221, length 54) so wpawolf -- which walks M3 Key Data with
+/// `extract_ft_fields` regardless of the Encrypted Key Data bit -- cannot misread
+/// the bytes as an MDE (54) + FTE (55) pair and spuriously promote a non-FT
+/// handshake to FT. The 56-byte length matches a CCMP GTK KDE + RSN IE after
+/// AES key wrap (8-byte IV + padding). [IEEE 802.11-2024] §12.7.6.4.
+fn encrypted_gtk_key_data() -> Vec<u8> {
+    let mut v = Vec::with_capacity(56);
+    v.push(0xDD); // vendor-specific element id
+    v.push(54); // element length: the 54 opaque bytes that follow
+    let mut b: u8 = 0x5A;
+    for _ in 0..54 {
+        v.push(b);
+        b = b.wrapping_mul(167).wrapping_add(0x5A);
+    }
+    v
 }
 
 /// Build one EAPOL-Key wire frame, computing the MIC if requested.

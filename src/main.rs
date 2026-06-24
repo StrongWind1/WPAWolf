@@ -163,9 +163,9 @@ struct Cli {
     log: Option<std::path::PathBuf>,
 
     // ---- Output filters ----
-    /// Narrow output like hcxpcapngtool (bundle of 4 filters)
+    /// Narrow output like hcxpcapngtool (filter bundle)
     ///
-    /// Enables: --eapoltimeout=5, --rc-drift=8, --dedup-hash-combos, --nc-dedup. Later flags override these defaults.
+    /// Enables --eapoltimeout=5, --rc-drift=8, --nc-tolerance=8, --max-eapol-per-type=100, --dedup-hash-combos, --nc-dedup. Later scalar flags override these defaults.
     #[arg(short = 's', long, help_heading = "Output filters", display_order = 20)]
     strict: bool,
 
@@ -258,11 +258,13 @@ struct Cli {
 /// Apply `--strict` mode's bundled defaults to a parsed CLI.
 ///
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
-/// turns on the four output filters that together close the volume gap against
-/// hcxpcapngtool default (`--eapoltimeout=5`, `--rc-drift=8`,
-/// `--dedup-hash-combos`, `--nc-dedup`), but uses later-flag-wins precedence so
-/// an explicit `--eapoltimeout=30` survives past `--strict`. The two boolean
-/// flags can only be turned on, never off, so `--strict` always sets them.
+/// turns on the output filters that together close the volume gap against
+/// hcxpcapngtool default: `--eapoltimeout=5`, `--rc-drift=8`, `--nc-tolerance=8`
+/// (hashcat's `NONCE_ERROR_CORRECTIONS`), `--max-eapol-per-type=100` (bounds a
+/// rotating-ANonce AP the way hcx's ring buffer does), `--dedup-hash-combos`, and
+/// `--nc-dedup`. The scalar filters use later-flag-wins precedence (an explicit
+/// `--eapoltimeout=30` survives past `--strict`; a non-zero `--max-eapol-per-type`
+/// likewise wins). The two boolean flags can only be turned on, never off.
 const fn apply_strict_defaults(cli: &mut Cli) {
     if !cli.strict {
         return;
@@ -272,6 +274,17 @@ const fn apply_strict_defaults(cli: &mut Cli) {
     }
     if cli.rc_drift.is_none() {
         cli.rc_drift = Some(8);
+    }
+    // hashcat's NONCE_ERROR_CORRECTIONS default; already the effective fallback
+    // (`unwrap_or(8)`), pinned explicitly here so `--strict` is self-describing.
+    if cli.nc_tolerance.is_none() {
+        cli.nc_tolerance = Some(8);
+    }
+    // Bound a rotating-ANonce AP the way hcxpcapngtool's ring buffer does, so a
+    // single pathological group cannot fan out to millions of near-duplicate
+    // lines under the narrow profile. A non-zero user value wins (later-flag).
+    if cli.max_eapol_per_type == 0 {
+        cli.max_eapol_per_type = 100;
     }
     cli.dedup_hash_combos = true;
     cli.nc_dedup = true;
@@ -889,6 +902,9 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         }
         if cli.nc_dedup {
             parts.push(format!("nc-dedup (tolerance {})", cli.nc_tolerance.unwrap_or(8)));
+        }
+        if cli.max_eapol_per_type > 0 {
+            parts.push(format!("max-eapol-per-type={}", cli.max_eapol_per_type));
         }
         if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
     };

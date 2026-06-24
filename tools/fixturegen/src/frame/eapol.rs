@@ -48,6 +48,10 @@ pub const KI_ACK: u16 = 1 << 7;
 pub const KI_MIC: u16 = 1 << 8;
 /// Key Information bit: Secure.
 pub const KI_SECURE: u16 = 1 << 9;
+/// Key Information bit: Key Type. 1 = Pairwise (every message of the 4-way
+/// handshake), 0 = Group (a separate GTK-rekey exchange, never one of M1-M4).
+/// [IEEE 802.11-2024] §12.7.2, figure 12-33.
+pub const KI_PAIRWISE: u16 = 1 << 3;
 /// Key Information bit: Encrypted Key Data.
 pub const KI_ENCRYPTED: u16 = 1 << 12;
 
@@ -67,11 +71,22 @@ pub enum Message {
 /// Compose the Key Information field for a given message type.
 #[must_use]
 pub const fn key_info(msg: Message, kdv: u8) -> u16 {
-    let mut ki = (kdv as u16) & 0x07;
+    // Every message of the 4-way handshake is a Pairwise key exchange (bit 3 = 1).
+    // Emitting Key Type = Group was the defect that made the fixtures
+    // wire-unrealistic. [IEEE 802.11-2024] §12.7.2.
+    let mut ki = ((kdv as u16) & 0x07) | KI_PAIRWISE;
     match msg {
         Message::M1 => ki |= KI_ACK,
         Message::M2 => ki |= KI_MIC,
-        Message::M3 => ki |= KI_ACK | KI_INSTALL | KI_MIC | KI_SECURE,
+        Message::M3 => {
+            ki |= KI_ACK | KI_INSTALL | KI_MIC | KI_SECURE;
+            // M3 carries the GTK in an encrypted Key Data field on RSN (WPA2+);
+            // WPA1 (KDV=1) predates the Encrypted Key Data bit, so leave it clear.
+            // [IEEE 802.11-2024] §12.7.6.4.
+            if kdv != 1 {
+                ki |= KI_ENCRYPTED;
+            }
+        },
         Message::M4 => ki |= KI_MIC | KI_SECURE,
     }
     ki
