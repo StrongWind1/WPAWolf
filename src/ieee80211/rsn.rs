@@ -28,6 +28,12 @@ pub struct RsnInfo {
     pub akm_types: Vec<AkmType>,
     /// PMKIDs found in the PMKID List (each 16 bytes).
     pub pmkids: Vec<[u8; 16]>,
+    /// `true` if the AKM Suite List contained at least one non-PSK `00:0F:AC` suite
+    /// (enterprise 802.1X / FT-802.1X / SHA-256 / Suite-B, SAE, OWE, FILS, PASN, ...).
+    /// `akm_types` only collects PSK-family suites, so this flag is the sole signal that
+    /// a network advertised a non-PSK AKM. `detect_akm` reports `AkmType::NotPsk` when
+    /// this is set and no PSK suite coexists. [IEEE 802.11-2024] §9.4.2.24.3, Table 9-190.
+    pub has_non_psk_akm: bool,
 }
 
 // --- Core IE parser ---
@@ -90,7 +96,11 @@ pub fn parse_rsn_ie(value: &[u8]) -> Option<RsnInfo> {
                 19 => AkmType::FtPskSha384, // FT-PSK-SHA384 (SHA-384 chain)
                 20 => AkmType::PskSha384,   // PSK-SHA384 (KDF-SHA384, HMAC-SHA384-192 MIC)
                 _ => {
-                    // SAE (8), OWE (18), EAP variants, etc. -- out of v1 scope.
+                    // SAE (8), OWE (18), enterprise EAP (1/3/5/11/12/13/22/23), FILS
+                    // (14-17), PASN (21), TDLS (7), etc. -- non-PSK AKMs, out of v1
+                    // cracking scope. Flag their presence so detect_akm can report
+                    // NotPsk when no PSK suite coexists. [§9.4.2.24.3, Table 9-190]
+                    info.has_non_psk_akm = true;
                     pos += 4;
                     continue;
                 },
@@ -142,8 +152,10 @@ pub fn parse_wpa_ie(value: &[u8]) -> Option<RsnInfo> {
 /// Extracts the best AKM type from tagged parameters.
 ///
 /// Iterates all IEs looking for RSN IE (id=48) and WPA vendor IE (id=221).
-/// Returns the first recognised AKM type, preferring RSN over WPA. Returns
-/// `AkmType::Unknown` if no RSN/WPA IE is found or no known AKM is present.
+/// Returns the first recognised PSK-family AKM type, preferring RSN over WPA. When no
+/// PSK suite is present but a non-PSK AKM was advertised (enterprise / SAE / OWE / ...),
+/// returns `AkmType::NotPsk` so the caller drops the handshake rather than cracking it.
+/// Returns `AkmType::Unknown` only when no RSN/WPA IE carried any recognised AKM at all.
 #[must_use]
 pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
     // OUI and type for the legacy WPA vendor IE. [Wi-Fi Alliance WPA spec]
@@ -152,15 +164,17 @@ pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
 
     let mut rsn_akm: Option<AkmType> = None;
     let mut wpa_akm: Option<AkmType> = None;
+    let mut has_non_psk = false;
 
     for ie in iter_ies(tagged_params) {
         match ie.id {
             48 => {
                 // RSN IE [IEEE 802.11-2024] §9.4.2.24
-                if let Some(info) = parse_rsn_ie(ie.value)
-                    && let Some(&akm) = info.akm_types.first()
-                {
-                    rsn_akm = Some(akm);
+                if let Some(info) = parse_rsn_ie(ie.value) {
+                    has_non_psk |= info.has_non_psk_akm;
+                    if let Some(&akm) = info.akm_types.first() {
+                        rsn_akm = Some(akm);
+                    }
                 }
             },
             221 if wpa_akm.is_none() => {
@@ -186,7 +200,10 @@ pub fn detect_akm(tagged_params: &[u8]) -> AkmType {
         }
     }
 
-    rsn_akm.or(wpa_akm).unwrap_or(AkmType::Unknown)
+    // A PSK suite (RSN > WPA1) always wins. Failing that, an observed non-PSK AKM yields
+    // NotPsk (dropped at emit); only a total absence of recognised AKMs is Unknown (the
+    // optimistic Wpa2Psk default). [IEEE 802.11-2024] §9.4.2.24.3, Table 9-190
+    rsn_akm.or(wpa_akm).unwrap_or(if has_non_psk { AkmType::NotPsk } else { AkmType::Unknown })
 }
 
 /// Extracts all PMKIDs from RSN IE in tagged parameters.
@@ -621,6 +638,62 @@ mod tests {
         // Tagged params with only an SSID IE (id=0) -- no RSN, no WPA.
         let tagged = [0u8, 4, b't', b'e', b's', b't'];
         assert_eq!(detect_akm(&tagged), AkmType::Unknown);
+    }
+
+    /// Wraps an RSN IE value in a tagged-parameter block (tag 48 + length).
+    fn rsn_tagged(akm_types: &[u8]) -> Vec<u8> {
+        let value = rsn_ie_with_akms(akm_types);
+        let mut tagged = vec![48u8, value.len() as u8];
+        tagged.extend_from_slice(&value);
+        tagged
+    }
+
+    #[test]
+    fn parse_rsn_ie_enterprise_sets_non_psk_flag_and_no_akm() {
+        // AKM 1 (802.1X) is non-PSK: not collected into akm_types, but flagged.
+        let ie = rsn_ie_with_akms(&[1]);
+        let info = parse_rsn_ie(&ie).unwrap();
+        assert!(info.akm_types.is_empty(), "enterprise AKM must not be a PSK AkmType");
+        assert!(info.has_non_psk_akm, "non-PSK AKM presence must be flagged");
+    }
+
+    #[test]
+    fn parse_rsn_ie_psk_only_does_not_set_non_psk_flag() {
+        let ie = rsn_ie_with_akms(&[2]);
+        let info = parse_rsn_ie(&ie).unwrap();
+        assert_eq!(info.akm_types, vec![AkmType::Wpa2Psk]);
+        assert!(!info.has_non_psk_akm, "a pure PSK IE must not flag non-PSK");
+    }
+
+    #[test]
+    fn detect_akm_enterprise_only_returns_notpsk() {
+        // Pure 802.1X (AKM 1) network -- the UAEU-SkyNet case. Must report NotPsk so the
+        // KDV override does not promote the handshake to a PSK type.
+        assert_eq!(detect_akm(&rsn_tagged(&[1])), AkmType::NotPsk);
+        // FT-802.1X (AKM 3) and 802.1X-SHA256 (AKM 5) too.
+        assert_eq!(detect_akm(&rsn_tagged(&[3])), AkmType::NotPsk);
+        assert_eq!(detect_akm(&rsn_tagged(&[5])), AkmType::NotPsk);
+    }
+
+    #[test]
+    fn detect_akm_sae_only_returns_notpsk() {
+        // Pure WPA3-SAE (AKM 8): same root cause as enterprise -- its 4-way uses KDV=3,
+        // and it must not be mis-emitted as PSK-SHA256.
+        assert_eq!(detect_akm(&rsn_tagged(&[8])), AkmType::NotPsk);
+    }
+
+    #[test]
+    fn detect_akm_mixed_enterprise_and_psk_returns_psk() {
+        // Mixed-mode AP advertising 802.1X (1) + WPA2-PSK (2): the PSK clients are real
+        // and crackable, so PSK must win regardless of suite order in the IE.
+        assert_eq!(detect_akm(&rsn_tagged(&[1, 2])), AkmType::Wpa2Psk);
+        assert_eq!(detect_akm(&rsn_tagged(&[2, 1])), AkmType::Wpa2Psk);
+    }
+
+    #[test]
+    fn detect_akm_mixed_sae_and_psk_returns_psk() {
+        // WPA3-transition (SAE 8 + WPA2-PSK 2) must stay crackable as WPA2-PSK.
+        assert_eq!(detect_akm(&rsn_tagged(&[8, 2])), AkmType::Wpa2Psk);
     }
 
     #[test]

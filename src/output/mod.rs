@@ -138,8 +138,14 @@ pub struct OutputStats {
     /// Logical PMKID hashes suppressed by every configured sink's dedup.
     pub dedup_dropped_pmkids: usize,
     /// Hashes dropped at emit because the AKM could not be mapped to one of the
-    /// 11 types (`HashType::from_akm_and_attack` returned None).
+    /// 11 types (`HashType::from_akm_and_attack` returned None) and the AKM was not a
+    /// recognised non-PSK suite (i.e. a genuinely unclassifiable / `Unknown` case).
     pub emit_dropped_unclassified_akm: usize,
+    /// Handshakes / PMKIDs dropped at emit because the AKM is a recognised non-PSK suite
+    /// (`AkmType::NotPsk`: enterprise 802.1X / SAE / OWE / FILS / PASN). Out of v1 scope;
+    /// no crackable PSK line exists. Split out from `emit_dropped_unclassified_akm` so the
+    /// expected enterprise volume does not mask genuine anomalies.
+    pub emit_dropped_notpsk_akm: usize,
     /// FT hashes dropped at emit because the FT context (R0KH-ID) was missing.
     pub emit_dropped_ft_no_context: usize,
 
@@ -792,7 +798,11 @@ impl OutputContext {
                     entry.akm
                 };
                 let Some(ht) = HashType::from_akm_and_attack(resolved_akm, true) else {
-                    stats.emit_dropped_unclassified_akm += 1;
+                    if matches!(resolved_akm, AkmType::NotPsk) {
+                        stats.emit_dropped_notpsk_akm += 1;
+                    } else {
+                        stats.emit_dropped_unclassified_akm += 1;
+                    }
                     continue;
                 };
                 let ssids = essid_map.ssids_for_emit(&entry.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
@@ -919,7 +929,11 @@ impl OutputContext {
                     } = &mut *guard;
                     for pair in &pairs {
                         let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
-                            st.emit_dropped_unclassified_akm += 1;
+                            if matches!(pair.akm, AkmType::NotPsk) {
+                                st.emit_dropped_notpsk_akm += 1;
+                            } else {
+                                st.emit_dropped_unclassified_akm += 1;
+                            }
                             continue;
                         };
                         let ssids =

@@ -1047,6 +1047,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.dedup_dropped_pmkids = output_stats.dedup_dropped_pmkids as u64;
         stats.dedup_dropped = (output_stats.dedup_dropped_pairs + output_stats.dedup_dropped_pmkids) as u64;
         stats.emit_dropped_unclassified_akm = output_stats.emit_dropped_unclassified_akm as u64;
+        stats.emit_dropped_notpsk_akm = output_stats.emit_dropped_notpsk_akm as u64;
         stats.emit_dropped_ft_no_context = output_stats.emit_dropped_ft_no_context as u64;
         // Total pairs attempted through dedup = written + pair-side drops.
         stats.eapol_pairs_generated = (output_stats.pairs_written + output_stats.dedup_dropped_pairs) as u64;

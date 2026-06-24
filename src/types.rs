@@ -159,8 +159,22 @@ pub enum AkmType {
     /// No dedicated hashcat module today; routed through 22000 alongside `PskSha256`
     /// until a SHA-384 sink is wired up.
     PskSha384,
-    /// AKM could not be determined from context (no Beacon/ProbeResponse RSN IE seen).
-    /// Treated as `Wpa2Psk` for output routing.
+    /// A non-PSK AKM was *observed* on the wire: enterprise (802.1X / FT-802.1X /
+    /// 802.1X-SHA256 / Suite-B, vendor CCKM), SAE, OWE, FILS, or PASN. These derive the
+    /// PMK from an EAP / SAE / public-key exchange, not `PBKDF2(PSK, SSID)`, so no mode
+    /// 22000 / 37100 line built from such a handshake can ever crack.
+    ///
+    /// Deliberately distinct from `Unknown`: `Unknown` means "no AKM evidence at all"
+    /// and is still optimistically treated as `Wpa2Psk` (the never-miss-a-hash default),
+    /// whereas `NotPsk` means "we saw an AKM and it is not PSK." The KDV override in
+    /// `store_eapol_key` never promotes `NotPsk` to a PSK type, and
+    /// `HashType::from_akm_and_attack` returns `None` for it, so the line is dropped at
+    /// emit. [IEEE 802.11-2024] §9.4.2.24.3, Table 9-190.
+    NotPsk,
+    /// AKM could not be determined from context (no Beacon/ProbeResponse/Assoc RSN IE
+    /// seen, and no non-PSK AKM observed either). Treated as `Wpa2Psk` for output
+    /// routing -- the optimistic "never miss a hash" default. Contrast `NotPsk`, which
+    /// is an observed non-PSK AKM and is dropped.
     Unknown,
 }
 
@@ -193,6 +207,7 @@ impl AkmType {
             Self::FtPskSha384 => 3,
             Self::PskSha256 => 4,
             Self::PskSha384 => 5,
+            Self::NotPsk => 6,
             Self::Unknown => 255,
         }
     }
@@ -207,6 +222,7 @@ impl AkmType {
             3 => Self::FtPskSha384,
             4 => Self::PskSha256,
             5 => Self::PskSha384,
+            6 => Self::NotPsk,
             _ => Self::Unknown,
         }
     }
@@ -310,12 +326,12 @@ impl HashType {
     /// Classifies a captured handshake into one of the 11 types.
     ///
     /// `is_pmkid = true` for PMKID-only attacks; `false` for EAPOL-pair attacks. Returns
-    /// `None` for `AkmType::Unknown` (no PSK-cracking path) and for the WPA1+PMKID
-    /// combination (WPA1 has no PMKID field).
+    /// `None` for `AkmType::Unknown` and `AkmType::NotPsk` (no PSK-cracking path) and for
+    /// the WPA1+PMKID combination (WPA1 has no PMKID field).
     #[must_use]
     pub const fn from_akm_and_attack(akm: AkmType, is_pmkid: bool) -> Option<Self> {
-        // WPA1 has no PMKID field in its IE; AkmType::Unknown has no PSK-crack path
-        // for either attack surface. Both collapse to None.
+        // WPA1 has no PMKID field in its IE; AkmType::Unknown and AkmType::NotPsk have no
+        // PSK-crack path for either attack surface. All collapse to None.
         match (akm, is_pmkid) {
             (AkmType::Wpa1, false) => Some(Self::Wpa1Eapol),
             (AkmType::Wpa2Psk, true) => Some(Self::Wpa2PskPmkid),
@@ -328,7 +344,7 @@ impl HashType {
             (AkmType::PskSha384, false) => Some(Self::PskSha384Eapol),
             (AkmType::FtPskSha384, true) => Some(Self::FtPskSha384Pmkid),
             (AkmType::FtPskSha384, false) => Some(Self::FtPskSha384Eapol),
-            (AkmType::Wpa1, true) | (AkmType::Unknown, _) => None,
+            (AkmType::Wpa1, true) | (AkmType::Unknown | AkmType::NotPsk, _) => None,
         }
     }
 
@@ -1108,6 +1124,34 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn akm_type_byte_round_trip_includes_notpsk() {
+        // Every variant must survive to_byte -> from_byte. This is load-bearing for the
+        // disk-spill path (src/store/disk_messages.rs): a NotPsk handshake that spilled to
+        // disk must read back as NotPsk, not Unknown -- otherwise it would be re-promoted
+        // to Wpa2Psk at emit and resurrect the dropped non-PSK line.
+        for akm in [
+            AkmType::Wpa1,
+            AkmType::Wpa2Psk,
+            AkmType::FtPsk,
+            AkmType::FtPskSha384,
+            AkmType::PskSha256,
+            AkmType::PskSha384,
+            AkmType::NotPsk,
+            AkmType::Unknown,
+        ] {
+            assert_eq!(AkmType::from_byte(akm.to_byte()), akm, "round-trip failed for {akm:?}");
+        }
+        assert_eq!(AkmType::NotPsk.to_byte(), 6, "NotPsk must encode as byte 6");
+    }
+
+    #[test]
+    fn notpsk_never_classifies_to_a_hash_type() {
+        // The drop gate: NotPsk has no PSK-crack path on either attack surface.
+        assert!(HashType::from_akm_and_attack(AkmType::NotPsk, true).is_none());
+        assert!(HashType::from_akm_and_attack(AkmType::NotPsk, false).is_none());
+    }
 
     #[test]
     fn io_with_context_display_and_source() {

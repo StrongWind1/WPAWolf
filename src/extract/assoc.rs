@@ -93,6 +93,20 @@ pub fn process_assoc_or_reassoc_req(
         // Without this, the WPA1 EAPOL exchange that follows is misclassified as
         // WPA2-PSK-EAPOL (type 3) instead of WPA1-PSK-EAPOL (type 1).
         AkmType::Wpa1
+    } else if akm_flags.enterprise_sha1
+        || akm_flags.enterprise_sha256
+        || akm_flags.enterprise_sha384
+        || akm_flags.sae
+        || akm_flags.owe
+        || akm_flags.fils
+        || akm_flags.pasn
+    {
+        // The STA negotiated a non-PSK AKM (802.1X / SAE / OWE / FILS / PASN). Record it
+        // per-pair as NotPsk so the KDV override in `store_eapol_key` does not promote the
+        // handshake to a PSK type -- it is dropped at emit. This per-(AP, STA) entry beats
+        // the AP-wide default, so on a mixed PSK + 802.1X AP the PSK clients still emit
+        // while this enterprise association does not. [§9.4.2.24.3, Table 9-190]
+        AkmType::NotPsk
     } else {
         AkmType::Unknown
     };

@@ -166,8 +166,14 @@ pub struct Stats {
     pub dedup_dropped_pmkids: u64,
     /// Hashes dropped at emit because the AKM could not be mapped to one of the
     /// 11 types (`HashType::from_akm_and_attack` returned None even after AKM-map
-    /// inference for PMKIDs). Crack material we extracted but cannot format.
+    /// inference for PMKIDs) and the AKM was not a recognised non-PSK suite. A
+    /// genuinely unclassifiable / `Unknown` residue we extracted but cannot format.
     pub emit_dropped_unclassified_akm: u64,
+    /// Handshakes / PMKIDs dropped at emit because the AKM is a recognised non-PSK
+    /// suite (`AkmType::NotPsk`: enterprise 802.1X / FT-802.1X / SAE / OWE / FILS /
+    /// PASN). Out of v1 scope -- the PMK is not `PBKDF2(PSK)`, so no crackable mode
+    /// 22000 / 37100 line exists. [ARCHITECTURE.md §2.3, §8.6 FR-OUT-*]
+    pub emit_dropped_notpsk_akm: u64,
     /// FT hashes (types 6/7/10/11) dropped at emit because the FT context was
     /// incomplete (no R0KH-ID), so the `WPA*03*`/`WPA*04*` FT line could not be
     /// built. [ARCHITECTURE.md §7 FT line format]
@@ -1559,6 +1565,7 @@ impl Stats {
         nz!("  PMKID duplicates", self.dedup_dropped_pmkids);
         // Emit-time drops of crack material we extracted but could not format.
         nz!("hashes dropped (unclassified AKM; no 11-type)", self.emit_dropped_unclassified_akm);
+        nz!("hashes dropped (non-PSK AKM; out of scope)", self.emit_dropped_notpsk_akm);
         nz!("hashes dropped (FT context missing; no R0KH-ID)", self.emit_dropped_ft_no_context);
 
         // Per-sink hash output rows. Only configured sinks render (decision:

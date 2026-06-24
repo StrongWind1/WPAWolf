@@ -265,21 +265,28 @@ pub fn store_eapol_key(
     // KDV is the only signal we can stake the type prefix on. The FT family is
     // preserved across KDV=2/3 because FT-PSK can legitimately use either MIC
     // depending on the underlying cipher suite. [IEEE 802.11-2024] §12.7.3
-    let mut akm = akm_map.get_best(&ap, &sta);
+    // Read the AKM map once. The EAPOL path may override it by KDV below, but the PMKID
+    // path must consult the raw AKM-IE value (ARCHITECTURE.md §2.3: PMKID is AKM-IE-only,
+    // never KDV-driven). FT was already folded into the map by the block above.
+    let ie_akm = akm_map.get_best(&ap, &sta);
+    let mut akm = ie_akm;
     match key.key_version {
         1 => akm = AkmType::Wpa1,
         2 => match akm {
-            // SHA-1 MIC family: FT preserved, everything else collapses to Wpa2Psk.
-            // PskSha256/PskSha384 with KDV=2 is a wire-bytes-vs-AKM-IE mismatch;
-            // KDV wins because that is what hashcat verifies against.
-            AkmType::FtPsk | AkmType::FtPskSha384 => {},
+            // SHA-1 MIC family: FT and observed-non-PSK preserved; everything else
+            // collapses to Wpa2Psk. PskSha256/PskSha384 with KDV=2 is a
+            // wire-bytes-vs-AKM-IE mismatch; KDV wins because that is what hashcat
+            // verifies against. NotPsk is never promoted -- an 802.1X / SAE handshake is
+            // not crackable as PSK and is dropped at emit.
+            AkmType::FtPsk | AkmType::FtPskSha384 | AkmType::NotPsk => {},
             _ => akm = AkmType::Wpa2Psk,
         },
         3 => match akm {
-            // AES-CMAC family: FT preserved, everything else collapses to
-            // PskSha256. The AKM-IE-says-Wpa2Psk-but-wire-says-CMAC case (the
-            // 11-line edge from the corpus audit) lands here and is corrected.
-            AkmType::FtPsk | AkmType::FtPskSha384 => {},
+            // AES-CMAC family: FT and observed-non-PSK preserved; everything else
+            // collapses to PskSha256. The AKM-IE-says-Wpa2Psk-but-wire-says-CMAC case
+            // (the 11-line edge from the corpus audit) lands here and is corrected.
+            // NotPsk is never promoted (the enterprise/SAE KDV=3 false-positive fix).
+            AkmType::FtPsk | AkmType::FtPskSha384 | AkmType::NotPsk => {},
             _ => akm = AkmType::PskSha256,
         },
         // KDV=0 is "derived from AKM" per Table 12-9 -- used by the FT and SAE
@@ -299,15 +306,23 @@ pub fn store_eapol_key(
     // [hcxpcapngtool EAPOLTIME; stored in us, displayed in ms]
     stats.update_eapol_time_gap(ap, sta, timestamp_us);
 
-    // PMKID classification is independent of the EAPOL MIC family. WPA1 has no PMKID
-    // in spec, but various consumer router firmware regularly emits an M1
-    // with KDV=1 (HMAC-MD5 MIC) AND a PMKID KDE in Key Data: a vendor quirk where
-    // the descriptor type is RSN (0x02) but the wire-level MIC algorithm is the
-    // legacy WPA1 one. The PMKID itself is still computed with the AKM-defined PRF
-    // (HMAC-SHA1 for AKM 2 = Wpa2Psk), not HMAC-MD5, so it remains crackable as
-    // a normal Wpa2-PSK PMKID. Promote `Wpa1` -> `Wpa2Psk` for the PMKID-only path
-    // so `HashType::from_akm_and_attack(_, is_pmkid=true)` does not drop the line.
-    let pmkid_akm = if akm == AkmType::Wpa1 { AkmType::Wpa2Psk } else { akm };
+    // PMKID classification is AKM-IE-driven and independent of the EAPOL KDV byte
+    // (ARCHITECTURE.md §2.3). It is derived from `ie_akm` (the raw AKM map value), NOT
+    // the KDV-overridden `akm`, so a KDV=3 carrier frame on a WPA2-PSK / FT-PSK network
+    // does not mis-promote the PMKID to PSK-SHA256 (type 4).
+    //
+    // Two promotions apply:
+    //   * Wpa1 / Unknown -> Wpa2Psk. WPA1 has no PMKID in spec, but consumer router
+    //     firmware emits an M1 with KDV=1 (HMAC-MD5 MIC) AND a PMKID KDE; the PMKID is
+    //     still computed with the AKM-defined PRF (HMAC-SHA1), so it is a crackable
+    //     Wpa2-PSK PMKID. Unknown (no AKM seen) takes the same optimistic default so
+    //     beacon-less PMKID-only captures are not lost.
+    //   * NotPsk stays NotPsk, so `HashType::from_akm_and_attack(_, is_pmkid=true)` drops
+    //     it -- an enterprise / SAE PMKID is not crackable as PSK.
+    let pmkid_akm = match ie_akm {
+        AkmType::Wpa1 | AkmType::Unknown => AkmType::Wpa2Psk,
+        other => other,
+    };
 
     // M1 PMKID from Key Data KDE. [IEEE 802.11-2024] §12.7.2
     if let Some(pmkid) = key.pmkid {
@@ -715,7 +730,11 @@ mod tests {
 
     #[test]
     fn store_eapol_key_kdv3_with_psk_sha256_akm_routes_correctly() {
-        // KDV=3 (AES-CMAC) with explicit PskSha256 AKM in M2 RSN IE.
+        // KDV=3 (AES-CMAC) with explicit PskSha256 AKM in M2 RSN IE. NOTE: this is a
+        // *genuine* AKM-6 case -- both the AKM-IE path (get_best -> PskSha256) and the
+        // KDV=3 default agree, so it does not discriminate the KDV-promotion bug. The
+        // discriminating coverage lives in store_eapol_key_kdv3_enterprise_context_stays_notpsk
+        // and store_eapol_key_kdv3_pmkid_routes_off_akm_ie_not_kdv.
         let rsn_ie = [
             48u8, 20, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F,
             0xAC, 0x06, // AKM: PSK-SHA256 (AKM 6)
@@ -903,5 +922,97 @@ mod tests {
         );
         let stored = messages.groups().next().unwrap().1;
         assert_eq!(stored[0].mic, MicBytes::from_24(mic24), "24-B MIC must be carried into the store unchanged");
+    }
+
+    #[test]
+    fn store_eapol_key_kdv2_enterprise_context_stays_notpsk() {
+        // A beacon advertised only a non-PSK AKM (e.g. 802.1X) -> akm_map carries NotPsk
+        // for the AP. A KDV=2 (HMAC-SHA1) handshake must NOT be promoted to Wpa2Psk; an
+        // 802.1X PMK is not PBKDF2(PSK), so the line is uncrackable and is dropped at emit.
+        let key = make_key(2, true, false, [0u8; 16], &[]); // M1, KDV=2
+        let mut akm_map = AkmMap::new();
+        akm_map.insert(mac(0x11), AkmType::NotPsk);
+        let mut messages = MessageStore::new();
+        let mut pmkids = PmkidStore::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        store_eapol_key(
+            key,
+            mac(0x11),
+            mac(0x22),
+            1000,
+            &mut akm_map,
+            &mut messages,
+            &mut pmkids,
+            &mut stats,
+            &mut logger,
+        );
+        let stored = messages.groups().next().unwrap().1;
+        assert_eq!(stored[0].akm, AkmType::NotPsk, "KDV=2 must not promote an observed non-PSK AKM to Wpa2Psk");
+    }
+
+    #[test]
+    fn store_eapol_key_kdv3_enterprise_context_stays_notpsk() {
+        // Same as above for KDV=3 (AES-CMAC) -- the family used by FT-802.1X / SAE / CCKM.
+        // Must NOT be promoted to PskSha256 (the phantom type-04/05 root cause).
+        let key = make_key(3, true, false, [0u8; 16], &[]); // M1, KDV=3
+        let mut akm_map = AkmMap::new();
+        akm_map.insert(mac(0x11), AkmType::NotPsk);
+        let mut messages = MessageStore::new();
+        let mut pmkids = PmkidStore::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        store_eapol_key(
+            key,
+            mac(0x11),
+            mac(0x22),
+            1000,
+            &mut akm_map,
+            &mut messages,
+            &mut pmkids,
+            &mut stats,
+            &mut logger,
+        );
+        let stored = messages.groups().next().unwrap().1;
+        assert_eq!(stored[0].akm, AkmType::NotPsk, "KDV=3 must not promote an observed non-PSK AKM to PskSha256");
+    }
+
+    #[test]
+    fn store_eapol_key_kdv3_pmkid_routes_off_akm_ie_not_kdv() {
+        // XWJK regression: a [WPA2-PSK + FT-PSK] AP resolves Wpa2Psk as its AP default
+        // (first suite advertised). A KDV=3 M1 carrying a PMKID KDE must store the PMKID
+        // as Wpa2Psk (type 2), NOT PskSha256 (type 4) -- the PMKID path is AKM-IE-driven,
+        // never KDV-driven (ARCHITECTURE.md §2.3). The EAPOL message akm still follows the
+        // KDV override (PskSha256), proving the two paths are decoupled.
+        let pmkid_val: [u8; 16] =
+            [0xAB, 0xBA, 0x89, 0x98, 0xEF, 0xFE, 0xCD, 0xDC, 0x23, 0x32, 0x01, 0x10, 0x67, 0x76, 0x45, 0x54];
+        let mut kde = vec![0xDD, 0x14, 0x00, 0x0F, 0xAC, 0x04];
+        kde.extend_from_slice(&pmkid_val);
+        let key = make_key(3, true, false, [0u8; 16], &kde); // M1, KDV=3 + PMKID KDE
+        let mut akm_map = AkmMap::new();
+        akm_map.insert(mac(0x11), AkmType::Wpa2Psk); // beacon advertised [2, 4] -> first = Wpa2Psk
+        let mut messages = MessageStore::new();
+        let mut pmkids = PmkidStore::new();
+        let mut stats = Stats::default();
+        let mut logger = Logger::new(None).expect("null logger");
+        store_eapol_key(
+            key,
+            mac(0x11),
+            mac(0x22),
+            1000,
+            &mut akm_map,
+            &mut messages,
+            &mut pmkids,
+            &mut stats,
+            &mut logger,
+        );
+        let entry = pmkids.iter().next().unwrap();
+        assert_eq!(entry.akm, AkmType::Wpa2Psk, "KDV=3 PMKID must route off the AKM-IE (Wpa2Psk), not the KDV byte");
+        let stored = messages.groups().next().unwrap().1;
+        assert_eq!(
+            stored[0].akm,
+            AkmType::PskSha256,
+            "EAPOL akm still follows the KDV=3 override (decoupled from PMKID)"
+        );
     }
 }

@@ -568,6 +568,124 @@ fn type_11_ft_psk_sha384_eapol() {
     assert_eq!(fields[2].len(), 48, "FT SHA-384 MIC must be 24 B = 48 hex chars: {line}");
 }
 
+// --- Non-PSK AKM false-positive regression (docs/akm-classification-falsepositive.md) ---
+//
+// A network that advertises no PSK-family suite (2/4/6/19/20) must NOT have its KDV=2/3
+// handshake or M1 PMKID emitted as a PSK hash. Genuine PSK -- including mixed PSK+802.1X
+// and the WPA2-PSK+FT-PSK XWJK shape -- must keep emitting.
+
+/// Builds a Beacon whose RSN IE lists multiple AKM suites (all under OUI `00:0F:AC`).
+fn build_beacon_akms(ssid: &[u8], akm_bytes: &[u8]) -> Vec<u8> {
+    let mut frame = mac_hdr(TYPE_MGMT, SUBTYPE_BEACON, false, false, [0xFF; 6], AP, AP).to_vec();
+    frame.extend_from_slice(&[0u8; 8]);
+    frame.extend_from_slice(&100u16.to_le_bytes());
+    frame.extend_from_slice(&0x0011u16.to_le_bytes());
+    frame.push(0);
+    frame.push(ssid.len() as u8);
+    frame.extend_from_slice(ssid);
+    frame.extend_from_slice(&[1u8, 4, 0x82, 0x84, 0x8B, 0x96]);
+    frame.extend_from_slice(&[3u8, 1, 6]);
+    let mut rsn: Vec<u8> = Vec::new();
+    rsn.extend_from_slice(&1u16.to_le_bytes());
+    rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]); // group CCMP
+    rsn.extend_from_slice(&1u16.to_le_bytes());
+    rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, 0x04]); // pairwise CCMP
+    rsn.extend_from_slice(&(akm_bytes.len() as u16).to_le_bytes());
+    for &a in akm_bytes {
+        rsn.extend_from_slice(&[0x00, 0x0F, 0xAC, a]);
+    }
+    rsn.extend_from_slice(&[0x00, 0x00]); // RSN caps
+    frame.push(48u8);
+    frame.push(rsn.len() as u8);
+    frame.extend_from_slice(&rsn);
+    frame
+}
+
+/// Runs wpawolf with the combined `-o` sink (quiet), returning `(hash_lines, banner_stdout)`.
+fn run_combined(test_name: &str, frames: Vec<Vec<u8>>) -> (String, String) {
+    let pcap = temp_path(&format!("{test_name}.pcap"));
+    let out = temp_path(&format!("{test_name}.out"));
+    write_pcap(&pcap, &frames);
+    let res = Command::new(binary_path()).arg("-o").arg(&out).arg("--quiet").arg(&pcap).output().expect("run wpawolf");
+    assert!(res.status.success(), "wpawolf exited non-zero on {pcap:?}");
+    // The sink file is created lazily on first write, so a zero-line run leaves no file.
+    let lines = fs::read_to_string(&out).unwrap_or_default();
+    let banner = String::from_utf8_lossy(&res.stdout).into_owned();
+    (lines, banner)
+}
+
+/// Asserts no `WPA*` hash line was written and the non-PSK drop counter fired.
+fn assert_no_hash_dropped_notpsk(test_name: &str, frames: Vec<Vec<u8>>) {
+    let (lines, banner) = run_combined(test_name, frames);
+    assert!(
+        lines.lines().all(|l| !l.starts_with("WPA*")),
+        "{test_name}: expected zero hash lines for a non-PSK network, got:\n{lines}"
+    );
+    assert!(
+        banner.contains("hashes dropped (non-PSK AKM; out of scope)"),
+        "{test_name}: non-PSK drop counter row missing from banner:\n{banner}"
+    );
+}
+
+#[test]
+fn enterprise_8021x_kdv2_emits_nothing() {
+    // Pure 802.1X (AKM 1) beacon + a KDV=2 4-way handshake -- the UAEU-SkyNet EAPOL face.
+    let beacon = build_beacon(SSID, 1, false, false);
+    let mut frames = vec![beacon];
+    frames.extend(handshake_4_way_16(2, &[]));
+    assert_no_hash_dropped_notpsk("enterprise_kdv2", frames);
+}
+
+#[test]
+fn enterprise_ft_8021x_kdv3_emits_nothing() {
+    // FT-802.1X (AKM 3) beacon + a KDV=3 4-way -- the W2x93# / CCKM EAPOL face.
+    let beacon = build_beacon(SSID, 3, false, false);
+    let mut frames = vec![beacon];
+    frames.extend(handshake_4_way_16(3, &[]));
+    assert_no_hash_dropped_notpsk("enterprise_ft_kdv3", frames);
+}
+
+#[test]
+fn sae_only_kdv3_emits_nothing() {
+    // Pure WPA3-SAE (AKM 8) beacon + KDV=3 4-way: same root cause, broader NotPsk fix.
+    let beacon = build_beacon(SSID, 8, false, false);
+    let mut frames = vec![beacon];
+    frames.extend(handshake_4_way_16(3, &[]));
+    assert_no_hash_dropped_notpsk("sae_only_kdv3", frames);
+}
+
+#[test]
+fn enterprise_m1_pmkid_emits_nothing() {
+    // Pure 802.1X beacon + a KDV=3 M1 carrying a PMKID KDE -- the UAEU-SkyNet PMKID face.
+    let beacon = build_beacon(SSID, 1, false, false);
+    let m1 = data_frame_downlink(&eapol_key_16(3, true, false, false, false, NONCE_AP, [0u8; 16], &pmkid_kde(&PMKID)));
+    assert_no_hash_dropped_notpsk("enterprise_m1_pmkid", vec![beacon, m1]);
+}
+
+#[test]
+fn mixed_mode_psk_plus_8021x_still_emits_psk() {
+    // Mixed [802.1X (1) + WPA2-PSK (2)] beacon: the PSK clients are real and crackable,
+    // so a KDV=2 handshake must still emit type-03. PSK precedence must survive the fix.
+    let beacon = build_beacon_akms(SSID, &[1, 2]);
+    let mut frames = vec![beacon];
+    frames.extend(handshake_4_way_16(2, &[]));
+    let _ = assert_fixture_emits("mixed_psk_8021x", frames, "--wpa2-out", "WPA*03*");
+}
+
+#[test]
+fn xwjk_shape_kdv3_pmkid_is_type02_not_type04() {
+    // [WPA2-PSK (2) + FT-PSK (4)] beacon + a KDV=3 M1 PMKID -- the reproduced XWJK case.
+    // Must emit a WPA2-PSK-PMKID (type 02), never the phantom PSK-SHA256-PMKID (type 04).
+    let beacon = build_beacon_akms(SSID, &[2, 4]);
+    let m1 = data_frame_downlink(&eapol_key_16(3, true, false, false, false, NONCE_AP, [0u8; 16], &pmkid_kde(&PMKID)));
+    let (lines, _banner) = run_combined("xwjk_shape", vec![beacon, m1]);
+    assert!(lines.lines().any(|l| l.starts_with("WPA*02*")), "expected a type-02 PMKID line, got:\n{lines}");
+    assert!(
+        lines.lines().all(|l| !l.starts_with("WPA*04*")),
+        "KDV=3 PMKID on a [2,4] network must not emit phantom type-04, got:\n{lines}"
+    );
+}
+
 // --- Helpers ---
 
 mod hex {

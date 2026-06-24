@@ -107,6 +107,8 @@ PMKID (even codes): no KDV; AKM IE only, scoped strongest first
   AKM=19 ──► Type 10
 ```
 
+**Non-PSK gate.** The KDV-first EAPOL routing only promotes within the PSK family. The AKM map carries `AkmType::NotPsk` whenever a Beacon / Probe Response / Association Request / M2 RSN IE advertised a non-PSK AKM (enterprise 802.1X / FT-802.1X / SHA-256 / Suite-B, SAE, OWE, FILS, PASN) and **no** PSK-family suite (2/4/6/19/20) coexisted — the negative discriminator, so a mixed PSK + 802.1X AP and a WPA3-transition PSK + SAE AP both stay PSK on a per-(AP, STA) basis. A `NotPsk` handshake is never promoted by the KDV byte and `HashType::from_akm_and_attack` returns `None`, so it is dropped at emit and counted in `emit_dropped_notpsk_akm` (`STATS.md`). The PMKID path is derived from the raw AKM-IE value, never the KDV-overridden one, so a KDV=3 carrier frame on a WPA2-PSK / FT-PSK network cannot mis-route the PMKID to PSK-SHA256 (type 4). This closes the AKM false-positive documented in `docs/akm-classification-falsepositive.md`. A capture with zero AKM evidence (no Beacon / Assoc / M2 RSN IE) still falls back to the optimistic `Wpa2Psk` default per the never-miss-a-hash invariant, and legacy WPA1-802.1X (KDV=1) still routes to type 1 — both rare residuals.
+
 ## §3  The 5-phase pipeline
 
 wpawolf is a batch pipeline. The five phases run strictly in order; each phase reads from the previous phase's outputs and writes its own.
