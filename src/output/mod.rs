@@ -490,7 +490,9 @@ fn fan_out(
             if let Some(disk) = dd.as_mut() {
                 let fp = match item {
                     FanItem::Pmkid { entry, essid, .. } => dedup::pmkid_fingerprint(entry, essid),
-                    FanItem::Eapol { pair, essid, .. } => dedup::eapol_fingerprint(pair, essid),
+                    FanItem::Eapol { pair, essid, .. } => {
+                        dedup::eapol_fingerprint(pair, essid, dedup.collapse_message_pair())
+                    },
                 };
                 disk.record(sink, fp)?;
             }
@@ -540,7 +542,7 @@ pub fn run_output(
     debug: &DebugPrinter,
     mem_monitor: &mut crate::mem_monitor::MemMonitor,
 ) -> Result<OutputStats> {
-    let mut ctx = OutputContext::new(paths);
+    let mut ctx = OutputContext::new(paths, pair_config.collapse_message_pair);
     ctx.emit(
         message_store,
         pmkid_store,
@@ -614,14 +616,16 @@ impl std::fmt::Debug for OutputContext {
 impl OutputContext {
     /// Builds a fresh context with sinks lazily configured per `paths`. No
     /// files are created until the first `emit` call writes a hash line.
+    /// `collapse_message_pair` mirrors the `--collapse-message-pair` flag and is
+    /// threaded into both dedup sets so the in-memory and disk paths agree.
     #[must_use]
-    pub fn new(paths: &OutputPaths) -> Self {
+    pub fn new(paths: &OutputPaths, collapse_message_pair: bool) -> Self {
         Self {
             stats: OutputStats::default(),
-            dedup: PerSinkDedup::new(),
+            dedup: PerSinkDedup::new(collapse_message_pair),
             sinks: HashSinks::open(paths),
             disk_dedup: None,
-            found_dedup: dedup::DedupSet::new(),
+            found_dedup: dedup::DedupSet::new(collapse_message_pair),
             unresolved_drops: HashMap::new(),
             timestamp_ranges: HashMap::new(),
         }

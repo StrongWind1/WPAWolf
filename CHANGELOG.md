@@ -4,6 +4,10 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ## Releases
 
+### Unreleased
+
+- **New `--collapse-message-pair` output filter.** The trailing `message_pair` byte on `WPA*02*` / `WPA*04*` EAPOL lines is hashcat metadata (combo type plus NC/LE/BE flags), not crackable content. By default it stays part of the dedup identity, so every N#E# combo is emitted (the WIDE never-miss stance, unchanged). `--collapse-message-pair` excludes it from the dedup fingerprint at all three sites that compute it (the global `DedupSet`, the per-sink dedup, and the inline per-group filter in `pair/combos.rs`), so combos sharing identical MIC / nonce / EAPOL-frame / ESSID bytes -- e.g. N1E2 and N3E2 of a clean handshake whose M1 and M3 share an ANonce -- collapse to one line; the first-generated survivor keeps `FLAG_NC`, so no crack is lost. A clean 4-way drops from 6 lines to its 3 distinct hashes. Appears in the `output filters active` banner row, and is bundled into `--strict` (applied last, after `--dedup-hash-combos` and `--nc-dedup`). Default output is byte-identical to v1.1.0.
+
 ### v1.1.0 (2026-06-24)
 
 Correctness and tooling release on top of the stable 1.0 line. Headline: non-PSK handshakes (enterprise 802.1X / FT-802.1X / Cisco CCKM / pure SAE) are no longer mis-emitted as uncrackable PSK hashes, and a KDV=3 PMKID on a WPA2-PSK / FT-PSK network no longer manufactures a phantom PSK-SHA256-PMKID (type 04). Also in this release: the `wpawolf-fixturegen` test vectors are now wire-realistic Pairwise frames validated against hcxpcapngtool, the `--strict` profile gains an explicit `--nc-tolerance` and a rotating-ANonce `--max-eapol-per-type` cap, outputs gain a `--prefix` flag and shareable `/dev/*` sinks, and the dependency set is refreshed. Genuine PSK / FT-PSK / PSK-SHA256 output is byte-identical to v1.0.0; the only difference is that non-PSK false-positives are now correctly dropped (counted in the new `emit_dropped_notpsk_akm` row).

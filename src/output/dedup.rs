@@ -3,7 +3,7 @@
 //! Uses a `HashSet<u64>` of `SipHash` fingerprints to guarantee global uniqueness across
 //! all emitted hash lines. Fingerprint inputs differ by hash-line type to prevent aliasing:
 //! - PMKID lines: `kind_byte(01/03) || PMKID || MAC_AP || MAC_STA || ESSID`
-//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || message_pair`
+//! - EAPOL lines: `kind_byte(02/04) || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID [|| message_pair]` -- the trailing `message_pair` byte (hashcat metadata, not identity) is included by default and excluded under `--collapse-message-pair`, which then collapses content-identical combos.
 //!
 //! Replaces hcxpcapngtool's 20-entry look-back window with O(1) global lookup. At 1 M
 //! unique hashes the set occupies approximately 56 MiB. See `ARCHITECTURE.md §4`.
@@ -27,19 +27,26 @@ use crate::types::hash_slices;
 /// See `ARCHITECTURE.md §4`.
 pub struct DedupSet {
     seen: HashSet<u64>,
+    /// `--collapse-message-pair`: when `true`, the `message_pair` byte is excluded from the
+    /// EAPOL fingerprint so content-identical combos collapse. Default `false` (byte included).
+    collapse_message_pair: bool,
 }
 
 impl std::fmt::Debug for DedupSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DedupSet").field("len", &self.seen.len()).finish()
+        f.debug_struct("DedupSet")
+            .field("len", &self.seen.len())
+            .field("collapse_message_pair", &self.collapse_message_pair)
+            .finish()
     }
 }
 
 impl DedupSet {
-    /// Creates an empty `DedupSet`.
+    /// Creates an empty `DedupSet`. `collapse_message_pair` mirrors the
+    /// `--collapse-message-pair` flag (see [`eapol_fingerprint`]).
     #[must_use]
-    pub fn new() -> Self {
-        Self { seen: HashSet::new() }
+    pub fn new(collapse_message_pair: bool) -> Self {
+        Self { seen: HashSet::new(), collapse_message_pair }
     }
 
     /// Returns `true` if this PMKID entry is new (not a duplicate) and records it.
@@ -53,10 +60,12 @@ impl DedupSet {
 
     /// Returns `true` if this EAPOL pair is new (not a duplicate) and records it.
     ///
-    /// Fingerprint covers: `kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID`.
+    /// Fingerprint covers: `kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID`,
+    /// plus the trailing `message_pair` byte unless this set was built with
+    /// `collapse_message_pair` (the `--collapse-message-pair` flag). See [`eapol_fingerprint`].
     /// `kind_byte` is `0x02` for mode-22000 pairs and `0x04` for FT-PSK pairs.
     pub fn check_eapol(&mut self, pair: &PairedHash, essid: &[u8]) -> bool {
-        self.seen.insert(eapol_fingerprint(pair, essid))
+        self.seen.insert(eapol_fingerprint(pair, essid, self.collapse_message_pair))
     }
 
     /// Inserts a raw fingerprint and returns `true` if it was not already present.
@@ -83,7 +92,7 @@ impl DedupSet {
 
 impl Default for DedupSet {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
@@ -154,20 +163,34 @@ impl SinkId {
 #[derive(Default)]
 pub struct PerSinkDedup {
     sets: [HashSet<u64>; SinkId::COUNT],
+    /// `--collapse-message-pair`: excludes the `message_pair` byte from the EAPOL
+    /// fingerprint when `true` (see [`eapol_fingerprint`]). Default `false`.
+    collapse_message_pair: bool,
 }
 
 impl std::fmt::Debug for PerSinkDedup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let lens: Vec<usize> = self.sets.iter().map(HashSet::len).collect();
-        f.debug_struct("PerSinkDedup").field("lens", &lens).finish()
+        f.debug_struct("PerSinkDedup")
+            .field("lens", &lens)
+            .field("collapse_message_pair", &self.collapse_message_pair)
+            .finish()
     }
 }
 
 impl PerSinkDedup {
     /// Creates an empty per-sink dedup with one `HashSet` per `SinkId`.
+    /// `collapse_message_pair` mirrors the `--collapse-message-pair` flag.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(collapse_message_pair: bool) -> Self {
+        Self { collapse_message_pair, ..Self::default() }
+    }
+
+    /// Returns whether `--collapse-message-pair` is active for this dedup, so direct
+    /// `eapol_fingerprint` callers (e.g. the disk-dedup record path) stay consistent.
+    #[must_use]
+    pub const fn collapse_message_pair(&self) -> bool {
+        self.collapse_message_pair
     }
 
     /// Pre-sizes per-sink `HashSet`s to hold at least `capacity` entries
@@ -232,7 +255,7 @@ impl PerSinkDedup {
 
     /// Returns `true` if this EAPOL pair is new for `sink` and records the fingerprint.
     pub fn check_eapol(&mut self, sink: SinkId, pair: &PairedHash, essid: &[u8]) -> bool {
-        let fp = eapol_fingerprint(pair, essid);
+        let fp = eapol_fingerprint(pair, essid, self.collapse_message_pair);
         self.sets.get_mut(sink.as_index()).is_some_and(|set| set.insert(fp))
     }
 }
@@ -255,19 +278,39 @@ pub fn pmkid_fingerprint(entry: &PmkidEntry, essid: &[u8]) -> u64 {
 
 /// Computes the dedup fingerprint for an EAPOL pair hash line (public, for direct callers).
 ///
-/// Input layout: `kind(1) || mic(16) || mac_ap(6) || mac_sta(6) || nonce(32) || eapol(M) || essid(N) || message_pair(1)`
+/// Input layout: `kind(1) || mic(16) || mac_ap(6) || mac_sta(6) || nonce(32) || eapol(M) || essid(N) [|| message_pair(1)]`
 /// Kind byte: `0x02` for `WPA*02*` (PSK / PSK-SHA256 / Unknown), `0x04` for `WPA*04*` (FT-PSK).
 /// Including the full EAPOL frame ensures that two pairs with the same MIC but different
-/// frame bodies produce distinct fingerprints. Including `message_pair` ensures that N1E2
-/// and N3E2 (or any two combos sharing identical frame/nonce bytes) produce distinct
-/// fingerprints in `--all` mode and are both emitted.
+/// frame bodies produce distinct fingerprints.
+///
+/// `collapse_message_pair` (the `--collapse-message-pair` flag) controls the trailing byte.
+/// The `message_pair` byte is hashcat metadata (combo type in bits 0-2 plus the AP-less /
+/// LE / BE / NC diagnostic flags), not crackable content. When `true`, it is **excluded**,
+/// so two combos that share identical `mic || nonce || eapol || essid` bytes -- e.g. `N1E2`
+/// and `N3E2` of a clean handshake where M1 and M3 carry the same `ANonce` -- collapse to one
+/// line (the first-generated survivor `N1E2` already carries `FLAG_NC`, so it is the more
+/// capable line). When `false` (the default), it is **included**, so every combo is emitted.
+/// The kind byte separates PMKID/EAPOL and PSK/FT; for FT the MDID / R0KH-ID / R1KH-ID extras
+/// live inside the EAPOL frame bytes, so they are covered transitively by `eapol`.
 #[must_use]
-pub fn eapol_fingerprint(pair: &PairedHash, essid: &[u8]) -> u64 {
+pub fn eapol_fingerprint(pair: &PairedHash, essid: &[u8], collapse_message_pair: bool) -> u64 {
     let kind: u8 = if pair.akm.is_ft() { 0x04 } else { 0x02 };
-    hash_slices(
-        kind,
-        &[pair.mic.as_slice(), &pair.ap.0, &pair.sta.0, &pair.nonce, &pair.eapol_frame, essid, &[pair.message_pair]],
-    )
+    if collapse_message_pair {
+        hash_slices(kind, &[pair.mic.as_slice(), &pair.ap.0, &pair.sta.0, &pair.nonce, &pair.eapol_frame, essid])
+    } else {
+        hash_slices(
+            kind,
+            &[
+                pair.mic.as_slice(),
+                &pair.ap.0,
+                &pair.sta.0,
+                &pair.nonce,
+                &pair.eapol_frame,
+                essid,
+                &[pair.message_pair],
+            ],
+        )
+    }
 }
 
 // --- Unit tests ---
@@ -323,20 +366,20 @@ mod tests {
 
     #[test]
     fn new_fingerprint_accepted() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         assert!(d.insert(42), "first insert must return true");
     }
 
     #[test]
     fn duplicate_fingerprint_rejected() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         d.insert(99);
         assert!(!d.insert(99), "second insert of same fingerprint must return false");
     }
 
     #[test]
     fn different_fingerprints_both_accepted() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         assert!(d.insert(1));
         assert!(d.insert(2));
         assert_eq!(d.len(), 2);
@@ -344,7 +387,7 @@ mod tests {
 
     #[test]
     fn is_empty_and_len() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         assert!(d.is_empty());
         d.insert(0);
         assert!(!d.is_empty());
@@ -355,7 +398,7 @@ mod tests {
 
     #[test]
     fn pmkid_dedup_same_entry() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         let entry = make_pmkid_entry([0xAA; 16], AkmType::Wpa2Psk);
         let essid = b"testnet";
         assert!(d.check_pmkid(&entry, essid), "first check must be accepted");
@@ -365,7 +408,7 @@ mod tests {
     #[test]
     fn pmkid_dedup_different_essid() {
         // Same PMKID bytes but different ESSID -> different fingerprints -> both accepted.
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         let entry = make_pmkid_entry([0xBB; 16], AkmType::Wpa2Psk);
         assert!(d.check_pmkid(&entry, b"net1"));
         assert!(d.check_pmkid(&entry, b"net2"), "different essid must produce distinct fingerprint");
@@ -373,7 +416,7 @@ mod tests {
 
     #[test]
     fn pmkid_dedup_different_pmkid() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         let e1 = make_pmkid_entry([0x01; 16], AkmType::Wpa2Psk);
         let e2 = make_pmkid_entry([0x02; 16], AkmType::Wpa2Psk);
         assert!(d.check_pmkid(&e1, b"ssid"));
@@ -384,7 +427,7 @@ mod tests {
 
     #[test]
     fn eapol_dedup_same_pair() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         let pair = make_paired_hash([0x01; 16], [0x02; 32], vec![0xFFu8; 99], AkmType::Wpa2Psk);
         let essid = b"wlan";
         assert!(d.check_eapol(&pair, essid));
@@ -393,11 +436,34 @@ mod tests {
 
     #[test]
     fn eapol_dedup_different_mic() {
-        let mut d = DedupSet::new();
+        let mut d = DedupSet::new(false);
         let p1 = make_paired_hash([0x01; 16], [0x00; 32], vec![0u8; 99], AkmType::Wpa2Psk);
         let p2 = make_paired_hash([0x02; 16], [0x00; 32], vec![0u8; 99], AkmType::Wpa2Psk);
         assert!(d.check_eapol(&p1, b"ssid"));
         assert!(d.check_eapol(&p2, b"ssid"), "different mic must be distinct");
+    }
+
+    #[test]
+    fn eapol_collapse_message_pair_flag() {
+        // Two pairs identical in all crackable content but differing only in the
+        // message_pair metadata byte (e.g. N1E2 mp=0x00 vs the same content tagged
+        // FLAG_NC=0x80). Default (collapse=false) keeps them distinct -> both emitted.
+        // --collapse-message-pair (collapse=true) folds them to one fingerprint.
+        let mut a = make_paired_hash([0x07; 16], [0x08; 32], vec![0x09u8; 99], AkmType::Wpa2Psk);
+        let mut b = make_paired_hash([0x07; 16], [0x08; 32], vec![0x09u8; 99], AkmType::Wpa2Psk);
+        a.message_pair = 0x00;
+        b.message_pair = 0x80;
+        let essid = b"net";
+        assert_ne!(
+            eapol_fingerprint(&a, essid, false),
+            eapol_fingerprint(&b, essid, false),
+            "default: message_pair byte distinguishes the two combos"
+        );
+        assert_eq!(
+            eapol_fingerprint(&a, essid, true),
+            eapol_fingerprint(&b, essid, true),
+            "--collapse-message-pair: identical crackable content -> one fingerprint"
+        );
     }
 
     // --- Kind-byte collision prevention ---
@@ -412,7 +478,7 @@ mod tests {
         let mut pair = make_paired_hash([0x55; 16], [0x00; 32], vec![], AkmType::Wpa2Psk);
         pair.ap = MacAddr::from_bytes([0x11; 6]);
         pair.sta = MacAddr::from_bytes([0x22; 6]);
-        let fp_eapol = eapol_fingerprint(&pair, &[]);
+        let fp_eapol = eapol_fingerprint(&pair, &[], false);
 
         assert_ne!(fp_pmkid, fp_eapol, "kind byte must prevent cross-type fingerprint collision");
     }
@@ -432,8 +498,8 @@ mod tests {
         // FT-PSK EAPOL fingerprint must differ from PSK fingerprint for the same pair bytes.
         let psk_pair = make_paired_hash([0xDD; 16], [0x00; 32], vec![0u8; 50], AkmType::Wpa2Psk);
         let ft_pair = make_paired_hash([0xDD; 16], [0x00; 32], vec![0u8; 50], AkmType::FtPsk);
-        let fp_psk = eapol_fingerprint(&psk_pair, b"net");
-        let fp_ft = eapol_fingerprint(&ft_pair, b"net");
+        let fp_psk = eapol_fingerprint(&psk_pair, b"net", false);
+        let fp_ft = eapol_fingerprint(&ft_pair, b"net", false);
         assert_ne!(fp_psk, fp_ft, "FT-PSK kind byte 0x04 must differ from PSK kind byte 0x02");
     }
 }

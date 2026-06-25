@@ -58,6 +58,13 @@ pub struct PairConfig {
     /// `O(M1*M2)` billions of near-duplicate lines. `0` = unlimited (the default
     /// WIDE behaviour, never miss).
     pub max_eapol_per_type: usize,
+    /// Opt-in collapse of hash lines that differ only in the `message_pair` byte
+    /// (`--collapse-message-pair`). The byte is hashcat metadata (combo type + NC/LE/BE
+    /// flags), not crackable content. When `true`, it is excluded from the dedup
+    /// fingerprint, so content-identical combos (e.g. `N1E2` and `N3E2` of a clean handshake
+    /// where M1 and M3 carry the same `ANonce`) collapse to one line. Default: `false`
+    /// (every combo emitted, `message_pair` is part of the dedup identity).
+    pub collapse_message_pair: bool,
 }
 
 impl Default for PairConfig {
@@ -69,12 +76,13 @@ impl Default for PairConfig {
         Self {
             eapol_timeout_us: 600_000_000, // 10 minutes -- used only when time_check_enabled=true
             rc_drift_tolerance: 8,
-            all_combos: true,          // unfiltered: all 6 combos emitted
-            time_check_enabled: false, // unfiltered: no time filter
-            rc_drift_enabled: false,   // unfiltered: no RC drift filter
-            nc_dedup_enabled: false,   // unfiltered: NC clustering off
-            nc_tolerance: 8,           // matches hashcat NONCE_ERROR_CORRECTIONS default
-            max_eapol_per_type: 0,     // unlimited: no pairing cap (never miss)
+            all_combos: true,             // unfiltered: all 6 combos emitted
+            time_check_enabled: false,    // unfiltered: no time filter
+            rc_drift_enabled: false,      // unfiltered: no RC drift filter
+            nc_dedup_enabled: false,      // unfiltered: NC clustering off
+            nc_tolerance: 8,              // matches hashcat NONCE_ERROR_CORRECTIONS default
+            max_eapol_per_type: 0,        // unlimited: no pairing cap (never miss)
+            collapse_message_pair: false, // unfiltered: message_pair is part of the dedup identity
         }
     }
 }
@@ -250,10 +258,22 @@ pub fn generate(
                 }
             }
             let kind: u8 = if p.akm.is_ft() { 0x04 } else { 0x02 };
-            let fp = crate::types::hash_slices(
-                kind,
-                &[p.mic.as_slice(), &ap_bytes, &sta_bytes, &p.nonce, &p.eapol_frame, &[], &[p.message_pair]],
-            );
+            // The message_pair byte is metadata, not identity. With --collapse-message-pair
+            // it is excluded, so content-identical combos (N1E2 / N3E2 with the same ANonce)
+            // collapse; by default it is included so every combo is emitted. Stays
+            // byte-identical to output::dedup::eapol_fingerprint (empty ESSID here; resolved
+            // at emit).
+            let fp = if config.collapse_message_pair {
+                crate::types::hash_slices(
+                    kind,
+                    &[p.mic.as_slice(), &ap_bytes, &sta_bytes, &p.nonce, &p.eapol_frame, &[]],
+                )
+            } else {
+                crate::types::hash_slices(
+                    kind,
+                    &[p.mic.as_slice(), &ap_bytes, &sta_bytes, &p.nonce, &p.eapol_frame, &[], &[p.message_pair]],
+                )
+            };
             if seen.insert(fp) {
                 pairs.push(p);
             }
@@ -392,18 +412,28 @@ fn finalize_and_dedup(
         }
     }
     let kind: u8 = if pair.akm.is_ft() { 0x04 } else { 0x02 };
-    let fp = crate::types::hash_slices(
-        kind,
-        &[
-            pair.mic.as_slice(),
-            &ctx.ap_bytes,
-            &ctx.sta_bytes,
-            &pair.nonce,
-            &pair.eapol_frame,
-            &[],
-            &[pair.message_pair],
-        ],
-    );
+    // message_pair gated by --collapse-message-pair (metadata, not identity) -- kept
+    // byte-identical to the materialized `dedup_push!` and to
+    // output::dedup::eapol_fingerprint so the streaming and materialized paths agree.
+    let fp = if ctx.config.collapse_message_pair {
+        crate::types::hash_slices(
+            kind,
+            &[pair.mic.as_slice(), &ctx.ap_bytes, &ctx.sta_bytes, &pair.nonce, &pair.eapol_frame, &[]],
+        )
+    } else {
+        crate::types::hash_slices(
+            kind,
+            &[
+                pair.mic.as_slice(),
+                &ctx.ap_bytes,
+                &ctx.sta_bytes,
+                &pair.nonce,
+                &pair.eapol_frame,
+                &[],
+                &[pair.message_pair],
+            ],
+        )
+    };
     if seen.insert(fp) { Some(pair) } else { None }
 }
 
@@ -1077,6 +1107,7 @@ mod tests {
             nc_dedup_enabled: false,
             nc_tolerance: 8,
             max_eapol_per_type: 0,
+            collapse_message_pair: false,
         };
         let (pairs, _) = generate(ap(), sta(), &msgs, &tight);
         // With rc_drift active and tolerance=8, the pair should be found with NC set.

@@ -315,10 +315,10 @@ SipHash-1-3( line_kind_byte || PMKID || MAC_AP || MAC_STA || ESSID )
 For EAPOL lines:
 
 ```
-SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || MESSAGE_PAIR )
+SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID [|| MESSAGE_PAIR] )
 ```
 
-The trailing `message_pair` byte keeps two combos that share identical frame and nonce bytes (e.g. N1E2 vs N3E2 in `--all` mode) from colliding, so both still emit. This is a global filter. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines. (hcxpcapngtool uses an internal 20-entry look-back ring in `cleanbackhandshake` as a speedup, then a full dedup at write time; the two tools are therefore equivalent at the output boundary.)
+The trailing `message_pair` byte is **included by default** and **excluded under `--collapse-message-pair`**. The byte is hashcat metadata (combo type in bits 0-2 plus the AP-less / LE / BE / NC diagnostic flags), not crackable content. By default it is part of the identity, so every emitted combo is kept (the WIDE stance -- maximal recall). With `--collapse-message-pair` it is dropped, so two combos that share identical `MIC || NONCE || EAPOL || ESSID` bytes -- e.g. N1E2 vs N3E2 of a clean handshake where M1 and M3 carry the same ANonce -- are recognised as the *same* hash and collapse to one emitted line; the first-generated survivor (N1E2, which already carries `FLAG_NC`) is the more capable line, so no crack is lost. The same flag gates the inline per-group dedup in `pair/combos.rs` so the streaming and final filters agree. For FT the MDID / R0KH-ID / R1KH-ID extras live inside the `EAPOL` frame bytes and are covered transitively. This is a global filter. Duplicates separated by hours of capture are still caught. The line-kind byte prefix prevents a PMKID value that happens to equal a MIC value from aliasing across pipelines. (hcxpcapngtool uses an internal 20-entry look-back ring in `cleanbackhandshake` as a speedup, then a full dedup at write time; the two tools are therefore equivalent at the output boundary.)
 
 ### 6. PMKID and EAPOL pipelines are strictly separate (OUT-1)
 

@@ -193,6 +193,12 @@ struct Cli {
     #[arg(long, help_heading = "Output filters", display_order = 23)]
     dedup_hash_combos: bool,
 
+    /// Drop hash lines that differ only in the message-pair metadata byte
+    ///
+    /// The message-pair byte (combo type plus NC/LE/BE flags) is hashcat metadata, not crackable content. With this flag, combos that share identical MIC, nonce, EAPOL frame and ESSID bytes collapse to one line instead of being emitted once per combo. Default off: every combo is emitted and the message-pair byte is part of the dedup identity.
+    #[arg(long, help_heading = "Output filters", display_order = 23)]
+    collapse_message_pair: bool,
+
     /// Collapse near-identical-nonce lines to one survivor
     ///
     /// Clusters lines sharing (AP, STA, EAPOL, MIC, combo) where nonces differ only in the trailing 4 bytes. Survivor gets FLAG_NC so hashcat's nonce-error-corrections recovers the rest.
@@ -267,10 +273,11 @@ struct Cli {
 /// turns on the output filters that together close the volume gap against
 /// hcxpcapngtool default: `--eapoltimeout=5`, `--rc-drift=8`, `--nc-tolerance=8`
 /// (hashcat's `NONCE_ERROR_CORRECTIONS`), `--max-eapol-per-type=100` (bounds a
-/// rotating-ANonce AP the way hcx's ring buffer does), `--dedup-hash-combos`, and
-/// `--nc-dedup`. The scalar filters use later-flag-wins precedence (an explicit
-/// `--eapoltimeout=30` survives past `--strict`; a non-zero `--max-eapol-per-type`
-/// likewise wins). The two boolean flags can only be turned on, never off.
+/// rotating-ANonce AP the way hcx's ring buffer does), `--dedup-hash-combos`,
+/// `--nc-dedup`, and `--collapse-message-pair` (applied last). The scalar filters
+/// use later-flag-wins precedence (an explicit `--eapoltimeout=30` survives past
+/// `--strict`; a non-zero `--max-eapol-per-type` likewise wins). The three boolean
+/// flags can only be turned on, never off.
 const fn apply_strict_defaults(cli: &mut Cli) {
     if !cli.strict {
         return;
@@ -294,6 +301,7 @@ const fn apply_strict_defaults(cli: &mut Cli) {
     }
     cli.dedup_hash_combos = true;
     cli.nc_dedup = true;
+    cli.collapse_message_pair = true;
 }
 
 /// Expand `--prefix PREFIX` into a default path for every hash and auxiliary
@@ -501,6 +509,7 @@ fn build_pair_config(cli: &Cli) -> PairConfig {
         nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
         nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
         max_eapol_per_type: cli.max_eapol_per_type, // 0 = unlimited (off by default)
+        collapse_message_pair: cli.collapse_message_pair, // output filter: off by default
     }
 }
 
@@ -638,7 +647,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     // Hash-output state: opens lazily, accumulates dedup + per-AP unresolved-SSID
     // bookkeeping. `emit` runs once after ingestion completes, then `finalize` flushes
     // sinks and writes auxiliary outputs.
-    let mut output_ctx = wpawolf::output::OutputContext::new(&paths);
+    let mut output_ctx = wpawolf::output::OutputContext::new(&paths, cli.collapse_message_pair);
 
     // --- Phase 1: Collect ---
     debug.phase_start(1, "Ingest");
@@ -971,6 +980,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         if cli.max_eapol_per_type > 0 {
             parts.push(format!("max-eapol-per-type={}", cli.max_eapol_per_type));
         }
+        // Listed last to mirror its `--strict` application order (applied after the others).
+        if cli.collapse_message_pair {
+            parts.push("collapse-message-pair".to_owned());
+        }
         if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
     };
 
@@ -1263,16 +1276,18 @@ mod tests {
         assert_eq!(cli.rc_drift, None, "no --strict -> rc_drift stays None (off)");
         assert!(!cli.dedup_hash_combos, "no --strict -> dedup_hash_combos stays off");
         assert!(!cli.nc_dedup, "no --strict -> nc_dedup stays off");
+        assert!(!cli.collapse_message_pair, "no --strict -> collapse_message_pair stays off");
     }
 
     #[test]
-    fn strict_alone_enables_all_four_bundled_filters() {
+    fn strict_alone_enables_all_bundled_filters() {
         let cli = parse_with_strict(&["--strict"]);
         assert!(cli.strict);
         assert_eq!(cli.eapoltimeout, Some(5), "--strict -> 5 s session window");
         assert_eq!(cli.rc_drift, Some(8), "--strict -> RC drift tolerance 8");
         assert!(cli.dedup_hash_combos, "--strict -> dedup_hash_combos on");
         assert!(cli.nc_dedup, "--strict -> nc_dedup on");
+        assert!(cli.collapse_message_pair, "--strict -> collapse_message_pair on (applied last)");
     }
 
     #[test]
