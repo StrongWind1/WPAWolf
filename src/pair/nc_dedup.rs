@@ -17,9 +17,20 @@
 //! `max - min` span fits within `PairConfig::nc_tolerance` (default 8 -- matches
 //! hashcat's `NONCE_ERROR_CORRECTIONS=8`). The hashcat-safest observed nonce in
 //! each cluster -- the one minimising `max(tail - min, max - tail)` -- becomes
-//! the survivor; its `message_pair` byte gains `FLAG_NC` plus `FLAG_LE` or
-//! `FLAG_BE` depending on which interpretation produced the tighter
-//! clustering. The remaining cluster members are dropped.
+//! the survivor; its `message_pair` byte gains `FLAG_NC` and any `FLAG_LE` /
+//! `FLAG_BE` endianness tag is cleared. Emitting `FLAG_NC` with neither
+//! endianness bit leaves hashcat's `detected_le` and `detected_be` both set, so
+//! `bo_loops = 2` \[`m22000-pure.cl`:495-497\] and the kernel sweeps BOTH
+//! trailing-dword byte orders -- recovering every dropped sibling regardless of
+//! which interpretation produced the cluster. (Tagging a single endianness bit
+//! makes the kernel sweep the OPPOSITE order, stranding the dropped siblings.)
+//! The remaining cluster members are dropped.
+//!
+//! AP-less combos (`N2E3` / `N4E3`) are never clustered: hashcat forces
+//! `nonce_error_corrections = 0` for an APLESS line (`message_pair & (1<<4)`)
+//! BEFORE it consults `FLAG_NC` \[`module_22000.c`:1310-1314\], so a collapsed
+//! APLESS survivor's siblings would be unrecoverable. They pass through as
+//! singletons, matching the `combos.rs` rule that withholds `FLAG_NC` from APLESS.
 //!
 //! Why hashcat-safest: hashcat with `NC=N` iterates
 //! `[survivor - N/2, survivor + N/2]` symmetrically. For dense clusters the
@@ -41,7 +52,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::combos::PairConfig;
-use super::{FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
+use super::{ComboType, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 
 // --- Public API ---
 
@@ -80,9 +91,11 @@ pub struct NcDedupStats {
     pub smart_ft_nonapless_kept: u64,
 }
 
-/// Collapses near-identical-nonce siblings within `pairs`, tagging the survivor
-/// with `FLAG_NC` (plus `FLAG_LE` / `FLAG_BE`) so hashcat's
-/// `--nonce-error-corrections` recovers the dropped variants.
+/// Collapses near-identical-nonce siblings within `pairs`.
+///
+/// Tags the survivor with `FLAG_NC` only (no `FLAG_LE` / `FLAG_BE`, so hashcat
+/// sweeps both byte orders) so its `--nonce-error-corrections` recovers the
+/// dropped variants.
 ///
 /// Returns the surviving pairs in their original first-seen order plus a
 /// counter triple describing how many lines were collapsed.
@@ -109,6 +122,14 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
     let nonces: Vec<[u8; 32]> = pairs.iter().map(|p| p.nonce).collect();
     let mut buckets: HashMap<ClusterKey, Vec<usize>> = HashMap::with_capacity(pairs.len());
     for (i, p) in pairs.iter().enumerate() {
+        // Never cluster AP-less combos. hashcat zeroes nonce-error-corrections for
+        // an APLESS line (`message_pair & (1<<4)`) BEFORE it consults `FLAG_NC`
+        // [module_22000.c:1310-1314], so a collapsed APLESS survivor's dropped
+        // siblings are unrecoverable. Leave them as singletons (they keep whatever
+        // flags combos.rs assigned), mirroring combos.rs withholding FLAG_NC there.
+        if matches!(p.combo_type, ComboType::N2E3 | ComboType::N4E3) {
+            continue;
+        }
         let mut prefix = [0u8; 28];
         prefix.copy_from_slice(&p.nonce[..28]);
         let key = ClusterKey {
@@ -121,7 +142,8 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
     }
 
     // Step 2 + 3: cluster within each bucket; pick LE vs BE by whichever drops
-    // the most lines (LE wins ties). Survivors get FLAG_NC | flag overlay.
+    // the most lines (LE wins ties) -- for survivor selection only. Survivors get
+    // the FLAG_NC overlay with LE/BE cleared (hashcat then sweeps both orders).
     let mut stats = NcDedupStats::default();
     let mut to_drop: HashSet<usize> = HashSet::new();
     let mut overlay: HashMap<usize, u8> = HashMap::new();
@@ -134,11 +156,14 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
         let (le_clusters, le_collapsed) = cluster_indices(&indices, &nonces, tolerance, Endianness::Le);
         let (be_clusters, be_collapsed) = cluster_indices(&indices, &nonces, tolerance, Endianness::Be);
 
-        let (clusters, flag, endian) = if le_collapsed >= be_collapsed {
-            (le_clusters, FLAG_LE, Endianness::Le)
-        } else {
-            (be_clusters, FLAG_BE, Endianness::Be)
-        };
+        // Pick the endianness whose clustering collapses more lines. `endian` drives
+        // survivor selection (pick_safe_survivor), so every dropped sibling lies
+        // within +/- N/2 of the survivor in THAT byte order. We do NOT carry the
+        // endianness into a flag: the survivor is tagged FLAG_NC only (LE/BE cleared
+        // below) so hashcat's bo_loops = 2 sweeps both orders and is guaranteed to
+        // cover the clustered one [m22000-pure.cl:495-540].
+        let (clusters, endian) =
+            if le_collapsed >= be_collapsed { (le_clusters, Endianness::Le) } else { (be_clusters, Endianness::Be) };
 
         // Hashcat's `--nonce-error-corrections=tolerance` iterates `[survivor -
         // tolerance/2, survivor + tolerance/2]` around the emitted nonce. To
@@ -171,7 +196,7 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
                 stats.max_cluster_size = size_u64;
             }
 
-            overlay.insert(survivor, FLAG_NC | flag);
+            overlay.insert(survivor, FLAG_NC);
             for &idx in &cluster {
                 if idx != survivor {
                     to_drop.insert(idx);
@@ -189,7 +214,11 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
             continue;
         }
         if let Some(&flag) = overlay.get(&i) {
-            p.message_pair |= flag;
+            // Clear any LE/BE endianness tag (combos.rs may have set one) and set
+            // FLAG_NC. With neither endianness bit, hashcat keeps detected_le ==
+            // detected_be == 1 -> bo_loops = 2 -> sweeps both trailing-dword byte
+            // orders, recovering every dropped sibling regardless of cluster order.
+            p.message_pair = (p.message_pair & !(FLAG_LE | FLAG_BE)) | flag;
         }
         kept.push(p);
     }
@@ -416,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn nc_dedup_le_cluster_of_nine_collapses_to_one_with_flag_nc_and_flag_le() {
+    fn nc_dedup_le_cluster_of_nine_collapses_to_one_with_flag_nc_only() {
         // 9 pairs differing only in nonce[31] (LE tail) spanning 0..=8 -> 1 cluster.
         let pairs: Vec<PairedHash> =
             (0u8..=8).map(|t| make_pair(ComboType::N1E2, nonce_with_le_tail(t), 0xCC, 0xDD)).collect();
@@ -427,15 +456,20 @@ mod tests {
         assert_eq!(stats.max_cluster_size, 9);
         let survivor = &out[0];
         assert_ne!(survivor.message_pair & FLAG_NC, 0, "survivor must carry FLAG_NC");
-        assert_ne!(survivor.message_pair & FLAG_LE, 0, "LE clustering must set FLAG_LE");
+        // No endianness tag: hashcat keeps detected_le == detected_be == 1 (bo_loops
+        // = 2) and sweeps BOTH byte orders, so the dropped siblings are reachable
+        // regardless of clustering order. Tagging FLAG_LE would make hashcat sweep
+        // the opposite (BE) order and strand them -- the never-miss bug this guards.
+        assert_eq!(survivor.message_pair & (FLAG_LE | FLAG_BE), 0, "survivor must carry NO endianness tag");
     }
 
     #[test]
-    fn nc_dedup_be_cluster_collapses_to_one_with_flag_be() {
+    fn nc_dedup_be_cluster_collapses_to_one_with_flag_nc_only() {
         // 9 pairs differing in BE-interpreted tail value (big strides on byte 28,
         // identical bytes 29..32). LE interpretation produces 9 wildly-separated
         // values (256, 512, ..., 2304 vs the tolerance of 8); BE produces 9
-        // consecutive values 0..=8. BE must win.
+        // consecutive values 0..=8. BE clustering wins survivor selection, but the
+        // survivor is still tagged FLAG_NC only (no FLAG_BE) so hashcat sweeps both.
         let pairs: Vec<PairedHash> =
             (0u32..=8).map(|t| make_pair(ComboType::N1E2, nonce_with_be_tail_value(t), 0xCC, 0xDD)).collect();
         let (out, stats) = nc_dedup(pairs, &config_with_nc(8));
@@ -444,7 +478,22 @@ mod tests {
         assert_eq!(stats.cluster_count, 1);
         let survivor = &out[0];
         assert_ne!(survivor.message_pair & FLAG_NC, 0, "survivor must carry FLAG_NC");
-        assert_ne!(survivor.message_pair & FLAG_BE, 0, "BE clustering must set FLAG_BE");
+        assert_eq!(survivor.message_pair & (FLAG_LE | FLAG_BE), 0, "survivor must carry NO endianness tag");
+    }
+
+    #[test]
+    fn nc_dedup_apless_cluster_is_not_collapsed() {
+        // An AP-less combo (N2E3) cluster that WOULD collapse for a non-APLESS combo
+        // must instead pass through untouched: hashcat forces NC = 0 for APLESS lines
+        // before consulting FLAG_NC, so collapsing them would silently drop crackable
+        // siblings. Every sibling must survive and none may gain FLAG_NC.
+        let pairs: Vec<PairedHash> =
+            (0u8..=8).map(|t| make_pair(ComboType::N2E3, nonce_with_le_tail(t), 0xCC, 0xDD)).collect();
+        let (out, stats) = nc_dedup(pairs, &config_with_nc(8));
+        assert_eq!(out.len(), 9, "APLESS siblings must all survive (no collapse)");
+        assert_eq!(stats.collapsed_lines, 0);
+        assert_eq!(stats.cluster_count, 0);
+        assert!(out.iter().all(|p| p.message_pair & FLAG_NC == 0), "APLESS survivors must not gain FLAG_NC");
     }
 
     #[test]

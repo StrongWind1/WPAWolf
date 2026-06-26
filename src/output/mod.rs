@@ -33,9 +33,9 @@ use crate::store::AkmMap;
 use crate::store::auxiliary::{
     DeviceInfoStore, EssidSet, IdentitySet, ProbeEssidSet, UsernameSet, WordlistScanIesStore, WordlistStore,
 };
-use crate::store::messages::MessageStore;
+use crate::store::messages::{EapolMessage, MessageStore};
 use crate::store::pmkid::{PmkidEntry, PmkidStore};
-use crate::types::{AkmType, FtFields, HashType, Result};
+use crate::types::{AkmType, FtFields, HashType, MacPair, Result};
 
 use self::dedup::{PerSinkDedup, SinkId};
 use self::device_info::write_device_info;
@@ -773,6 +773,46 @@ impl OutputContext {
         Ok(false)
     }
 
+    /// The first R0KH-ID-bearing `FtFields` in `msgs`, if any. R0KH-ID is a
+    /// per-(AP, STA)-session constant, so the first carrier message is sufficient.
+    fn best_r0khid_ft(msgs: &[EapolMessage]) -> Option<Box<FtFields>> {
+        msgs.iter().find_map(|m| m.ft.as_ref().filter(|ft| ft.r0khid_len > 0).cloned())
+    }
+
+    /// Session-level FT-context backfill: each `(AP, STA)` group mapped to the best
+    /// R0KH-ID-bearing `FtFields` seen in any of its EAPOL messages. Lets an FT-PSK
+    /// PMKID whose own carrier frame (e.g. an M1 PMKID KDE) omitted the R0KH-ID still
+    /// emit its standalone WPA*03 / WPA*06 line, matching hcxpcapngtool's cross-frame
+    /// backfill \[`hcxpcapngtool.c`:2807-2884\]; otherwise the line is dropped
+    /// (`emit_dropped_ft_no_context`) -- a never-miss gap for FT-PSK PMKIDs.
+    fn build_ft_backfill(message_store: &MessageStore) -> HashMap<MacPair, Box<FtFields>> {
+        let mut map: HashMap<MacPair, Box<FtFields>> = HashMap::new();
+        if message_store.disk_mode() {
+            for key in message_store.group_keys() {
+                if let Some(ft) = Self::best_r0khid_ft(&message_store.load_group(&key)) {
+                    map.insert(key, ft);
+                }
+            }
+        } else {
+            for (pair, msgs) in message_store.groups() {
+                if let Some(ft) = Self::best_r0khid_ft(msgs) {
+                    map.insert(*pair, ft);
+                }
+            }
+        }
+        map
+    }
+
+    /// True if any FT-classified PMKID lacks its own R0KH-ID, so building the session
+    /// backfill is worthwhile. Cheap (no AKM-map resolution), so it gates the
+    /// message-store scan -- important in disk mode where the scan re-reads spill.
+    fn any_ft_pmkid_missing_context(pmkid_store: &PmkidStore) -> bool {
+        pmkid_store.iter().any(|e| {
+            matches!(e.akm, AkmType::FtPsk | AkmType::FtPskSha384 | AkmType::Unknown)
+                && e.ft.as_ref().is_none_or(|ft| ft.r0khid_len == 0)
+        })
+    }
+
     fn emit_inner(
         &mut self,
         message_store: &MessageStore,
@@ -792,6 +832,17 @@ impl OutputContext {
         let disk_dedup = &mut self.disk_dedup;
         let found_dedup = &mut self.found_dedup;
         let unresolved_drops = &mut self.unresolved_drops;
+
+        // FT-PSK PMKID backfill (never-miss): an FT-PSK PMKID whose own carrier frame
+        // lacked an R0KH-ID can still emit using the session's R0KH-ID from M2/M3.
+        // Built only when an FT PMKID actually needs it, so the common path pays
+        // nothing and disk mode avoids an unnecessary spill re-read.
+        let ft_backfill: HashMap<MacPair, Box<FtFields>> =
+            if any_sink && Self::any_ft_pmkid_missing_context(pmkid_store) {
+                Self::build_ft_backfill(message_store)
+            } else {
+                HashMap::new()
+            };
 
         // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
         //
@@ -823,6 +874,10 @@ impl OutputContext {
                 let ft_ctx: Option<&FtFields> = if is_ft {
                     if let Some(ft) = entry.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
                         Some(ft)
+                    } else if let Some(ft) = ft_backfill.get(&MacPair::new(entry.ap, entry.sta)) {
+                        // Carrier frame (e.g. M1 PMKID KDE) lacked R0KH-ID; reuse the
+                        // session's from M2/M3 so the standalone FT-PSK line still emits.
+                        Some(ft.as_ref())
                     } else {
                         stats.emit_dropped_ft_no_context += 1;
                         continue;
@@ -939,6 +994,13 @@ impl OutputContext {
                         unresolved_drops: ud,
                         first_error,
                     } = &mut *guard;
+                    // All pairs in this streaming batch belong to one (AP, STA) group,
+                    // so the AP's emit-SSID set is identical for every pair -- resolve it
+                    // once per group instead of once per paired hash (the per-pair call
+                    // re-sorted the AP's SSID-variant list on every hash).
+                    let group_ssids = pairs.first().map_or_else(Vec::new, |p| {
+                        essid_map.ssids_for_emit(&p.ap, essid_filter.collapse_min, essid_filter.collapse_ratio)
+                    });
                     for pair in &pairs {
                         let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
                             if matches!(pair.akm, AkmType::NotPsk) {
@@ -948,13 +1010,14 @@ impl OutputContext {
                             }
                             continue;
                         };
-                        let ssids =
-                            essid_map.ssids_for_emit(&pair.ap, essid_filter.collapse_min, essid_filter.collapse_ratio);
                         let is_ft = ht.is_ft();
 
                         let ft_ctx: Option<&FtFields> = if is_ft {
                             if let Some(ft) = pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
                                 Some(ft)
+                            } else if let Some(ft) = ft_backfill.get(&MacPair::new(pair.ap, pair.sta)) {
+                                // Carrier frame lacked R0KH-ID; reuse the session's (M2/M3).
+                                Some(ft.as_ref())
                             } else {
                                 st.emit_dropped_ft_no_context += 1;
                                 continue;
@@ -963,13 +1026,13 @@ impl OutputContext {
                             None
                         };
 
-                        if ssids.is_empty() {
+                        if group_ssids.is_empty() {
                             *ud.entry(pair.ap).or_insert(0) += 1;
                             st.essid_unresolved_emissions += 1;
                             continue;
                         }
 
-                        for essid in ssids {
+                        for &essid in &group_ssids {
                             // Inventory count (sink-independent), as in Pipeline 1.
                             if dd.is_some() || fd.check_eapol(pair, essid) {
                                 *st.hash_type_found.entry(ht).or_insert(0) += 1;

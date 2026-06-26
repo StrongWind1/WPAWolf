@@ -63,11 +63,12 @@ struct PmkidRef {
 pub struct PmkidStore {
     groups: HashMap<MacPair, Vec<PmkidEntry>>,
     disk_index: HashMap<MacPair, Vec<PmkidRef>>,
-    /// Per-pair seen-PMKID set for disk mode dedup. Kept in memory because
-    /// the 16-byte PMKID values are small (~20 bytes per entry with `HashSet`
-    /// overhead) and the total count is bounded by the number of unique PMKIDs
-    /// in the capture (typically <100K).
-    disk_seen: HashMap<MacPair, HashSet<[u8; 16]>>,
+    /// Per-pair seen-PMKID set used for O(1) dedup in BOTH memory and disk mode.
+    /// Kept in memory because the 16-byte PMKID values are small (~20 bytes per
+    /// entry with `HashSet` overhead) and the total count is bounded by the number
+    /// of unique PMKIDs in the capture (typically <100K). Replaces the former
+    /// O(n)-per-insert linear scan of the per-pair `Vec` in the memory path.
+    seen: HashMap<MacPair, HashSet<[u8; 16]>>,
     disk_writer: Option<BufWriter<std::fs::File>>,
     disk_path: Option<std::path::PathBuf>,
     disk_offset: u64,
@@ -111,17 +112,19 @@ impl PmkidStore {
             return self.add_to_disk(&entry);
         }
         let pair = MacPair::new(entry.ap, entry.sta);
-        let entries = self.groups.entry(pair).or_default();
-        if entries.iter().any(|e| e.pmkid == entry.pmkid) {
+        // O(1) dedup via the per-pair seen-set (same accept/reject decision as the
+        // former `entries.iter().any(..)` linear scan, but without the O(n^2) per-group
+        // cost on captures that pack many distinct PMKIDs into one (AP, STA) pair).
+        if !self.seen.entry(pair).or_default().insert(entry.pmkid) {
             return false;
         }
-        entries.push(entry);
+        self.groups.entry(pair).or_default().push(entry);
         true
     }
 
     fn add_to_disk(&mut self, entry: &PmkidEntry) -> bool {
         let pair = MacPair::new(entry.ap, entry.sta);
-        if !self.disk_seen.entry(pair).or_default().insert(entry.pmkid) {
+        if !self.seen.entry(pair).or_default().insert(entry.pmkid) {
             return false;
         }
         let Some(writer) = &mut self.disk_writer else {
@@ -205,7 +208,7 @@ impl PmkidStore {
         let old_groups = std::mem::take(&mut self.groups);
         for (pair, entries) in old_groups {
             let mut refs = Vec::with_capacity(entries.len());
-            let seen = self.disk_seen.entry(pair).or_default();
+            let seen = self.seen.entry(pair).or_default();
             for entry in &entries {
                 seen.insert(entry.pmkid);
                 let written = write_pmkid_entry(&mut writer, entry).map_err(crate::types::Error::Io)?;
@@ -291,7 +294,7 @@ impl PmkidStore {
     pub fn clear(&mut self) {
         self.groups.clear();
         self.disk_index.clear();
-        self.disk_seen.clear();
+        self.seen.clear();
     }
 
     /// Coarse heap + struct-bytes estimate for `--mem-stats` reporting.

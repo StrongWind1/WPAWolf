@@ -1091,7 +1091,9 @@ pub fn format_pct_tenths(pct_tenths: u64) -> String {
 /// Hashes a sequence of byte slices into a single `u64` fingerprint.
 ///
 /// `kind` is mixed in first so that two payloads with the same bytes but different
-/// semantic categories (e.g. a PMKID vs an EAPOL pair) cannot collide. The underlying
+/// semantic categories (e.g. a PMKID vs an EAPOL pair) cannot collide. Each slice is
+/// length-delimited so that adjacent variable-length fields (e.g. `eapol_frame` then
+/// `essid`) have an unambiguous boundary and cannot collide by byte-shift. The underlying
 /// `DefaultHasher` is `SipHash`-1-3 on stable Rust; cross-run stability is not
 /// required because the caller treats fingerprints as per-invocation identities.
 ///
@@ -1105,6 +1107,13 @@ pub fn hash_slices(kind: u8, slices: &[&[u8]]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     h.write_u8(kind);
     for s in slices {
+        // Length-delimit each slice. `Hasher::write` streams raw bytes with no
+        // boundary marker, so two adjacent variable-length fields would otherwise
+        // be ambiguous: e.g. (eapol="X", essid="NET") and (eapol="XN", essid="ET")
+        // produce the same byte stream and collide. Prefixing each slice's length
+        // makes the boundary unambiguous, so distinct EAPOL/PMKID lines can never
+        // be folded by a fingerprint collision (never-miss).
+        h.write_usize(s.len());
         h.write(s);
     }
     h.finish()

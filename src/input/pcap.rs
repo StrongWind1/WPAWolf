@@ -226,58 +226,67 @@ impl<R: Read> PacketReader for PcapReader<R> {
     /// Interface id is always 0 -- classic pcap has exactly one interface.
     #[allow(clippy::similar_names, reason = "ts_sec/ts_usec are pcap protocol-standard field names")]
     fn next_packet(&mut self) -> Result<Option<Packet>> {
-        // --- Read the 16-byte packet record header ---
-        let mut hdr = [0u8; PKT_HDR_LEN];
-        match self.reader.read_exact(&mut hdr) {
-            Ok(()) => {},
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
+        // Read records, skipping any whose caplen exceeds MAX_PACKET_BYTES. An
+        // explicit loop (not tail recursion) bounds stack growth across a run of
+        // consecutive oversized records, since Rust does not guarantee TCO and the
+        // crate is built with panic = "abort" (a stack overflow would abort the run).
+        let (ts_sec, ts_usec, incl_len) = loop {
+            // --- Read the 16-byte packet record header ---
+            let mut hdr = [0u8; PKT_HDR_LEN];
+            match self.reader.read_exact(&mut hdr) {
+                Ok(()) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
 
-        // ts_sec[0..4], ts_usec[4..8], incl_len[8..12], orig_len[12..16]
-        // [libpcap pcap/pcap.h struct pcap_pkthdr]
-        let ts_sec_bytes: [u8; 4] = hdr.get(0..4).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
-            context: "pcap packet header ts_sec",
-            needed: 4,
-            got: 0,
-        })?;
-        let ts_usec_bytes: [u8; 4] = hdr.get(4..8).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
-            context: "pcap packet header ts_usec",
-            needed: 8,
-            got: 4,
-        })?;
-        let incl_len_bytes: [u8; 4] = hdr.get(8..12).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
-            context: "pcap packet header incl_len",
-            needed: 12,
-            got: 8,
-        })?;
-        // orig_len bytes[12..16] are parsed but not used; incl_len is what was captured.
-
-        let ts_sec = self.byte_order.u32(ts_sec_bytes);
-        let ts_usec = self.byte_order.u32(ts_usec_bytes);
-        let incl_len = self.byte_order.u32(incl_len_bytes);
-
-        // --- Consume Kuznetzov extra bytes (index, protocol, pkt_type, pad) ---
-        // [libpcap sf-pcap.c:167-174] The 8 bytes after orig_len are discarded.
-        if self.kuznetzov {
-            let mut kuz = [0u8; KUZ_EXTRA_LEN];
-            self.reader.read_exact(&mut kuz).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    Error::Truncated { context: "pcap Kuznetzov extra header", needed: KUZ_EXTRA_LEN, got: 0 }
-                } else {
-                    Error::Io(e)
-                }
+            // ts_sec[0..4], ts_usec[4..8], incl_len[8..12], orig_len[12..16]
+            // [libpcap pcap/pcap.h struct pcap_pkthdr]
+            let ts_sec_bytes: [u8; 4] = hdr.get(0..4).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
+                context: "pcap packet header ts_sec",
+                needed: 4,
+                got: 0,
             })?;
-        }
+            let ts_usec_bytes: [u8; 4] = hdr.get(4..8).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
+                context: "pcap packet header ts_usec",
+                needed: 8,
+                got: 4,
+            })?;
+            let incl_len_bytes: [u8; 4] = hdr.get(8..12).and_then(|s| s.try_into().ok()).ok_or(Error::Truncated {
+                context: "pcap packet header incl_len",
+                needed: 12,
+                got: 8,
+            })?;
+            // orig_len bytes[12..16] are parsed but not used; incl_len is what was captured.
+
+            let ts_sec = self.byte_order.u32(ts_sec_bytes);
+            let ts_usec = self.byte_order.u32(ts_usec_bytes);
+            let incl_len = self.byte_order.u32(incl_len_bytes);
+
+            // --- Consume Kuznetzov extra bytes (index, protocol, pkt_type, pad) ---
+            // [libpcap sf-pcap.c:167-174] The 8 bytes after orig_len are discarded.
+            if self.kuznetzov {
+                let mut kuz = [0u8; KUZ_EXTRA_LEN];
+                self.reader.read_exact(&mut kuz).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        Error::Truncated { context: "pcap Kuznetzov extra header", needed: KUZ_EXTRA_LEN, got: 0 }
+                    } else {
+                        Error::Io(e)
+                    }
+                })?;
+            }
+
+            // Skip records claiming more than MAX_PACKET_BYTES: drain caplen bytes so
+            // the next record header is correctly aligned, then continue to the next.
+            if incl_len as usize > super::MAX_PACKET_BYTES {
+                std::io::copy(&mut (&mut self.reader).take(incl_len.into()), &mut std::io::sink())?;
+                continue;
+            }
+
+            break (ts_sec, ts_usec, incl_len);
+        };
 
         // --- Read packet data ---
         let caplen = incl_len as usize;
-        if caplen > super::MAX_PACKET_BYTES {
-            // Skip this record: consume caplen bytes from the stream so the next
-            // record header is at the correct offset, then recurse to the next packet.
-            std::io::copy(&mut (&mut self.reader).take(incl_len.into()), &mut std::io::sink())?;
-            return self.next_packet();
-        }
         // Reuse the recycled buffer when it has enough capacity; otherwise allocate fresh.
         // After the first few packets the buffer stabilises at the largest observed caplen
         // and no further allocations occur for the rest of the file.

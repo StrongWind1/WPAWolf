@@ -307,15 +307,20 @@ fn nc_dedup_collapses_26_nonces_to_three_survivors() {
     let lines = run_and_count(&pcap, &out, &["--nc-dedup"]);
     assert_eq!(lines, 3, "26 sequential nonces span 0x19 -> three clusters of 9, 9, 8 at tolerance=8");
 
-    // Each survivor must carry FLAG_NC (0x80) | FLAG_LE (0x20) in the
-    // message_pair byte (field 9 of the WPA*02* line).
+    // Each survivor must carry FLAG_NC (0x80) and NO endianness tag (FLAG_LE 0x20
+    // and FLAG_BE 0x40 both cleared) in the message_pair byte (field 9 of the
+    // WPA*02* line). With neither endianness bit, hashcat keeps detected_le ==
+    // detected_be == 1 (bo_loops = 2) and sweeps BOTH trailing-dword byte orders,
+    // recovering every dropped sibling regardless of which order clustered them. A
+    // single endianness tag would make hashcat sweep the opposite order and strand
+    // the dropped siblings -- the never-miss bug this guards.
     let text = fs::read_to_string(&out).unwrap();
     for line in text.lines().filter(|l| !l.is_empty()) {
         let fields: Vec<&str> = line.split('*').collect();
         let mp_hex = fields.get(8).expect("WPA*02*line has at least 9 *-separated fields");
         let mp_byte = u8::from_str_radix(mp_hex, 16).expect("message_pair is two hex digits");
         assert_eq!(mp_byte & 0x80, 0x80, "every nc-dedup survivor must carry FLAG_NC: {line}");
-        assert_eq!(mp_byte & 0x20, 0x20, "every nc-dedup survivor must carry FLAG_LE: {line}");
+        assert_eq!(mp_byte & 0x60, 0x00, "nc-dedup survivor must carry NO endianness tag (LE/BE cleared): {line}");
     }
 }
 
