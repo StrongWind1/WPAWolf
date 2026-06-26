@@ -70,6 +70,14 @@ pub struct NcDedupStats {
     /// `generate`. Carried on the same per-group struct as the filter drops.
     /// Zero when the cap is off (the default).
     pub messages_capped: u64,
+    /// `--smart`: distinct handshake instances across multi-instance groups.
+    pub smart_instances_attributed: u64,
+    /// `--smart`: candidate pairs pruned as provably uncrackable (cross-instance).
+    pub smart_uncrackable_dropped: u64,
+    /// `--smart`: MIC-frames kept against all candidates (no unique RC link).
+    pub smart_ambiguous_kept: u64,
+    /// `--smart`: FT MIC-frames retaining a non-APLESS survivor (clause F).
+    pub smart_ft_nonapless_kept: u64,
 }
 
 /// Collapses near-identical-nonce siblings within `pairs`, tagging the survivor
@@ -96,6 +104,9 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
     // together if their bytes match. `combo_type` is hashed via its u8 cast
     // because `ComboType` does not derive `Hash`.
     let tolerance = u32::from(config.nc_tolerance);
+    // Snapshot the pair nonces so the (now nonce-generic) clustering primitives
+    // -- shared with smart-mode Phase A -- index by position. `[u8; 32]` is Copy.
+    let nonces: Vec<[u8; 32]> = pairs.iter().map(|p| p.nonce).collect();
     let mut buckets: HashMap<ClusterKey, Vec<usize>> = HashMap::with_capacity(pairs.len());
     for (i, p) in pairs.iter().enumerate() {
         let mut prefix = [0u8; 28];
@@ -120,8 +131,8 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
             continue; // singleton bucket -- nothing to cluster, no FLAG_NC.
         }
 
-        let (le_clusters, le_collapsed) = cluster_indices(&indices, &pairs, tolerance, Endianness::Le);
-        let (be_clusters, be_collapsed) = cluster_indices(&indices, &pairs, tolerance, Endianness::Be);
+        let (le_clusters, le_collapsed) = cluster_indices(&indices, &nonces, tolerance, Endianness::Le);
+        let (be_clusters, be_collapsed) = cluster_indices(&indices, &nonces, tolerance, Endianness::Be);
 
         let (clusters, flag, endian) = if le_collapsed >= be_collapsed {
             (le_clusters, FLAG_LE, Endianness::Le)
@@ -146,7 +157,7 @@ pub fn nc_dedup(pairs: Vec<PairedHash>, config: &PairConfig) -> (Vec<PairedHash>
             // Pick the observed nonce whose iteration window best covers the
             // cluster: minimize `max(value - min, max - value)`. Falls back to
             // the smaller value on ties (deterministic across runs).
-            let Some(survivor) = pick_safe_survivor(&cluster, &pairs, endian, half_tol) else {
+            let Some(survivor) = pick_safe_survivor(&cluster, &nonces, endian, half_tol) else {
                 // No observation in the cluster can serve as a hashcat-safe
                 // survivor for this `tolerance`. Leave the members as
                 // singletons -- correctness over collapse.
@@ -222,14 +233,18 @@ impl std::hash::Hash for ClusterKey {
 }
 
 /// Which endianness is used to interpret the trailing 4 nonce bytes.
+///
+/// `pub(super)` so the smart-mode Phase-A instance builder (`pair::combos`) can
+/// reuse the same nonce-clustering primitives (`tail_u32`, `cluster_indices`,
+/// `pick_safe_survivor`) and inherit the identical `+/- N/2` safety bound.
 #[derive(Clone, Copy)]
-enum Endianness {
+pub(super) enum Endianness {
     Le,
     Be,
 }
 
 /// Reads `nonce[28..32]` as a `u32` in the given endianness.
-fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
+pub(super) fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
     let bytes: [u8; 4] = nonce.get(28..32).and_then(|s| s.try_into().ok()).unwrap_or([0; 4]);
     match endian {
         Endianness::Le => u32::from_le_bytes(bytes),
@@ -249,11 +264,18 @@ fn tail_u32(nonce: &[u8; 32], endian: Endianness) -> u32 {
 /// `None` so the caller leaves the members as singletons.
 ///
 /// `cluster` is the index list returned by `cluster_indices`; the indices are
-/// sorted ascending by tail value under the same `endian`.
-fn pick_safe_survivor(cluster: &[usize], pairs: &[PairedHash], endian: Endianness, half_tol: u32) -> Option<usize> {
+/// sorted ascending by tail value under the same `endian`. `nonces` is the
+/// caller's nonce array indexed by those positions (pair nonces for `nc_dedup`,
+/// AP-frame `ANonces` for smart-mode Phase A).
+pub(super) fn pick_safe_survivor(
+    cluster: &[usize],
+    nonces: &[[u8; 32]],
+    endian: Endianness,
+    half_tol: u32,
+) -> Option<usize> {
     // Compute tail values once. Cluster is already sorted ascending under
     // `endian`, so the first and last entries give min and max.
-    let tails: Vec<u32> = cluster.iter().filter_map(|&i| pairs.get(i).map(|p| tail_u32(&p.nonce, endian))).collect();
+    let tails: Vec<u32> = cluster.iter().filter_map(|&i| nonces.get(i).map(|n| tail_u32(n, endian))).collect();
     let &min_tail = tails.first()?;
     let &max_tail = tails.last()?;
 
@@ -283,15 +305,15 @@ fn pick_safe_survivor(cluster: &[usize], pairs: &[PairedHash], endian: Endiannes
 /// sorted ascending by tail value and `collapsed_count = sum(size - 1)` over
 /// clusters of size >= 2. Singleton clusters are included in the return so the
 /// caller can fold them back into the output stream untouched.
-fn cluster_indices(
+pub(super) fn cluster_indices(
     indices: &[usize],
-    pairs: &[PairedHash],
+    nonces: &[[u8; 32]],
     tolerance: u32,
     endian: Endianness,
 ) -> (Vec<Vec<usize>>, u64) {
     // Build (tail_value, input_index) pairs, sort ascending.
     let mut tagged: Vec<(u32, usize)> =
-        indices.iter().filter_map(|&i| pairs.get(i).map(|p| (tail_u32(&p.nonce, endian), i))).collect();
+        indices.iter().filter_map(|&i| nonces.get(i).map(|n| (tail_u32(n, endian), i))).collect();
     tagged.sort_unstable_by_key(|&(v, _)| v);
 
     // Sliding span split: start a new cluster when the next tail value exceeds

@@ -132,6 +132,10 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
     acc.time_filtered += other.time_filtered;
     acc.rc_filtered += other.rc_filtered;
     acc.messages_capped += other.messages_capped;
+    acc.smart_instances_attributed += other.smart_instances_attributed;
+    acc.smart_uncrackable_dropped += other.smart_uncrackable_dropped;
+    acc.smart_ambiguous_kept += other.smart_ambiguous_kept;
+    acc.smart_ft_nonapless_kept += other.smart_ft_nonapless_kept;
     if other.max_cluster_size > acc.max_cluster_size {
         acc.max_cluster_size = other.max_cluster_size;
     }
@@ -175,6 +179,10 @@ fn pair_one_group(
     nc.time_filtered = filter_stats.time_filtered;
     nc.rc_filtered = filter_stats.rc_filtered;
     nc.messages_capped = filter_stats.messages_capped;
+    nc.smart_instances_attributed = filter_stats.smart_instances_attributed;
+    nc.smart_uncrackable_dropped = filter_stats.smart_uncrackable_dropped;
+    nc.smart_ambiguous_kept = filter_stats.smart_ambiguous_kept;
+    nc.smart_ft_nonapless_kept = filter_stats.smart_ft_nonapless_kept;
     (pairs, nc)
 }
 
@@ -207,6 +215,10 @@ fn pair_one_group_streaming(
     nc_total.time_filtered = filter_stats.time_filtered;
     nc_total.rc_filtered = filter_stats.rc_filtered;
     nc_total.messages_capped = filter_stats.messages_capped;
+    nc_total.smart_instances_attributed = filter_stats.smart_instances_attributed;
+    nc_total.smart_uncrackable_dropped = filter_stats.smart_uncrackable_dropped;
+    nc_total.smart_ambiguous_kept = filter_stats.smart_ambiguous_kept;
+    nc_total.smart_ft_nonapless_kept = filter_stats.smart_ft_nonapless_kept;
     nc_total
 }
 

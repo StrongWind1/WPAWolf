@@ -1322,13 +1322,14 @@ Output-filter and runtime flags (unfiltered defaults):
 
 | Long | Default | Description |
 |------|---------|-------------|
-| `--eapoltimeout` [*s*] | off | session time window in seconds; bare flag = 600 s |
-| `--rc-drift` [*n*]    | off | require RC consistency, tolerance n (default 8 if bare) |
-| `--dedup-hash-combos` | false | 6 combos -> 3 unique per session |
-| `--nc-dedup`          | false | cluster near-identical nonces, keep one survivor with FLAG_NC (§5.8.1) |
+| `--eapoltimeout` [*s*] | off | session time window in seconds; bare flag = 600 s -- **(!) FILTER: drops a MIC whose only in-window pairing exceeds the window** |
+| `--rc-drift` [*n*]    | off | require RC consistency, tolerance n (default 8 if bare) -- **(!) FILTER: drops a MIC whose only RC-consistent pairing exceeds the tolerance** |
+| `--dedup-hash-combos` | false | 6 combos -> 3 unique per session (never-miss fold) |
+| `--nc-dedup`          | false | cluster near-identical nonces, keep one survivor with FLAG_NC (§5.8.1) (never-miss fold) |
 | `--nc-tolerance` *n*  | 8 | cluster span tolerance for `--nc-dedup`; ignored unless `--nc-dedup` set |
-| `--max-eapol-per-type` *n* | 0 (off) | cap pairing to the first n messages of each type per (AP, STA); bounds rotating-ANonce fan-out |
-| `--strict`            | false | bundle: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --nc-dedup` |
+| `--max-eapol-per-type` *n* | 0 (off) | cap pairing to the first n messages of each type per (AP, STA); bounds rotating-ANonce fan-out -- **(!) CAP: when n > 0 discards messages before pairing, can drop a MIC's true ANonce (loud alarm fires)** |
+| `--smart`             | false | handshake-instance attribution (Phase A/B/C in `pair/combos.rs`): prune the uncrackable nonce x MIC cross-product per `(AP, STA)` group without ever dropping a crackable line; implies `--dedup-hash-combos` + `--nc-dedup`. See `docs/smart-pairing-design.md` and `tests/integration/smart_subset_wide.rs`. |
+| `--strict`            | false | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` -- **(!) bundles the MIC-dropping `--eapoltimeout` / `--rc-drift` filters and the `--max-eapol-per-type` cap; prefer `--smart` for a never-miss reduction** |
 | `--threads` *n*       | CPU count | Phase 4 worker thread count |
 | `--essid-collapse-min` *n* | 3 | multi-SSID collapse guard: minimum distinct SSIDs before collapse fires |
 | `--essid-collapse-ratio` *n* | 10 | multi-SSID collapse guard: top-count / second-count ratio threshold |
@@ -1437,7 +1438,7 @@ The verification pins three invariants:
 
 1. **Cross-version drops.** For each adjacent (older, newer) version pair, every line emitted by the older binary on a capture must also appear in the newer binary's output. Any drop must trace to a documented intentional spec-compliance transition (e.g. v0.3.5's Mesh Control bit gate, v0.3.6's MessageStore dedup-on-insert), never to a regression.
 2. **Superset invariant.** `hcx-default ⊆ wpawolf-HEAD-WIDE` per capture. Any hcx-only line must trace to a documented per-(AP, STA) precision difference (a different `message_pair` flag byte for the same body, i.e. a body-matched diff, not a genuinely missing handshake), never to a missing line. The FLAG_NC three-source rule (CC-1, see §5.7) and the FT-PSK PMKID `message_pair` byte (see §6.7 and `hcxpcapngtool.h:386-390`) are the two output-format fixes that closed the bulk of pre-v0.3.7 violations; residual differences are all body-matched flag-byte differences attributable to hcx-default's data-structure quirks (AP-wide M1 cross-leakage and 20-entry eviction window).
-3. **Mode parity `STRICT ⊆ WIDE`.** For every (capture, version, channel) tuple, the STRICT line-set must be a subset of the WIDE line-set. The `--strict` bundle (`--eapoltimeout` / `--rc-drift` / `--dedup-hash-combos` / `--nc-dedup`) is a pure output filter; none of its passes can synthesize lines the WIDE pipeline did not produce. Any violation is a P0 STRICT-mode logic bug. The fixture-level test `tests/integration/mode_parity_strict_subset_wide.rs` gates the same invariant in CI without requiring an external capture set.
+3. **Mode parity `STRICT ⊆ WIDE`.** For every (capture, version, channel) tuple, the STRICT line-set must be a subset of the WIDE line-set. The `--strict` bundle (`--eapoltimeout` / `--rc-drift` / `--nc-tolerance` / `--max-eapol-per-type` / `--dedup-hash-combos` / `--nc-dedup` / `--collapse-message-pair`) is a pure output filter; none of its passes can synthesize lines the WIDE pipeline did not produce. Any violation is a P0 STRICT-mode logic bug. The fixture-level test `tests/integration/mode_parity_strict_subset_wide.rs` gates the same invariant in CI without requiring an external capture set.
 
 ---
 

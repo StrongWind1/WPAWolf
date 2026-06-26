@@ -418,6 +418,21 @@ pub struct Stats {
     /// message); only nonzero when the operator sets a cap on a rotating-ANonce
     /// corpus. [ARCHITECTURE.md §8 FR-CLI]
     pub eapol_messages_capped: u64,
+    /// `--smart`: distinct handshake instances partitioned across multi-instance
+    /// `(AP, STA)` groups (informational). Zero in WIDE mode. [smart-pairing-design.md §6.2]
+    pub smart_instances_attributed: u64,
+    /// `--smart`: candidate pairs pruned as provably uncrackable -- cross-instance
+    /// `ANonces` unreachable (by hashcat NC) from a uniquely-RC-linked MIC's instance.
+    /// Standalone Phase-4 drop, OUTSIDE Reconciliation Identity 3 (like
+    /// `nc_dedup_collapsed_lines`). Zero in WIDE mode. [smart-pairing-design.md §6.2]
+    pub smart_uncrackable_dropped: u64,
+    /// `--smart`: MIC-frames kept against all candidates because the MIC did not
+    /// uniquely RC-link to one instance (rc=1-pinned / cross-seed; never-miss
+    /// keep-all). Informational. [smart-pairing-design.md §6.2]
+    pub smart_ambiguous_kept: u64,
+    /// `--smart`: FT (mode 37100) MIC-frames retaining a non-APLESS survivor after
+    /// pruning, satisfying clause F. Informational. [smart-pairing-design.md §6.2]
+    pub smart_ft_nonapless_kept: u64,
 
     // --- RC / NC / endianness stats ---
     /// Maximum actual RC gap magnitude seen across useful pairs written to output.
@@ -1537,6 +1552,10 @@ impl Stats {
         nz!("  candidates dropped (--eapoltimeout filter)", self.pairs_time_filtered);
         nz!("  candidates dropped (--rc-drift filter)", self.pairs_rc_filtered);
         nz!("  messages dropped (--max-eapol-per-type cap)", self.eapol_messages_capped);
+        nz!("  instances attributed (--smart)", self.smart_instances_attributed);
+        nz!("  candidates dropped (--smart, unique-RC redundant)", self.smart_uncrackable_dropped);
+        nz!("  MICs kept, no unique RC link (--smart)", self.smart_ambiguous_kept);
+        nz!("  FT non-APLESS survivors retained (--smart)", self.smart_ft_nonapless_kept);
         if self.rc_drift_enabled && self.rc_gap_max > 0 {
             // Firmware bugs and replay-counter corruption in wild captures produce
             // values like 2^56. Cap the display at 2^32 so the "suggested threshold"

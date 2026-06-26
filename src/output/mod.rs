@@ -193,6 +193,14 @@ pub struct OutputStats {
     /// Messages excluded from pairing by the `--max-eapol-per-type` cap, summed
     /// across all groups (`NcDedupStats::messages_capped`). Zero when off.
     pub messages_capped: u64,
+    /// `--smart` distinct handshake instances across multi-instance groups.
+    pub smart_instances_attributed: u64,
+    /// `--smart` candidate pairs pruned as provably uncrackable (cross-instance).
+    pub smart_uncrackable_dropped: u64,
+    /// `--smart` MIC-frames kept against all candidates (no unique RC link).
+    pub smart_ambiguous_kept: u64,
+    /// `--smart` FT MIC-frames retaining a non-APLESS survivor (clause F).
+    pub smart_ft_nonapless_kept: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
 
@@ -1028,6 +1036,10 @@ impl OutputContext {
         es.stats.pairs_time_filtered += nc_stats.time_filtered;
         es.stats.pairs_rc_filtered += nc_stats.rc_filtered;
         es.stats.messages_capped += nc_stats.messages_capped;
+        es.stats.smart_instances_attributed += nc_stats.smart_instances_attributed;
+        es.stats.smart_uncrackable_dropped += nc_stats.smart_uncrackable_dropped;
+        es.stats.smart_ambiguous_kept += nc_stats.smart_ambiguous_kept;
+        es.stats.smart_ft_nonapless_kept += nc_stats.smart_ft_nonapless_kept;
 
         let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
         debug.phase4_pairs_generated(total_pairs);

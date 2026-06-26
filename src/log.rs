@@ -253,6 +253,23 @@ impl Logger {
         }
     }
 
+    // --- End-of-run cap alarm ---
+
+    /// Mirrors the loud `--max-eapol-per-type` cap-hit warning into the `--log`
+    /// file. Capping bounds rotating-ANonce fan-out but can drop crackable hashes
+    /// (a documented never-miss exception, see `ARCHITECTURE.md §8.8` FR-CLI-3), so
+    /// the same alarm the main loop prints to stdout is written here too. Call
+    /// before [`Self::flush`]; no-ops when no log path is configured or `dropped`
+    /// is 0.
+    pub fn log_max_eapol_cap(&mut self, cap: usize, dropped: u64) {
+        if dropped == 0 {
+            return;
+        }
+        for line in max_eapol_cap_warning_lines(cap, dropped) {
+            self.write_line_raw(&line);
+        }
+    }
+
     // --- Flush ---
 
     /// Writes aggregated summaries and flushes the log buffer to disk.
@@ -338,6 +355,27 @@ const fn nibble_to_hex(n: u8) -> char {
         0..=9 => b'0' + n,
         _ => b'a' + (n - 10),
     }) as char
+}
+
+/// Builds the multi-line `--max-eapol-per-type` cap-hit warning.
+///
+/// Shared by the stdout alarm (printed by the main loop after the stats banner)
+/// and the `--log` file (written by [`Logger::log_max_eapol_cap`]), so both carry
+/// byte-identical text from a single source. `cap` is the active per-type limit;
+/// `dropped` is the number of messages excluded from pairing. Returns one
+/// `String` per line, no trailing newline. The `[max_eapol_cap]` marker line
+/// keeps the block greppable in the log.
+#[must_use]
+pub fn max_eapol_cap_warning_lines(cap: usize, dropped: u64) -> Vec<String> {
+    vec![
+        "================================ WARNING ================================".to_owned(),
+        "[max_eapol_cap] --max-eapol-per-type cap was HIT".to_owned(),
+        format!("  dropped={dropped} message(s) excluded from pairing; cap={cap} per EAPOL type per (AP, STA)"),
+        "  the store still holds every message, but capping can DROP CRACKABLE HASHES".to_owned(),
+        "  on rotating-ANonce groups. re-run without --max-eapol-per-type (or --strict),".to_owned(),
+        "  or raise the cap, to guarantee every handshake is paired.".to_owned(),
+        "========================================================================".to_owned(),
+    ]
 }
 
 // --- Unit tests ---
@@ -486,5 +524,48 @@ mod tests {
         assert!(logger.plcp_counts.is_empty());
         assert!(logger.malformed_counts.is_empty());
         assert!(logger.unknown_akm_counts.is_empty());
+    }
+
+    #[test]
+    fn max_eapol_cap_warning_carries_cap_and_dropped() {
+        let lines = max_eapol_cap_warning_lines(500, 1426);
+        let blob = lines.join("\n");
+        assert!(blob.contains("[max_eapol_cap]"), "missing greppable marker; got: {blob}");
+        assert!(blob.contains("cap=500"), "missing cap value; got: {blob}");
+        assert!(blob.contains("dropped=1426"), "missing dropped count; got: {blob}");
+        assert!(blob.contains("DROP CRACKABLE HASHES"), "missing the loud warning; got: {blob}");
+        assert!(blob.contains("WARNING"), "missing the banner border; got: {blob}");
+    }
+
+    #[test]
+    fn log_max_eapol_cap_writes_block_to_file() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_max_eapol_cap.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            logger.log_max_eapol_cap(500, 1426);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(contents.contains("[max_eapol_cap] --max-eapol-per-type cap was HIT"), "got: {contents}");
+        assert!(contents.contains("cap=500"), "got: {contents}");
+        assert!(contents.contains("dropped=1426"), "got: {contents}");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn log_max_eapol_cap_zero_is_silent() {
+        use std::io::Read as _;
+        let tmp = std::env::temp_dir().join("wpawolf_log_max_eapol_cap_zero.log");
+        {
+            let mut logger = Logger::new(Some(&tmp)).unwrap();
+            logger.log_max_eapol_cap(500, 0);
+            logger.flush().unwrap();
+        }
+        let mut contents = String::new();
+        std::fs::File::open(&tmp).unwrap().read_to_string(&mut contents).unwrap();
+        assert!(!contents.contains("max_eapol_cap"), "zero-drop run must not warn; got: {contents}");
+        let _ = std::fs::remove_file(&tmp);
     }
 }

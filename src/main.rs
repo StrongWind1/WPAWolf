@@ -168,55 +168,71 @@ struct Cli {
     #[arg(short = 'l', long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Auxiliary output", display_order = 17)]
     log: Option<std::path::PathBuf>,
 
-    // ---- Output filters ----
-    /// Narrow output like hcxpcapngtool (filter bundle)
+    // ---- Output reduction (never-miss: keeps every crackable hash) ----
+    // These FOLD redundant lines per MIC; none can drop a crackable handshake.
+    /// Smart instance-attribution pairing -- the recommended reduction (never misses a hash)
     ///
-    /// Enables --eapoltimeout=5, --rc-drift=8, --nc-tolerance=8, --max-eapol-per-type=100, --dedup-hash-combos, --nc-dedup. Later scalar flags override these defaults.
-    #[arg(short = 's', long, help_heading = "Output filters", display_order = 20)]
-    strict: bool,
+    /// Attributes each MIC to the one ANonce instance that produced it (by replay counter), emitting roughly one line per MIC instead of the full ANonce x MIC cross-product. Prunes only provably-uncrackable cells and keeps every crackable line. Off by default (WIDE cross-product). Implies --dedup-hash-combos and --nc-dedup (passing those too is a no-op). See docs/smart-pairing-design.md.
+    #[arg(long, help_heading = "Output reduction (never-miss)", display_order = 20)]
+    smart: bool,
 
-    /// Max seconds between paired messages [bare: 600]
+    /// Collapse 6 combos to 3 unique per session (never-miss: folds lines, keeps every MIC)
     ///
-    /// Absent = unlimited (no time filter). Bare --eapoltimeout = 600 s. --eapoltimeout=N = custom window. Pairs exceeding this are discarded.
-    #[arg(long, num_args = 0..=1, default_missing_value = "600", value_name = "SECONDS", help_heading = "Output filters", display_order = 21)]
-    eapoltimeout: Option<u64>,
-
-    /// Max replay-counter drift between paired messages [bare: 8]
-    ///
-    /// Absent = off (all pairs pass). Bare --rc-drift = tolerance 8. --rc-drift=N = custom tolerance. Pairs whose RC delta exceeds N are discarded.
-    #[arg(long, num_args = 0..=1, default_missing_value = "8", value_name = "N", help_heading = "Output filters", display_order = 22)]
-    rc_drift: Option<u8>,
-
-    /// Collapse 6 combos to 3 unique per session
-    ///
-    /// A full handshake yields up to 6 N#E# combos but at most 3 are cryptographically distinct. Keeps one per equivalence class (best RC gap, then authorized combo priority).
-    #[arg(long, help_heading = "Output filters", display_order = 23)]
+    /// A full handshake yields up to 6 N#E# combos but at most 3 are cryptographically distinct. Keeps one per equivalence class (best RC gap, then authorized combo priority). Safe: it folds redundant lines, never a MIC.
+    #[arg(long, help_heading = "Output reduction (never-miss)", display_order = 21)]
     dedup_hash_combos: bool,
 
-    /// Drop hash lines that differ only in the message-pair metadata byte
+    /// Collapse near-identical-nonce lines to one survivor (never-miss)
     ///
-    /// The message-pair byte (combo type plus NC/LE/BE flags) is hashcat metadata, not crackable content. With this flag, combos that share identical MIC, nonce, EAPOL frame and ESSID bytes collapse to one line instead of being emitted once per combo. Default off: every combo is emitted and the message-pair byte is part of the dedup identity.
-    #[arg(long, help_heading = "Output filters", display_order = 23)]
-    collapse_message_pair: bool,
-
-    /// Collapse near-identical-nonce lines to one survivor
-    ///
-    /// Clusters lines sharing (AP, STA, EAPOL, MIC, combo) where nonces differ only in the trailing 4 bytes. Survivor gets FLAG_NC so hashcat's nonce-error-corrections recovers the rest.
-    #[arg(long, help_heading = "Output filters", display_order = 24)]
+    /// Clusters lines sharing (AP, STA, EAPOL, MIC, combo) where nonces differ only in the trailing 4 bytes. Survivor gets FLAG_NC so hashcat's nonce-error-corrections recovers the rest. Safe: it folds redundant lines, never a MIC.
+    #[arg(long, help_heading = "Output reduction (never-miss)", display_order = 22)]
     nc_dedup: bool,
 
     /// Nonce-cluster span tolerance for --nc-dedup
     ///
     /// Max distance (max - min) on the trailing 4 nonce bytes within one cluster. Matches hashcat's NONCE_ERROR_CORRECTIONS=8 by default.
-    #[arg(long, value_name = "N", help_heading = "Output filters", display_order = 25)]
+    #[arg(long, value_name = "N", help_heading = "Output reduction (never-miss)", display_order = 23)]
     nc_tolerance: Option<u8>,
 
-    /// Cap pairing to the first N messages of each type per (AP, STA) [default: unlimited]
+    /// Drop hash lines that differ only in the message-pair metadata byte (never-miss)
     ///
-    /// Absent or 0 = unlimited (never miss; the store always keeps every message). N > 0 bounds each N#E# combo to N^2 pairs, taming rotating-ANonce groups that would otherwise generate billions of near-duplicate lines. Pairing iterates only the first N messages of each type; nothing is evicted from the store.
-    #[arg(long, value_name = "N", default_value_t = 0, help_heading = "Output filters", display_order = 26)]
+    /// The message-pair byte (combo type plus NC/LE/BE flags) is hashcat metadata, not crackable content. With this flag, combos that share identical MIC, nonce, EAPOL frame and ESSID bytes collapse to one line instead of being emitted once per combo. Default off: every combo is emitted and the message-pair byte is part of the dedup identity. Safe: it folds redundant lines, never a MIC.
+    #[arg(long, help_heading = "Output reduction (never-miss)", display_order = 24)]
+    collapse_message_pair: bool,
+
+    // ---- Output filters (CAUTION: can drop crackable hashes) ----
+    // These FILTER pairs / messages by a threshold and CAN drop a MIC entirely.
+    /// hcxpcapngtool-style narrow bundle -- (!) can DROP crackable hashes
+    ///
+    /// Enables --eapoltimeout=5, --rc-drift=8, --nc-tolerance=8, --max-eapol-per-type=500, --dedup-hash-combos, --nc-dedup, --collapse-message-pair. Later scalar flags override these defaults. WARNING: three of its members are MIC-dropping filters/caps (--eapoltimeout, --rc-drift, --max-eapol-per-type) -- on a large multi-vendor test corpus --strict discarded thousands of distinct MICs (crackable handshakes) versus WIDE. Use --smart for a never-miss reduction instead.
+    #[arg(short = 's', long, help_heading = "Output filters [CAUTION: can drop crackable hashes]", display_order = 30)]
+    strict: bool,
+
+    /// Max seconds between paired messages [bare: 600] -- (!) can DROP crackable hashes
+    ///
+    /// Absent = unlimited (no time filter). Bare --eapoltimeout = 600 s. --eapoltimeout=N = custom window. Pairs exceeding this are discarded. WARNING: this is a recall-trading FILTER, not a fold -- a MIC whose only in-window pairing exceeds N seconds is dropped entirely and that handshake becomes uncrackable. On a large multi-vendor test corpus a tight --eapoltimeout window dropped thousands of distinct MICs versus WIDE.
+    #[arg(long, num_args = 0..=1, default_missing_value = "600", value_name = "SECONDS", help_heading = "Output filters [CAUTION: can drop crackable hashes]", display_order = 31)]
+    eapoltimeout: Option<u64>,
+
+    /// Max replay-counter drift between paired messages [bare: 8] -- (!) can DROP crackable hashes
+    ///
+    /// Absent = off (all pairs pass). Bare --rc-drift = tolerance 8. --rc-drift=N = custom tolerance. Pairs whose RC delta exceeds N are discarded. WARNING: this is a recall-trading FILTER, not a fold -- a MIC whose only RC-consistent pairing exceeds the tolerance is dropped entirely. On a large multi-vendor test corpus --rc-drift=0 (exact) drops the most distinct MICs and even the bare default (8) drops some versus WIDE.
+    #[arg(long, num_args = 0..=1, default_missing_value = "8", value_name = "N", help_heading = "Output filters [CAUTION: can drop crackable hashes]", display_order = 32)]
+    rc_drift: Option<u8>,
+
+    /// Cap pairing to the first N messages of each type per (AP, STA) [default: unlimited] -- (!) DROPS MICs when N > 0
+    ///
+    /// Absent or 0 = unlimited (never miss; the store always keeps every message). N > 0 bounds each N#E# combo to N^2 pairs, taming rotating-ANonce groups that would otherwise generate billions of near-duplicate lines. Pairing iterates only the first N messages of each type; nothing is evicted from the store. WARNING: when N > 0 this is a CAP that discards messages before pairing -- it can throw away the M1 carrying a MIC's true ANonce, making that handshake uncrackable. A loud end-of-run alarm fires (stdout + --log) when the cap actually truncates. Default 0 = off = never-miss.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Output filters [CAUTION: can drop crackable hashes]",
+        display_order = 33
+    )]
     max_eapol_per_type: usize,
 
+    // ---- ESSID variant collapse (multi-SSID AP noise reduction) ----
     /// Min SSIDs per AP before collapse fires
     ///
     /// APs with N or fewer distinct SSIDs always emit all of them. Raise for CTF captures where many real SSIDs are expected.
@@ -224,8 +240,8 @@ struct Cli {
         long = "essid-collapse-min",
         value_name = "N",
         default_value_t = 3,
-        help_heading = "Output filters",
-        display_order = 26
+        help_heading = "ESSID variant collapse",
+        display_order = 40
     )]
     essid_collapse_min: usize,
 
@@ -236,8 +252,8 @@ struct Cli {
         long = "essid-collapse-ratio",
         value_name = "N",
         default_value_t = 10,
-        help_heading = "Output filters",
-        display_order = 27
+        help_heading = "ESSID variant collapse",
+        display_order = 41
     )]
     essid_collapse_ratio: u64,
 
@@ -272,7 +288,7 @@ struct Cli {
 /// `--strict` is a shortcut for a hcxpcapngtool-shape narrow output profile. It
 /// turns on the output filters that together close the volume gap against
 /// hcxpcapngtool default: `--eapoltimeout=5`, `--rc-drift=8`, `--nc-tolerance=8`
-/// (hashcat's `NONCE_ERROR_CORRECTIONS`), `--max-eapol-per-type=100` (bounds a
+/// (hashcat's `NONCE_ERROR_CORRECTIONS`), `--max-eapol-per-type=500` (bounds a
 /// rotating-ANonce AP the way hcx's ring buffer does), `--dedup-hash-combos`,
 /// `--nc-dedup`, and `--collapse-message-pair` (applied last). The scalar filters
 /// use later-flag-wins precedence (an explicit `--eapoltimeout=30` survives past
@@ -293,11 +309,14 @@ const fn apply_strict_defaults(cli: &mut Cli) {
     if cli.nc_tolerance.is_none() {
         cli.nc_tolerance = Some(8);
     }
-    // Bound a rotating-ANonce AP the way hcxpcapngtool's ring buffer does, so a
-    // single pathological group cannot fan out to millions of near-duplicate
-    // lines under the narrow profile. A non-zero user value wins (later-flag).
+    // Bound a rotating-ANonce AP so a single pathological group cannot fan out to
+    // millions of near-duplicate lines under the narrow profile. 500 sits above
+    // the rotating-ANonce M1 counts seen on busy real-world APs while staying
+    // well clear of clean multi-handshake groups, so capping rarely fires; when
+    // it does, the end-of-run alarm warns it may have dropped crackable hashes.
+    // A non-zero user value wins (later-flag).
     if cli.max_eapol_per_type == 0 {
-        cli.max_eapol_per_type = 100;
+        cli.max_eapol_per_type = 500;
     }
     cli.dedup_hash_combos = true;
     cli.nc_dedup = true;
@@ -503,14 +522,47 @@ fn build_pair_config(cli: &Cli) -> PairConfig {
     PairConfig {
         eapol_timeout_us: cli.eapoltimeout.unwrap_or(600) * 1_000_000, // seconds to us
         rc_drift_tolerance: cli.rc_drift.unwrap_or(0),
-        all_combos: !cli.dedup_hash_combos, // --dedup-hash-combos inverts the "emit all combos" flag
-        time_check_enabled: cli.eapoltimeout.is_some(), // no flag = unlimited (no time filter)
-        rc_drift_enabled: cli.rc_drift.is_some(), // output filter: off by default
-        nc_dedup_enabled: cli.nc_dedup,     // output filter: off by default
-        nc_tolerance: cli.nc_tolerance.unwrap_or(8), // ignored when nc_dedup_enabled=false
-        max_eapol_per_type: cli.max_eapol_per_type, // 0 = unlimited (off by default)
+        all_combos: !cli.dedup_hash_combos && !cli.smart, // --smart implies --dedup-hash-combos (§6.1)
+        time_check_enabled: cli.eapoltimeout.is_some(),   // no flag = unlimited (no time filter)
+        rc_drift_enabled: cli.rc_drift.is_some(),         // output filter: off by default
+        nc_dedup_enabled: cli.nc_dedup || cli.smart,      // --smart implies --nc-dedup (folds same-instance siblings)
+        nc_tolerance: cli.nc_tolerance.unwrap_or(8),      // ignored when nc_dedup_enabled=false
+        max_eapol_per_type: cli.max_eapol_per_type,       // 0 = unlimited (off by default)
         collapse_message_pair: cli.collapse_message_pair, // output filter: off by default
+        smart: cli.smart,                                 // smart instance-attribution pairing: off by default
     }
+}
+
+/// Builds the `output filters active` banner string from the resolved CLI flags,
+/// so a WIDE run is distinguishable from a `--smart` / `--strict` run by the
+/// banner alone. Extracted from `run` to keep it under the clippy line limit;
+/// `--smart` is listed first as the headline mode, then the scalar/boolean
+/// filters in the order `--strict` applies them.
+fn active_filters(cli: &Cli) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if cli.smart {
+        parts.push("smart".to_owned());
+    }
+    if let Some(s) = cli.eapoltimeout {
+        parts.push(format!("eapoltimeout={s}"));
+    }
+    if let Some(n) = cli.rc_drift {
+        parts.push(format!("rc-drift={n}"));
+    }
+    if cli.dedup_hash_combos {
+        parts.push("dedup-hash-combos".to_owned());
+    }
+    if cli.nc_dedup {
+        parts.push(format!("nc-dedup (tolerance {})", cli.nc_tolerance.unwrap_or(8)));
+    }
+    if cli.max_eapol_per_type > 0 {
+        parts.push(format!("max-eapol-per-type={}", cli.max_eapol_per_type));
+    }
+    // Listed last to mirror its `--strict` application order (applied after the others).
+    if cli.collapse_message_pair {
+        parts.push("collapse-message-pair".to_owned());
+    }
+    if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
 }
 
 /// Probes whether `dir` accepts writes by creating and removing a uniquely
@@ -551,6 +603,37 @@ fn reconcile_disk_mode(
 }
 
 // --- Pipeline ---
+
+/// Writes the `--max-eapol-per-type` cap-hit alarm into the `--log` file (when the
+/// cap dropped messages) and then flushes the log.
+///
+/// Folding the alarm write into the flush keeps it ordered before the log closes
+/// and costs the caller one line. The store still holds every message; the cap
+/// only bounds pairing fan-out, so capping is a documented never-miss exception
+/// this warning makes impossible to miss.
+///
+/// # Errors
+///
+/// Returns `Err` if flushing the log file fails.
+fn flush_log_with_cap_alarm(logger: &mut Logger, cap: usize, dropped: u64) -> wpawolf::types::Result<()> {
+    if dropped > 0 {
+        logger.log_max_eapol_cap(cap, dropped);
+    }
+    logger.flush()
+}
+
+/// Prints the `--max-eapol-per-type` cap-hit alarm to stdout after the stats
+/// banner, regardless of `--quiet` (it warns of dropped crackable hashes -- too
+/// important to suppress). No-op when the cap dropped nothing. Same text as the
+/// `--log` block via the shared generator.
+fn print_cap_alarm(cap: usize, dropped: u64) {
+    if dropped == 0 {
+        return;
+    }
+    for line in wpawolf::log::max_eapol_cap_warning_lines(cap, dropped) {
+        println!("{line}");
+    }
+}
 
 /// Runs the full collect-then-emit pipeline.
 ///
@@ -963,29 +1046,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
     // Echo of the resolved output-filter state for the Phase 4 banner, so a WIDE
     // run and a --strict run are distinguishable from the banner alone.
-    stats.filters_active = {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(s) = cli.eapoltimeout {
-            parts.push(format!("eapoltimeout={s}"));
-        }
-        if let Some(n) = cli.rc_drift {
-            parts.push(format!("rc-drift={n}"));
-        }
-        if cli.dedup_hash_combos {
-            parts.push("dedup-hash-combos".to_owned());
-        }
-        if cli.nc_dedup {
-            parts.push(format!("nc-dedup (tolerance {})", cli.nc_tolerance.unwrap_or(8)));
-        }
-        if cli.max_eapol_per_type > 0 {
-            parts.push(format!("max-eapol-per-type={}", cli.max_eapol_per_type));
-        }
-        // Listed last to mirror its `--strict` application order (applied after the others).
-        if cli.collapse_message_pair {
-            parts.push("collapse-message-pair".to_owned());
-        }
-        if parts.is_empty() { "none (WIDE mode)".to_owned() } else { parts.join(", ") }
-    };
+    stats.filters_active = active_filters(cli);
 
     // Record output paths in stats so the Phase 4 banner can show configured vs not-configured.
     let path_str = |p: &Option<std::path::PathBuf>| p.as_ref().map_or_else(String::new, |p| p.display().to_string());
@@ -1162,6 +1223,10 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.pairs_time_filtered = output_stats.pairs_time_filtered;
         stats.pairs_rc_filtered = output_stats.pairs_rc_filtered;
         stats.eapol_messages_capped = output_stats.messages_capped;
+        stats.smart_instances_attributed = output_stats.smart_instances_attributed;
+        stats.smart_uncrackable_dropped = output_stats.smart_uncrackable_dropped;
+        stats.smart_ambiguous_kept = output_stats.smart_ambiguous_kept;
+        stats.smart_ft_nonapless_kept = output_stats.smart_ft_nonapless_kept;
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;
@@ -1213,7 +1278,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.usernames_extracted = username_set.len() as u64;
     }
 
-    logger.flush()?;
+    flush_log_with_cap_alarm(&mut logger, cli.max_eapol_per_type, stats.eapol_messages_capped)?;
     message_store.cleanup_disk();
     pmkid_store.cleanup_disk();
     stats.fragment_stats.fragments_incomplete = u64::try_from(fragment_store.len()).unwrap_or(u64::MAX);
@@ -1224,6 +1289,7 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     stats.disk_mode_engaged = mem_monitor.disk_mode() || message_store.disk_mode() || pmkid_store.disk_mode();
 
     stats.print_summary();
+    print_cap_alarm(cli.max_eapol_per_type, stats.eapol_messages_capped);
 
     // Optional `--mem-stats` block: per-store byte-count table for OOM triage.
     if cli.mem_stats {

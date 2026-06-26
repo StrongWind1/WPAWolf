@@ -167,19 +167,37 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 
 Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout --22000-out /dev/stdout -E /dev/stdout capture.pcap` streams the extended hashes, the legacy 22000 hashes, and the ESSID list all to stdout. Real files must still be unique - only `/dev/*` targets are exempt from the duplicate-path check.
 
-### Output filters
+### Output options
+
+Output options split into two kinds, and the difference is the only thing that matters for recall. **Reduction** options *fold* redundant lines per MIC and never drop a crackable hash (`--smart` is the recommended one). **Filter** options drop *pairs or messages* by a threshold and can drop a crackable hash entirely, making that handshake uncrackable. The MIC is the key: one distinct MIC (or PMKID) is one crackable handshake, so "does this flag keep every MIC?" is the question. Reduction options always answer yes; filters do not.
+
+#### Reduction (never-miss -- keeps every crackable hash)
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--eapoltimeout [N]` | unlimited | session window in seconds; bare = 600 s |
-| `--rc-drift [N]` | off | discard pairs with RC delta > N; bare = 8 |
-| `--dedup-hash-combos` | off | 6 combos -> 3 unique per session |
-| `--nc-dedup` | off | cluster near-identical nonces, keep one survivor with FLAG_NC |
+| `--smart` | off | **recommended.** Handshake-instance attribution: emit ~one line per MIC instead of the full ANonce x MIC cross-product; prune only provably-uncrackable cross-instance cells. Implies `--dedup-hash-combos` + `--nc-dedup`. |
+| `--dedup-hash-combos` | off | 6 N#E# combos -> 3 unique per session |
+| `--nc-dedup` | off | fold +/-N/2 near-identical-nonce siblings into one survivor tagged FLAG_NC |
 | `--nc-tolerance N` | 8 | cluster span for `--nc-dedup` |
-| `--max-eapol-per-type N` | 0 (off) | cap pairing to the first N messages of each type per (AP, STA); bounds rotating-ANonce fan-out |
-| `--essid-collapse-min N` | 3 | SSID-variant collapse: min distinct SSIDs to trigger |
-| `--essid-collapse-ratio N` | 10 | SSID-variant collapse: top/second ratio threshold |
-| `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=100 --dedup-hash-combos --nc-dedup` |
+| `--collapse-message-pair` | off | drop the message-pair metadata byte from the dedup identity (folds N#E# combos that differ only in that byte) |
+
+#### Filters -- (!) CAUTION: these can drop crackable hashes (MICs)
+
+MIC loss below was measured on a large multi-vendor corpus with the cap forced off (so every difference is the filter itself, not the cap); every reduction option above lost zero.
+
+| Flag | Default | Meaning -- **(!) MIC-loss behaviour** |
+|---|---|---|
+| `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair`; bundles the MIC-droppers below -- **dropped thousands of crackable MICs**. Prefer `--smart`. |
+| `--eapoltimeout [N]` | unlimited | discard pairs more than N seconds apart; bare = 600 s -- **tighter windows drop crackable MICs** |
+| `--rc-drift [N]` | off | discard pairs with replay-counter delta > N; bare = 8 -- **exact (`=0`) drops the most crackable MICs; even the default (`=8`) drops some** |
+| `--max-eapol-per-type N` | 0 (off) | cap pairing to the first N messages of each type per (AP, STA); bounds rotating-ANonce fan-out -- **when N > 0 can drop the M1 with a MIC's true ANonce; a loud end-of-run alarm fires** |
+
+#### ESSID variant collapse
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--essid-collapse-min N` | 3 | min distinct SSIDs per AP before SSID-variant collapse fires |
+| `--essid-collapse-ratio N` | 10 | top/runner-up SSID-count ratio to trigger collapse |
 
 ### Runtime options
 

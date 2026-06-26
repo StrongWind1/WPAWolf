@@ -14,6 +14,7 @@ use crate::store::messages::EapolMessage;
 use crate::types::{MacAddr, MsgType};
 
 use super::constraints::{RcRelation, expected_rc_delta, within_rc_for_combo, within_time};
+use super::nc_dedup::{Endianness, cluster_indices, pick_safe_survivor, tail_u32};
 use super::{ComboType, FLAG_APLESS, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
 
 // --- PairConfig ---
@@ -65,6 +66,13 @@ pub struct PairConfig {
     /// where M1 and M3 carry the same `ANonce`) collapse to one line. Default: `false`
     /// (every combo emitted, `message_pair` is part of the dedup identity).
     pub collapse_message_pair: bool,
+    /// Opt-in smart instance-attribution pairing (`--smart`). When `true`, the
+    /// selector attributes each MIC to its handshake instance by joint
+    /// replay-counter linkage and prunes only the provably-uncrackable
+    /// cross-product cells, keeping every crackable line (never-miss). `false`
+    /// (the default) emits the full WIDE cross-product. See
+    /// `docs/smart-pairing-design.md`.
+    pub smart: bool,
 }
 
 impl Default for PairConfig {
@@ -83,6 +91,7 @@ impl Default for PairConfig {
             nc_tolerance: 8,              // matches hashcat NONCE_ERROR_CORRECTIONS default
             max_eapol_per_type: 0,        // unlimited: no pairing cap (never miss)
             collapse_message_pair: false, // unfiltered: message_pair is part of the dedup identity
+            smart: false,                 // unfiltered: WIDE cross-product, no instance attribution
         }
     }
 }
@@ -104,19 +113,18 @@ fn cap_list(list: &mut Vec<&EapolMessage>, cap: usize) -> u64 {
 
 /// Generates all valid N#E# paired hashes for a single (AP, STA) message group.
 ///
-/// `messages` must already be sorted by timestamp (ascending). Returns one `PairedHash`
-/// per valid `(combo_type, nonce_msg, eapol_msg)` triple that passes both the time-gap
-/// and RC constraints. When multiple pairs pass for the same combo type, all are returned
-/// (the collapse step handles deduplication).
+/// `messages` must already be sorted by timestamp (ascending). Returns one
+/// `PairedHash` per surviving `(combo_type, nonce_msg, eapol_msg)` triple plus
+/// the per-group `PairFilterStats`.
 ///
-/// Pre-filters by message type for O(nxm) complexity per combo. See `ARCHITECTURE.md §5`.
-///
-/// Applies per-group dedup: after each pair passes constraint checks, its fingerprint
-/// is checked against a local `HashSet`. Pairs with fingerprints already seen (from
-/// retransmitted messages with identical nonces) are dropped immediately, avoiding the
-/// Vec push and later traversal. This typically eliminates ~50-90% of generated pairs
-/// at near-zero cost (fingerprint computation is ~20ns vs ~150ns for a full hash line).
-/// The output phase runs a final ESSID-aware dedup for correctness.
+/// Thin materializing wrapper over [`generate_streaming`]: it buffers every
+/// per-frame chunk into a single `Vec`. The two share the frame-major inner
+/// (`build_frame_pairs` / `finalize_and_dedup`), so the materialized and
+/// streaming paths are set-identical by construction -- pinned by
+/// `streamed_matches_materialized` -- and a future `--smart` selector added to
+/// the shared inner is inherited by both. The per-type cap, per-group
+/// fingerprint dedup, endianness overlay, and the M3-anchored `FLAG_NC` rule all
+/// live in the shared inner. See `ARCHITECTURE.md §5`.
 #[must_use]
 pub fn generate(
     ap: MacAddr,
@@ -124,244 +132,8 @@ pub fn generate(
     messages: &[EapolMessage],
     config: &PairConfig,
 ) -> (Vec<PairedHash>, PairFilterStats) {
-    use std::collections::HashSet;
-
-    // Partition messages by type for O(n*m) pairing rather than O(n^2) over the full list.
-    let mut m1s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M1).collect();
-    let mut m2s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M2).collect();
-    let mut m3s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M3).collect();
-    let mut m4s: Vec<&EapolMessage> = messages.iter().filter(|m| m.msg_type == MsgType::M4).collect();
-
-    // Opt-in per-type pairing cap (--max-eapol-per-type). Bounds each combo to
-    // cap^2 pairs so a rotating-ANonce mega-group can't explode O(M1*M2). Applied
-    // before endianness detection and the loops so every downstream step sees the
-    // capped lists. The store keeps every message; 0 = off (never miss).
-    let cap = config.max_eapol_per_type;
-    let messages_capped =
-        cap_list(&mut m1s, cap) + cap_list(&mut m2s, cap) + cap_list(&mut m3s, cap) + cap_list(&mut m4s, cap);
-
-    // NC flag for M3-anchored pairs (N3E2 / N3E4) -- three independent sources, all
-    // mirroring hcxpcapngtool exactly:
-    //
-    //   1. M1 presence. [hcxpcapngtool.c:4190] inits every stored M1 with
-    //      `status = ST_NC` (0x80). When addhandshake later builds an N3E2 /
-    //      N3E4 line, its inheritance loop [hcxpcapngtool.c:2758-2767] ORs
-    //      `zeiger->status & 0xe0` from every messagelist entry sharing the AP
-    //      MAC -- so any M1 for this AP propagates ST_NC into mpfield. The
-    //      loop runs only on non-APLESS combos, matching wpawolf's
-    //      N1E2 / N1E4 / N3E2 / N3E4 set.
-    //
-    //   2. Endianness detection. [hcxpcapngtool.c:3814-3826] (M3-path) and
-    //      [hcxpcapngtool.c:4242-4253] (M1-path) set `status = ST_LE + ST_NC`
-    //      or `ST_BE + ST_NC` on BOTH the stored message and the current scratch
-    //      slot whenever two M1/M3 nonces share their first 28 bytes but differ
-    //      in the trailing 4. Once set, the inheritance loop above pulls
-    //      ST_LE / ST_BE / ST_NC into every subsequent handshake for that AP.
-    //      wpawolf's `detect_nonce_endianness` mirrors the detection logic; if
-    //      either bit fires we must light FLAG_NC even when no M1 was captured.
-    //
-    //   3. Per-pair RC gap. [hcxpcapngtool.c:2787-2790] sets ST_NC at
-    //      addhandshake time when `rcgap > 0 && (status & ST_ENDIANESS) == 0`.
-    //      hcx defines rcgap relative to the expected handshake delta
-    //      (M3.rc = M2.rc + 1 for N3E2, M3.rc = M4.rc for N3E4), so the gap is
-    //      |actual_delta - expected_delta|. wpawolf's `rc_gap_magnitude` on
-    //      `PairedHash` uses the same definition.
-    //
-    // Validated against hashcat module_22000.c::module_hash_decode_postprocess
-    // (lines 1302-1326): FLAG_NC=1 enables NC iteration (default 8 corrections
-    // around the line's nonce); FLAG_NC=0 disables it entirely. For sessions
-    // where M3's ANonce differs from M1's ANonce (retransmits, PMK caching,
-    // mid-capture starts), the N3E2 / N3E4 anchor's MIC was computed against a
-    // different nonce than the one wpawolf wrote into the line -- only NC
-    // iteration recovers the crack. Without FLAG_NC the line is uncrackable.
-
-    // Detect router endianness by pairwise-comparing ANonce variation across M1/M3 messages
-    // for this (AP, STA) session. [hcxpcapngtool.c:3810-3822]
-    //   * bytes 30-31 differ -> LE router (low-order bytes at the tail)
-    //   * bytes 28-29 differ but 30-31 match -> BE router (low-order bytes deeper in)
-    // Bits ORed onto `message_pair` whenever FLAG_NC would fire; hashcat uses them to
-    // decide whether nonce-error-corrections must run.
-    let router_endian = detect_nonce_endianness(&m1s, &m3s);
-
-    // M1 presence and endianness are session-level inputs to the FLAG_NC decision
-    // for M3-anchored pairs -- precompute once so the per-pair loops below stay
-    // tight. The rcgap deviation is per-pair (uses each pair's `rc_gap_magnitude`).
-    //
-    // Scope note. wpawolf intentionally restricts the M1-presence source to
-    // THIS (AP, STA) session's messages. hcxpcapngtool's addhandshake
-    // inheritance loop scans all messagelist entries matched on AP MAC only
-    // (regardless of STA), so an M1 captured for STA-A leaks ST_NC onto an
-    // N3E2 / N3E4 handshake for STA-B at the same AP. That's an artefact of
-    // hcx's global messagelist data structure, not a spec-driven choice --
-    // knowing the AP was active on STA-A says nothing useful about STA-B's
-    // individual session, where the M1 / M3 ANonce relationship is what
-    // determines crackability. wpawolf-WIDE will therefore emit `*02` for
-    // these sessions where hcx-default emits `*82`; this is wpawolf being
-    // more precise, not a regression.
-    let session_carries_nc = !m1s.is_empty() || router_endian.0 || router_endian.1;
-
     let mut pairs: Vec<PairedHash> = Vec::new();
-    let mut seen: HashSet<u64> = HashSet::new();
-    let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
-
-    // Records an opt-in-filter rejection from `try_pair` against the per-group
-    // tally. A no-op in WIDE mode (no `Err` is ever produced).
-    macro_rules! count_filtered {
-        ($reason:expr) => {
-            match $reason {
-                FilterReason::Time => filter_stats.time_filtered += 1,
-                FilterReason::Rc => filter_stats.rc_filtered += 1,
-            }
-        };
-    }
-
-    // Inline dedup helper: compute fingerprint and push only if new.
-    // This uses the same fingerprint as output::dedup::eapol_fingerprint but with an
-    // empty ESSID (ESSID is resolved later). The output phase runs a final ESSID-aware
-    // dedup to catch the rare case where an AP advertises multiple SSIDs.
-    let ap_bytes = ap.0;
-    let sta_bytes = sta.0;
-
-    // Inline dedup: push a pair only if its fingerprint hasn't been seen before.
-    // Uses the same fingerprint layout as output::dedup::eapol_fingerprint but with
-    // an empty ESSID (ESSID is resolved later). Eliminates ~50-90% of pairs at
-    // generation time by catching retransmission duplicates (same nonce + EAPOL frame).
-    //
-    // Endianness overlay. When the session shows nonce-counter drift on
-    // M1 / M3 (`router_endian.0` or `.1`) and the pair already carries
-    // `FLAG_NC`, overlay `FLAG_LE` / `FLAG_BE` so hashcat knows to try the
-    // endianness-swapped nonce variants in addition to NC iteration. This is
-    // wpawolf's authoritative emission and is semantically a strict superset
-    // of hcx-default's bare-`FLAG_NC` variant: hashcat with `FLAG_LE` enables
-    // every search hashcat with bare `FLAG_NC` would do, plus the
-    // byte-swapped tail variant.
-    //
-    // hcxpcapngtool emits the bare-`FLAG_NC` variant in this scenario when its
-    // bounded `messagelist` had already evicted the second M3 nonce by
-    // addhandshake time -- a data-structure artefact, not a spec-driven
-    // choice. wpawolf's collect-then-pair model always sees both M3 nonces
-    // and detects the drift, so emitting only the more-informative
-    // `FLAG_LE` / `FLAG_BE` line is the correct behaviour. The line-by-line
-    // superset invariant fails on these specific captures (hcx-default emits
-    // `*82`, wpawolf emits only `*a2`); accept the divergence as wpawolf
-    // being more thorough rather than back-fill a duplicate `*82` line that
-    // wouldn't help hashcat find any additional crack.
-    macro_rules! dedup_push {
-        ($pair:expr) => {{
-            let mut p: PairedHash = $pair;
-            if p.message_pair & FLAG_NC != 0 {
-                if router_endian.0 {
-                    p.message_pair |= FLAG_LE;
-                }
-                if router_endian.1 {
-                    p.message_pair |= FLAG_BE;
-                }
-            }
-            let kind: u8 = if p.akm.is_ft() { 0x04 } else { 0x02 };
-            // The message_pair byte is metadata, not identity. With --collapse-message-pair
-            // it is excluded, so content-identical combos (N1E2 / N3E2 with the same ANonce)
-            // collapse; by default it is included so every combo is emitted. Stays
-            // byte-identical to output::dedup::eapol_fingerprint (empty ESSID here; resolved
-            // at emit).
-            let fp = if config.collapse_message_pair {
-                crate::types::hash_slices(
-                    kind,
-                    &[p.mic.as_slice(), &ap_bytes, &sta_bytes, &p.nonce, &p.eapol_frame, &[]],
-                )
-            } else {
-                crate::types::hash_slices(
-                    kind,
-                    &[p.mic.as_slice(), &ap_bytes, &sta_bytes, &p.nonce, &p.eapol_frame, &[], &[p.message_pair]],
-                )
-            };
-            if seen.insert(fp) {
-                pairs.push(p);
-            }
-        }};
-    }
-
-    // N1E2: ANonce from M1, EAPOL frame from M2. [ARCHITECTURE.md §5]
-    for nonce_msg in &m1s {
-        for eapol_msg in &m2s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E2, config) {
-                Ok(pair) => dedup_push!(pair),
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
-    // N1E4: ANonce from M1, EAPOL frame from M4. Spans the whole session. [ARCHITECTURE.md §5]
-    for nonce_msg in &m1s {
-        for eapol_msg in &m4s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N1E4, config) {
-                Ok(pair) => dedup_push!(pair),
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
-    // N3E2: ANonce from M3, EAPOL frame from M2. [ARCHITECTURE.md §5]
-    //
-    // FLAG_NC fires from any of three independent sources (see the multi-line
-    // comment above): M1 captured for this session (inherits ST_NC via
-    // addhandshake's status loop), endianness drift detected on the M1/M3
-    // ANonces, or the per-pair RC deviation from expected delta > 0. See the
-    // unit tests below for one representative case per source.
-    for nonce_msg in &m3s {
-        for eapol_msg in &m2s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E2, config) {
-                Ok(mut pair) => {
-                    if session_carries_nc || pair.rc_gap_magnitude > 0 {
-                        pair.message_pair |= FLAG_NC;
-                    }
-                    dedup_push!(pair);
-                },
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
-    // N2E3: SNonce from M2, EAPOL frame from M3. AP-less combo. [ARCHITECTURE.md §5]
-    for nonce_msg in &m2s {
-        for eapol_msg in &m3s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N2E3, config) {
-                Ok(pair) => dedup_push!(pair),
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
-    // N4E3: SNonce from M4, EAPOL frame from M3. AP-less combo. [ARCHITECTURE.md §5]
-    for nonce_msg in &m4s {
-        for eapol_msg in &m3s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N4E3, config) {
-                Ok(pair) => dedup_push!(pair),
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
-    // N3E4: ANonce from M3, EAPOL frame from M4. [ARCHITECTURE.md §5]
-    //
-    // Same three-source FLAG_NC rule as N3E2 above (M1 presence, endianness
-    // detected, or per-pair rcgap deviation > 0). For N3E4 the expected delta
-    // is 0 (M4.rc = M3.rc), so `rc_gap_magnitude > 0` fires only on RC
-    // retransmits / drift -- the M1-presence source typically does the lifting
-    // on standard handshakes where M3.rc = M4.rc exactly.
-    for nonce_msg in &m3s {
-        for eapol_msg in &m4s {
-            match try_pair(ap, sta, nonce_msg, eapol_msg, ComboType::N3E4, config) {
-                Ok(mut pair) => {
-                    if session_carries_nc || pair.rc_gap_magnitude > 0 {
-                        pair.message_pair |= FLAG_NC;
-                    }
-                    dedup_push!(pair);
-                },
-                Err(r) => count_filtered!(r),
-            }
-        }
-    }
-
+    let filter_stats = generate_streaming(ap, sta, messages, config, |chunk| pairs.extend(chunk));
     (pairs, filter_stats)
 }
 
@@ -380,6 +152,11 @@ struct GenCtx<'a> {
     router_endian: (bool, bool),
     ap_bytes: [u8; 6],
     sta_bytes: [u8; 6],
+    /// Smart-mode (`--smart`) handshake-instance table for this group. Empty in
+    /// WIDE mode; built once per group by `build_instance_table` and read by
+    /// `select_smart`. Owned (no borrows) so `GenCtx` stays free of a second
+    /// lifetime across the streaming `FnMut` boundary.
+    instance_table: InstanceTable,
 }
 
 /// Applies the M3-anchored `FLAG_NC` rule, the LE/BE endianness overlay, and the
@@ -466,6 +243,11 @@ fn build_frame_pairs(
             }
         }
     }
+    // Smart-mode Phase C: prune provably-uncrackable cross-instance candidates for
+    // this frame's MIC (pass-through in WIDE mode). See `select_smart`.
+    if ctx.config.smart {
+        return select_smart(frame_pairs, eapol_msg, &ctx.instance_table, ctx.config, filter_stats);
+    }
     frame_pairs
 }
 
@@ -501,6 +283,14 @@ pub fn generate_streaming(
         cap_list(&mut m1s, cap) + cap_list(&mut m2s, cap) + cap_list(&mut m3s, cap) + cap_list(&mut m4s, cap);
 
     let router_endian = detect_nonce_endianness(&m1s, &m3s);
+    let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
+    // Smart-mode Phase A: partition this group's AP-frames into handshake
+    // instances (empty in WIDE mode). Tally instances from multi-instance groups
+    // -- the only ones where the selector can prune -- for the banner.
+    let instance_table = build_instance_table(&m1s, &m3s, config);
+    if instance_table.instances.len() > 1 {
+        filter_stats.smart_instances_attributed += u64::try_from(instance_table.instances.len()).unwrap_or(u64::MAX);
+    }
     let ctx = GenCtx {
         ap,
         sta,
@@ -509,8 +299,8 @@ pub fn generate_streaming(
         router_endian,
         ap_bytes: ap.0,
         sta_bytes: sta.0,
+        instance_table,
     };
-    let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
 
     // M2-frame chunks: N1E2 (nonce M1) + N3E2 (nonce M3).
     for &eapol_msg in &m2s {
@@ -525,6 +315,260 @@ pub fn generate_streaming(
         on_chunk(build_frame_pairs(&ctx, eapol_msg, &m1s, ComboType::N1E4, &m3s, ComboType::N3E4, &mut filter_stats));
     }
     filter_stats
+}
+
+// --- Smart instance attribution (--smart) ---
+//
+// See `docs/smart-pairing-design.md`. The selector NEVER drops a crackable line:
+// it prunes a candidate only when (1) the MIC RC-links to exactly one handshake
+// instance and (2) the candidate's ANonce is unreachable from that instance's
+// median even under hashcat's `+/- N/2` sweep -- i.e. provably not the live
+// ANonce. Same-instance siblings are KEPT; the post-pass `nc_dedup` (which
+// `--smart` implies) folds them to one `FLAG_NC` survivor. M3-EAPOL (APLESS)
+// frames are kept whole (exempt). The line fold and the instance fold share one
+// `+/- N/2` bound via the reused `nc_dedup` primitives.
+
+/// One handshake instance: a maximal set of AP-frames (M1/M3) whose `ANonces` fold
+/// to a single NC-safe median survivor (within hashcat's `+/- N/2` reach), plus
+/// the replay counters those frames carried. Owned data -- no borrows of the
+/// group's `messages` -- so it can live on `GenCtx` across the streaming closure.
+#[derive(Clone, Debug, Default)]
+struct Instance {
+    /// Canonical `ANonce` = the `pick_safe_survivor` median, chosen so its
+    /// `+/- N/2` window provably covers every AP-frame in the instance.
+    canonical_nonce: [u8; 32],
+    /// Replay counters of this instance's M1 frames.
+    m1_rcs: Vec<u64>,
+    /// Replay counters of this instance's M3 frames.
+    m3_rcs: Vec<u64>,
+    /// Per-instance endianness pin derived from this instance's own counter
+    /// drift; `(false, false)` = unpinned (reachability must hold under BOTH
+    /// interpretations before a drop is allowed -- design §2.3 rule 1).
+    endian: (bool, bool),
+}
+
+/// Per-(AP, STA)-group table of handshake instances (Phase A output). Empty in
+/// WIDE mode.
+#[derive(Clone, Debug, Default)]
+struct InstanceTable {
+    instances: Vec<Instance>,
+}
+
+/// FT instance-identity key: two FT AP-frames that share an `ANonce` but differ in
+/// their FT context (`mdid` / `r0khid` / `r1khid`, i.e. a different PMK-R1 key
+/// hierarchy) are DIFFERENT cryptographic sessions and must seed separate
+/// instances (design §3.2). Empty for non-FT frames.
+fn ft_key_of(m: &EapolMessage) -> Vec<u8> {
+    m.ft.as_ref().map_or_else(Vec::new, |ft| {
+        let len = usize::from(ft.r0khid_len).min(ft.r0khid.len());
+        let mut k = Vec::with_capacity(2 + len + 6);
+        k.extend_from_slice(&ft.mdid);
+        k.extend_from_slice(ft.r0khid.get(..len).unwrap_or(&[]));
+        k.extend_from_slice(&ft.r1khid);
+        k
+    })
+}
+
+/// Builds one [`Instance`] from a set of frame indices: its canonical (median)
+/// `ANonce`, endianness pin, and the M1/M3 replay counters of its members.
+fn instance_from_members(
+    frames: &[&EapolMessage],
+    is_m3: &[bool],
+    members: &[usize],
+    canonical_nonce: [u8; 32],
+    endian: (bool, bool),
+) -> Instance {
+    let mut inst = Instance { canonical_nonce, endian, ..Instance::default() };
+    for &i in members {
+        let Some(m) = frames.get(i) else { continue };
+        if is_m3.get(i).copied().unwrap_or(false) {
+            inst.m3_rcs.push(m.replay_counter);
+        } else {
+            inst.m1_rcs.push(m.replay_counter);
+        }
+    }
+    inst
+}
+
+/// Phase A: partition the group's AP-frames (`m1s ++ m3s`) into handshake
+/// instances. Groups by `(ANonce[0..28] prefix, FtFields)`, then within each
+/// group splits the trailing dword into `+/- N/2`-safe instances via the reused
+/// `nc_dedup` clustering primitives (LE vs BE by tighter clustering). Returns an
+/// empty table when `!config.smart` so WIDE pays nothing.
+fn build_instance_table(m1s: &[&EapolMessage], m3s: &[&EapolMessage], config: &PairConfig) -> InstanceTable {
+    if !config.smart {
+        return InstanceTable::default();
+    }
+    // Flatten AP-frames (owned references), tagged M1 (index < m1s.len()) vs M3.
+    let frames: Vec<&EapolMessage> = m1s.iter().chain(m3s.iter()).copied().collect();
+    let nonces: Vec<[u8; 32]> = frames.iter().map(|m| m.nonce).collect();
+    let is_m3: Vec<bool> = (0..frames.len()).map(|i| i >= m1s.len()).collect();
+
+    // Group frame indices by (28-byte ANonce prefix, FT key).
+    let mut groups: std::collections::HashMap<([u8; 28], Vec<u8>), Vec<usize>> = std::collections::HashMap::new();
+    for (i, m) in frames.iter().enumerate() {
+        let mut prefix = [0u8; 28];
+        prefix.copy_from_slice(m.nonce.get(..28).unwrap_or(&[0u8; 28]));
+        groups.entry((prefix, ft_key_of(m))).or_default().push(i);
+    }
+
+    let tolerance = u32::from(config.nc_tolerance);
+    let half_tol = tolerance / 2;
+    let mut instances: Vec<Instance> = Vec::new();
+
+    for (_, idxs) in groups {
+        // Cluster the prefix-group's trailing dwords under both endiannesses; pick
+        // the one that collapses more (mirrors nc_dedup; LE wins ties).
+        let (le_clusters, le_c) = cluster_indices(&idxs, &nonces, tolerance, Endianness::Le);
+        let (be_clusters, be_c) = cluster_indices(&idxs, &nonces, tolerance, Endianness::Be);
+        let (clusters, endian, pin) = if le_c >= be_c {
+            (le_clusters, Endianness::Le, (true, false))
+        } else {
+            (be_clusters, Endianness::Be, (false, true))
+        };
+
+        for cluster in clusters {
+            let single = cluster.len() == 1;
+            let endian_pin = if single { (false, false) } else { pin };
+            let survivor =
+                if single { cluster.first().copied() } else { pick_safe_survivor(&cluster, &nonces, endian, half_tol) };
+            // Foldable cluster (incl. singleton): commit the median as canonical;
+            // its `+/- N/2` window covers every member.
+            if let Some(s) = survivor
+                && let Some(&n) = nonces.get(s)
+            {
+                instances.push(instance_from_members(&frames, &is_m3, &cluster, n, endian_pin));
+                continue;
+            }
+            // Sparse multi-member cluster (no NC-safe median): split into per-member
+            // singletons -- never-miss-safe (keep more, never fold across a gap
+            // hashcat's `+/- N/2` cannot bridge).
+            for &m in &cluster {
+                if let Some(&n) = nonces.get(m) {
+                    instances.push(instance_from_members(&frames, &is_m3, &[m], n, (false, false)));
+                }
+            }
+        }
+    }
+
+    InstanceTable { instances }
+}
+
+/// True if replay counters `a` and `b` are equal, tolerating a firmware
+/// byte-swap on either side -- the swap-tolerant gap-0 RC link the attributor
+/// uses directly (not behind `--rc-drift`). Byte-swapped RC firmware is rare
+/// in practice but real; a swap that fails to link degrades to
+/// keep-all (safe), never to mis-attribute.
+const fn rc_link(a: u64, b: u64) -> bool {
+    a == b || a.swap_bytes() == b || a == b.swap_bytes()
+}
+
+/// Phase B: the distinct instances the MIC of `eapol_msg` RC-links to with gap 0,
+/// counted JOINTLY across both axes (design §3.3 Phase B / §4.4 cond 1):
+/// for an M2, `{M1 at rc} U {M3 at rc+1}`; for an M4, `{M3 at rc} U {M1 at rc-1}`.
+/// The joint count is what closes the cross-seed hole: an M2 that also links to a
+/// distinct M3-seeded instance is NOT treated as unique. Only M2/M4 frames reach
+/// here; M3-EAPOL frames are handled (kept whole) in `select_smart`.
+fn attribute_mic(eapol_msg: &EapolMessage, table: &InstanceTable) -> Vec<usize> {
+    let rc = eapol_msg.replay_counter;
+    let mut hits: Vec<usize> = Vec::new();
+    for (idx, inst) in table.instances.iter().enumerate() {
+        let linked = match eapol_msg.msg_type {
+            MsgType::M2 => {
+                inst.m1_rcs.iter().any(|&r| rc_link(r, rc))
+                    || rc.checked_add(1).is_some_and(|r1| inst.m3_rcs.iter().any(|&r| rc_link(r, r1)))
+            },
+            MsgType::M4 => {
+                inst.m3_rcs.iter().any(|&r| rc_link(r, rc))
+                    || rc.checked_sub(1).is_some_and(|r1| inst.m1_rcs.iter().any(|&r| rc_link(r, r1)))
+            },
+            MsgType::M1 | MsgType::M3 => false,
+        };
+        if linked {
+            hits.push(idx);
+        }
+    }
+    hits
+}
+
+/// True if `cand` `ANonce` is within hashcat's `+/- N/2` reach of `inst`'s
+/// canonical median nonce: identical 28-byte prefix AND trailing dword within
+/// `half_tol` in the instance's pinned endianness (or under EITHER endianness
+/// when the instance is unpinned -- refuse-to-drop on ambiguity, design §4.4
+/// cond 3). Used to decide KEEP (reachable, same instance -> `nc_dedup` folds it)
+/// vs DROP (unreachable, cross-instance -> provably uncrackable).
+fn nonce_reachable(cand: &[u8; 32], inst: &Instance, half_tol: u32) -> bool {
+    if cand.get(..28) != inst.canonical_nonce.get(..28) {
+        return false;
+    }
+    let within = |e: Endianness| tail_u32(cand, e).abs_diff(tail_u32(&inst.canonical_nonce, e)) <= half_tol;
+    match inst.endian {
+        (true, false) => within(Endianness::Le),
+        (false, true) => within(Endianness::Be),
+        // Unpinned (or impossibly both): reachable if EITHER direction reaches it.
+        _ => within(Endianness::Le) || within(Endianness::Be),
+    }
+}
+
+/// Phase C: prune provably-uncrackable cross-instance candidates for one EAPOL
+/// frame's MIC. Pass-through when `!config.smart` or for M3-EAPOL (APLESS) frames
+/// (exempt). For an M2/M4 frame uniquely RC-linked to one instance, KEEPS every
+/// candidate whose `ANonce` is reachable from that instance's median (the post-pass
+/// `nc_dedup` folds them) and DROPS the rest (cross-instance, unreachable even
+/// under NC -- the only candidates this can lose for a MIC are ones the MIC's PTK
+/// never signed). Never reduces a MIC below one line.
+fn select_smart(
+    candidates: Vec<PairedHash>,
+    eapol_msg: &EapolMessage,
+    table: &InstanceTable,
+    config: &PairConfig,
+    stats: &mut PairFilterStats,
+) -> Vec<PairedHash> {
+    if !config.smart {
+        return candidates;
+    }
+    // M3-EAPOL frames carry only APLESS combos (N2E3 / N4E3); exempt -- they crack
+    // in mode 22000 via lex-order and never under FT reasoning. Keep whole.
+    if eapol_msg.msg_type == MsgType::M3 {
+        return candidates;
+    }
+
+    // Joint RC attribution. Not exactly one instance -> keep all (§4.2).
+    let hits = attribute_mic(eapol_msg, table);
+    let &[inst_idx] = hits.as_slice() else {
+        stats.smart_ambiguous_kept += 1;
+        return candidates;
+    };
+    let Some(inst) = table.instances.get(inst_idx) else {
+        return candidates;
+    };
+    let half_tol = u32::from(config.nc_tolerance) / 2;
+
+    // Keep-at-least-one guard: if no candidate is reachable from the linked
+    // instance (should not happen -- the instance's own ANonce is a candidate --
+    // but never zero a MIC), degrade to keep-all.
+    if !candidates.iter().any(|c| nonce_reachable(&c.nonce, inst, half_tol)) {
+        stats.smart_ambiguous_kept += 1;
+        return candidates;
+    }
+
+    let mut kept: Vec<PairedHash> = Vec::with_capacity(candidates.len());
+    let mut dropped: u64 = 0;
+    for cand in candidates {
+        if nonce_reachable(&cand.nonce, inst, half_tol) {
+            kept.push(cand);
+        } else {
+            dropped += 1;
+        }
+    }
+    stats.smart_uncrackable_dropped += dropped;
+    // M2/M4 survivors are non-APLESS (N1E2 / N3E2 / N1E4 / N3E4), so an FT session
+    // with any M2/M4 MIC retains a 37100-crackable survivor -- clause F holds by
+    // construction.
+    if eapol_msg.akm.is_ft() {
+        stats.smart_ft_nonapless_kept += 1;
+    }
+    kept
 }
 
 // --- try_pair ---
@@ -640,6 +684,19 @@ pub struct PairFilterStats {
     /// Messages excluded from pairing by the `--max-eapol-per-type` cap, summed
     /// over the four types (`count - min(count, cap)` per type). Zero when off.
     pub messages_capped: u64,
+    /// `--smart`: distinct handshake instances partitioned across multi-instance
+    /// groups (informational). Zero in WIDE mode.
+    pub smart_instances_attributed: u64,
+    /// `--smart`: candidate pairs pruned as provably uncrackable -- cross-instance
+    /// `ANonces` unreachable (by NC) from a uniquely-RC-linked MIC's instance.
+    /// Standalone Phase-4 drop, outside Reconciliation Identity 3.
+    pub smart_uncrackable_dropped: u64,
+    /// `--smart`: MIC-frames kept against all candidates because the MIC did not
+    /// uniquely RC-link to one instance (rc=1-pinned / cross-seed). Informational.
+    pub smart_ambiguous_kept: u64,
+    /// `--smart`: FT (mode 37100) MIC-frames where a non-APLESS survivor was
+    /// retained after pruning, satisfying clause F. Informational.
+    pub smart_ft_nonapless_kept: u64,
 }
 
 // --- Nonce endianness detection ---
@@ -1108,6 +1165,7 @@ mod tests {
             nc_tolerance: 8,
             max_eapol_per_type: 0,
             collapse_message_pair: false,
+            smart: false,
         };
         let (pairs, _) = generate(ap(), sta(), &msgs, &tight);
         // With rc_drift active and tolerance=8, the pair should be found with NC set.
@@ -1122,5 +1180,112 @@ mod tests {
         let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].message_pair & 0x07, ComboType::N1E2 as u8);
+    }
+
+    // --- Smart-mode (--smart) tests ---
+
+    /// `--smart` config: instance attribution on, with its implied folds
+    /// (`--dedup-hash-combos` + `--nc-dedup`) as `build_pair_config` sets them.
+    fn smart_config() -> PairConfig {
+        PairConfig { smart: true, nc_dedup_enabled: true, all_combos: false, ..PairConfig::default() }
+    }
+
+    #[test]
+    fn smart_distinct_anonce_distinct_instance() {
+        // Phase A: two distinct-prefix ANonces seed two instances.
+        let m1a = make_msg(MsgType::M1, 5, 0, 0x10);
+        let m1b = make_msg(MsgType::M1, 9, 1, 0x20);
+        let m1s = vec![&m1a, &m1b];
+        let m3s: Vec<&EapolMessage> = vec![];
+        let table = build_instance_table(&m1s, &m3s, &smart_config());
+        assert_eq!(table.instances.len(), 2, "distinct ANonces -> distinct instances");
+    }
+
+    #[test]
+    fn smart_build_instance_table_empty_when_off() {
+        let m1a = make_msg(MsgType::M1, 5, 0, 0x10);
+        let m1s = vec![&m1a];
+        let m3s: Vec<&EapolMessage> = vec![];
+        assert!(build_instance_table(&m1s, &m3s, &PairConfig::default()).instances.is_empty());
+    }
+
+    #[test]
+    fn smart_prunes_cross_instance_anonce() {
+        // Two distinct ANonces at distinct RCs -> two instances. An M2 at rc=5
+        // links only to instance A (M1 ANonce 0x10 @ rc=5); the wrong-instance
+        // ANonce 0x20 paired with that M2 is provably uncrackable and pruned.
+        let msgs = vec![
+            make_msg(MsgType::M1, 5, 0, 0x10),
+            make_msg(MsgType::M1, 9, 1, 0x20),
+            make_msg(MsgType::M2, 5, 2, 0xAA),
+        ];
+        let (pairs, _) = generate(ap(), sta(), &msgs, &smart_config());
+        let n1e2: Vec<_> = pairs.iter().filter(|p| p.combo_type == ComboType::N1E2).collect();
+        assert_eq!(n1e2.len(), 1, "only the RC-linked instance's N1E2 survives");
+        assert_eq!(n1e2[0].nonce, [0x10u8; 32], "kept ANonce is the RC-linked one");
+    }
+
+    #[test]
+    fn smart_rc_ambiguous_keeps_all_anonces() {
+        // Two distinct ANonces BOTH at rc=1 (rc=1-pinned). An M2 at rc=1 links to
+        // BOTH instances -> not uniquely attributed -> keep all (never-miss).
+        let msgs = vec![
+            make_msg(MsgType::M1, 1, 0, 0x10),
+            make_msg(MsgType::M1, 1, 1, 0x20),
+            make_msg(MsgType::M2, 1, 2, 0xAA),
+        ];
+        let (pairs, _) = generate(ap(), sta(), &msgs, &smart_config());
+        let n1e2 = pairs.iter().filter(|p| p.combo_type == ComboType::N1E2).count();
+        assert_eq!(n1e2, 2, "rc-ambiguous -> both ANonces kept (the crackable one survives)");
+    }
+
+    #[test]
+    fn smart_keeps_at_least_one_line_per_mic() {
+        // Every distinct MIC-bearing M2 frame retains >=1 line under smart.
+        let msgs = vec![
+            make_msg(MsgType::M1, 5, 0, 0x10),
+            make_msg(MsgType::M1, 9, 1, 0x20),
+            make_msg(MsgType::M2, 5, 2, 0xAA),
+            make_msg(MsgType::M2, 9, 3, 0xBB),
+        ];
+        let (pairs, _) = generate(ap(), sta(), &msgs, &smart_config());
+        let frames: std::collections::HashSet<Vec<u8>> = pairs.iter().map(|p| p.eapol_frame.to_vec()).collect();
+        assert!(frames.len() >= 2, "each M2 MIC frame keeps at least one line (never zero a MIC)");
+    }
+
+    #[test]
+    fn smart_off_is_noop_vs_wide() {
+        // smart=false must not change output: same survivor count as WIDE.
+        let msgs = vec![
+            make_msg(MsgType::M1, 5, 0, 0x10),
+            make_msg(MsgType::M1, 9, 1, 0x20),
+            make_msg(MsgType::M2, 5, 2, 0xAA),
+        ];
+        let (wide, _) = generate(ap(), sta(), &msgs, &default_config());
+        let off = PairConfig { smart: false, ..PairConfig::default() };
+        let (got, _) = generate(ap(), sta(), &msgs, &off);
+        assert_eq!(wide.len(), got.len(), "smart=false leaves WIDE output unchanged");
+    }
+
+    #[test]
+    fn smart_subset_of_wide() {
+        // The never-miss machine check at unit scale: every smart-emitted pair is
+        // also a WIDE-emitted pair (smart only ever drops, never invents lines).
+        let msgs = vec![
+            make_msg(MsgType::M1, 5, 0, 0x10),
+            make_msg(MsgType::M1, 9, 1, 0x20),
+            make_msg(MsgType::M1, 1, 2, 0x30),
+            make_msg(MsgType::M2, 5, 3, 0xAA),
+            make_msg(MsgType::M2, 9, 4, 0xBB),
+            make_msg(MsgType::M3, 6, 5, 0x10),
+        ];
+        let (wide, _) = generate(ap(), sta(), &msgs, &default_config());
+        let (smart, _) = generate(ap(), sta(), &msgs, &smart_config());
+        let key = |p: &PairedHash| (p.combo_type as u8, p.nonce, p.eapol_frame.to_vec());
+        let wide_set: std::collections::HashSet<_> = wide.iter().map(key).collect();
+        for p in &smart {
+            assert!(wide_set.contains(&key(p)), "every smart line must be a WIDE line (subset)");
+        }
+        assert!(smart.len() <= wide.len(), "smart never emits more than WIDE");
     }
 }

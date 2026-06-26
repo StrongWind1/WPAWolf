@@ -94,6 +94,10 @@ path = "tests/integration/progress_reporting.rs"
 name = "mode_parity_strict_subset_wide"
 path = "tests/integration/mode_parity_strict_subset_wide.rs"
 
+[[test]]
+name = "smart_subset_wide"
+path = "tests/integration/smart_subset_wide.rs"
+
 [dependencies]
 # Gzip decompression for .pcap.gz / .pcapng.gz inputs. Pure-Rust backend so we
 # avoid a C dependency and keep the `cargo deny` supply-chain gate tight.
