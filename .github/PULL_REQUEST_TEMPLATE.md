@@ -1,33 +1,19 @@
-<!--
-Before submitting, read CONTRIBUTING.md and ARCHITECTURE.md.
-Fill in each section below. Delete any that are not applicable.
--->
-
 ## Summary
 
-<!-- One paragraph: what this PR does and why. -->
-
-## Related requirement / task
-
-<!-- e.g. FR-80211-3. Link the ARCHITECTURE.md section the change relates to. -->
+<!-- What does this PR do? Why is it needed? -->
 
 ## Changes
 
-<!-- Bullet list of concrete changes. -->
+<!-- Bullet list of key changes -->
 
 ## Testing
 
-- [ ] `make check-all` passes locally.
-- [ ] New / updated unit tests.
-- [ ] New / updated integration test in `tests/integration/`.
-- [ ] Manually exercised against a representative pcap; paste command + output.
+<!-- How did you verify the changes? -->
 
-## Dependency changes
+- [ ] `make check` passes (lint + typecheck + tests)
+- [ ] New/changed behavior is covered by tests
+- [ ] Documentation updated (if applicable)
 
-<!-- If this PR adds a crate dependency, justify it against the rejected-crate
-policy in CONTRIBUTING.md (`flate2`, `crc32fast`, `clap`, `rayon`, and `sysinfo`
-are the entire runtime budget). Delete this section otherwise. -->
+## Notes
 
-## Notes for reviewer
-
-<!-- Anything non-obvious: design trade-offs, follow-ups, known gaps. -->
+<!-- Anything reviewers should know? Breaking changes, migration steps, etc. -->

@@ -265,43 +265,6 @@ jobs:
         run: cargo check --all-targets --all-features
 
   # ---------------------------------------------------------------------------
-  # docs -- does `cargo doc` succeed with rustdoc warnings treated as errors?
-  # Broken intra-doc links and missing doc comments on public items are hard
-  # failures.
-  # ---------------------------------------------------------------------------
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Cache cargo build artefacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
-          restore-keys: |
-            ubuntu-cargo-docs-
-            ubuntu-cargo-
-
-      - name: cargo doc
-        env:
-          # Turns rustdoc warnings into errors so broken links fail CI.
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --all-features --no-deps
-
-  # ---------------------------------------------------------------------------
   # hygiene -- repository-hygiene checks that do not involve compiling Rust.
   # Fast (single-digit seconds). Caught early so reviewers do not spend time
   # on a PR that will be blocked on non-ASCII bytes or CRLF line endings.
@@ -358,3 +321,23 @@ jobs:
 
       - name: cargo machete
         run: cargo machete
+
+  # ---------------------------------------------------------------------------
+  # yamllint -- lints all YAML under .github against the strict .yamllint.yml.
+  # Runs on the runner's preinstalled Python; needs no Rust toolchain.
+  # ---------------------------------------------------------------------------
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Lint YAML in .github
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --quiet yamllint
+          python3 -m yamllint --strict -c .yamllint.yml .github

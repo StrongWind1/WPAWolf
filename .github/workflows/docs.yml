@@ -1,0 +1,54 @@
+name: Docs
+
+# Build the documentation strictly on every push to main and every PR.
+# This is a TEST ONLY workflow: cargo doc with rustdoc warnings treated as
+# errors (broken intra-doc links / missing docs fail here). It does NOT deploy.
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cargo-doc:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-cargo-docs-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/rust-toolchain.toml') }}
+          restore-keys: |
+            ubuntu-cargo-docs-
+            ubuntu-cargo-
+
+      - name: cargo doc
+        env:
+          # Turns rustdoc warnings into errors so broken links fail CI.
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --all-features --no-deps
