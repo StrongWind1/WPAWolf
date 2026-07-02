@@ -78,7 +78,7 @@ cd WPAWolf
 make release      # optimised native build -> target/release/wpawolf
 ```
 
-Requires a stable Rust toolchain (see `rust-toolchain.toml`). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow.
+Requires a stable Rust toolchain (see `rust-toolchain.toml`).
 
 ---
 
@@ -216,7 +216,7 @@ Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow, parity oracle setup, and commit conventions.
+Conventional commit messages (`feat:`, `fix:`, `docs:`); run `make check` before every commit. Parity against the hcxtools oracle is required for any extraction change.
 
 ---
 
@@ -230,7 +230,6 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow, parity or
 | [HASHCAT-CURRENT-FORMATS.md](HASHCAT-CURRENT-FORMATS.md) | modes 22000 + 37100 as they exist in hashcat today |
 | [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | the 11 hash types: per-AKM cracker math, line layout, message-pair byte |
 | [HASHCAT-PROPOSED-CHANGES.md](HASHCAT-PROPOSED-CHANGES.md) | proposed modes 22002 / 22003 (design, not implemented) |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | dev workflow, parity oracle, commit conventions |
 
 ---
 
