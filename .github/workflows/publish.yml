@@ -1,13 +1,8 @@
 name: Publish
 
-# DORMANT: this crate is not yet published to crates.io.
-# To enable automatic publishing when a GitHub Release is published, restore
-# the `release` trigger below and configure a CARGO_REGISTRY_TOKEN secret
-# (or crates.io Trusted Publishing):
-#   release:
-#     types: [published]
-
 "on":
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -22,8 +17,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Refuse to publish unless the required CI workflow concluded successfully
-  # for the exact commit the release points at.
   verify-ci:
     name: Verify CI is green
     runs-on: ubuntu-latest
@@ -63,7 +56,11 @@ jobs:
     needs: verify-ci
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: always() && (needs.verify-ci.result == 'success' || needs.verify-ci.result == 'skipped')
+    environment: crates-io
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -73,9 +70,13 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+
       - name: cargo publish
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           set -euo pipefail
           cargo publish --locked
