@@ -18,7 +18,7 @@ repository = "https://github.com/StrongWind1/WPAWolf"
 homepage = "https://github.com/StrongWind1/WPAWolf"
 documentation = "https://github.com/StrongWind1/WPAWolf"
 readme = "README.md"
-keywords = ["wifi", "security", "802.11", "wpa", "hashcat"]
+keywords = ["wifi", "security", "wireless", "wpa", "hashcat"]
 categories = ["command-line-utilities", "network-programming"]
 include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "CHANGELOG.md"]
 
