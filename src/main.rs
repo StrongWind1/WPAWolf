@@ -52,7 +52,7 @@ use wpawolf::{
 #[derive(Parser, Debug)]
 #[command(
     name = "wpawolf",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
+    version = env!("CARGO_PKG_VERSION"),
     about,
     long_about = None,
     arg_required_else_help = true,
