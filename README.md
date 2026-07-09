@@ -66,6 +66,12 @@ At least one output flag is required; `wpawolf` exits without doing any work if 
 
 ## Installation
 
+### From crates.io
+
+```sh
+cargo install wpawolf
+```
+
 ### Prebuilt binaries
 
 Download from [GitHub Releases](https://github.com/StrongWind1/WPAWolf/releases). Static musl binaries for Linux x86_64 and arm64, macOS universal (arm64 + x86_64), and Windows (MSVC + GNU).
