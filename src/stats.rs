@@ -1154,7 +1154,8 @@ impl Stats {
         }
 
         let _ = writeln!(out, "---");
-        let _ = writeln!(out, "wpawolf {} ({})", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"));
+        let _ =
+            writeln!(out, "wpawolf {} ({})", env!("CARGO_PKG_VERSION"), option_env!("GIT_HASH").unwrap_or("release"));
         let _ = writeln!(out, "---");
 
         // ======================================================================
