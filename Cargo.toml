@@ -9,7 +9,7 @@ resolver = "3"
 
 [package]
 name = "wpawolf"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 rust-version = "1.95"
 description = "WPA/WPA2/WPA3 PSK-family (incl. PSK-SHA256/384 and FT-PSK) handshake + PMKID extractor for hashcat (all 11 hash types, modes 22000/37100)"
@@ -20,7 +20,7 @@ documentation = "https://github.com/StrongWind1/WPAWolf"
 readme = "README.md"
 keywords = ["wifi", "security", "wireless", "wpa", "hashcat"]
 categories = ["command-line-utilities", "network-programming"]
-include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "CHANGELOG.md"]
+include = ["/src/**/*", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 [[test]]
 name = "superset"
