@@ -1367,14 +1367,14 @@ mod tests {
     fn country_code_valid() {
         // "US" + environment byte
         let value = [b'U', b'S', 0x20];
-        assert_eq!(extract_country_code(&value), Some([b'U', b'S']));
+        assert_eq!(extract_country_code(&value), Some(*b"US"));
     }
 
     #[test]
     fn country_code_lowercase() {
         // "de" -- some implementations use lowercase
         let value = [b'd', b'e', 0x20];
-        assert_eq!(extract_country_code(&value), Some([b'd', b'e']));
+        assert_eq!(extract_country_code(&value), Some(*b"de"));
     }
 
     #[test]
