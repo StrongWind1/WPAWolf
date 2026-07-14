@@ -414,14 +414,7 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn PacketReader>> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::cast_possible_truncation,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
 
     use std::io::Cursor;
 

@@ -224,7 +224,7 @@ impl<R: Read> PacketReader for PcapReader<R> {
     /// Standard packet records are 16 bytes; Kuznetzov records are 24 bytes.
     /// Nanosecond timestamps are truncated to microsecond precision (integer divide by 1 000).
     /// Interface id is always 0 -- classic pcap has exactly one interface.
-    #[allow(clippy::similar_names, reason = "ts_sec/ts_usec are pcap protocol-standard field names")]
+    #[expect(clippy::similar_names, reason = "ts_sec/ts_usec are pcap protocol-standard field names")]
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         // Read records, skipping any whose caplen exceeds MAX_PACKET_BYTES. An
         // explicit loop (not tail recursion) bounds stack growth across a run of
@@ -357,14 +357,9 @@ impl<R: Read> PacketReader for PcapReader<R> {
 #[cfg(test)]
 mod tests {
     #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
         clippy::cast_possible_truncation,
         clippy::similar_names,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module -- ts_sec/ts_usec are pcap protocol-standard field names"
+        reason = "test fixtures use small literals; ts_sec/ts_usec are protocol names"
     )]
 
     use std::io::Cursor;

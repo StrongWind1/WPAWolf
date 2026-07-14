@@ -82,7 +82,6 @@ pub fn strip_fcs(frame: &[u8], outcome: FcsOutcome) -> &[u8] {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
 

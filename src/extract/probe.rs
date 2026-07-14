@@ -147,15 +147,7 @@ pub fn process_probe_req(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::unwrap_used,
-        clippy::indexing_slicing,
-        clippy::missing_docs_in_private_items,
-        clippy::wildcard_imports,
-        reason = "relaxed lints for test code"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
     use super::super::common::SUBTYPE_AUTH;
     use super::*;
     use crate::ieee80211::rsn::extract_pmkids_from_osen;

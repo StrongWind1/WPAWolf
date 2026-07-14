@@ -35,14 +35,6 @@ pub fn open<R: Read + 'static>(inner: R) -> Result<Box<dyn PacketReader>> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use std::io::{Cursor, Write as _};
 

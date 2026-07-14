@@ -196,14 +196,6 @@ impl std::fmt::Debug for RssSampler {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
 

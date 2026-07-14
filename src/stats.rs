@@ -1115,7 +1115,6 @@ impl Stats {
     /// Separated from [`Self::print_summary`] so tests can assert on the rendered
     /// rows (label width, row presence, parent/child sums) without capturing stdout.
     #[must_use]
-    #[allow(clippy::too_many_lines, reason = "linear banner layout in pipeline order; splitting hurts auditability")]
     pub fn summary_string(&self) -> String {
         // W: dot-padding width for the label column. Longest label is 45 chars;
         // W must exceed every label so each row gets at least two dots before ": ".
@@ -1726,14 +1725,6 @@ impl Stats {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
 

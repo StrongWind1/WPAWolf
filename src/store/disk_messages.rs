@@ -48,10 +48,10 @@ const PMKID_HEADER_LEN: usize = 46;
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-#[allow(
-    clippy::indexing_slicing,
+#[expect(
     clippy::cast_possible_truncation,
-    reason = "buffer sizes are compile-time constants matching the wire format"
+    clippy::indexing_slicing,
+    reason = "compile-time-constant buffer layout; MIC len max 24 fits u8; header sizes fit u32"
 )]
 pub fn write_eapol_message(w: &mut impl Write, msg: &EapolMessage) -> std::io::Result<u32> {
     let mut buf = [0u8; EAPOL_HEADER_LEN];
@@ -60,7 +60,6 @@ pub fn write_eapol_message(w: &mut impl Write, msg: &EapolMessage) -> std::io::R
     buf[9] = msg.key_version;
     buf[10..18].copy_from_slice(&msg.replay_counter.to_le_bytes());
     buf[18..50].copy_from_slice(&msg.nonce);
-    #[allow(clippy::cast_possible_truncation, reason = "MIC is max 24 bytes, always fits in u8")]
     let mic_len = msg.mic.len() as u8;
     buf[50] = mic_len;
     buf[51..51 + msg.mic.len()].copy_from_slice(msg.mic.as_slice());
@@ -92,12 +91,6 @@ pub fn write_eapol_message(w: &mut impl Write, msg: &EapolMessage) -> std::io::R
 /// # Errors
 ///
 /// Returns `Err` on I/O failure or if the data is malformed.
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    clippy::cast_possible_truncation,
-    reason = "buffer sizes are compile-time constants matching the wire format"
-)]
 pub fn read_eapol_message(r: &mut impl Read) -> std::io::Result<EapolMessage> {
     let mut buf = [0u8; EAPOL_HEADER_LEN];
     r.read_exact(&mut buf)?;
@@ -160,7 +153,6 @@ pub fn read_eapol_message(r: &mut impl Read) -> std::io::Result<EapolMessage> {
 }
 
 /// Serializes an `FtFields` to a fixed 57-byte buffer.
-#[allow(clippy::indexing_slicing, reason = "buffer size is a compile-time constant matching the wire format")]
 fn serialize_ft_fields(ft: &FtFields) -> [u8; FT_FIELDS_LEN] {
     let mut buf = [0u8; FT_FIELDS_LEN];
     buf[0..2].copy_from_slice(&ft.mdid);
@@ -171,7 +163,6 @@ fn serialize_ft_fields(ft: &FtFields) -> [u8; FT_FIELDS_LEN] {
 }
 
 /// Deserializes an `FtFields` from a 57-byte buffer.
-#[allow(clippy::indexing_slicing, reason = "buffer size is a compile-time constant matching the wire format")]
 fn deserialize_ft_fields(buf: &[u8; FT_FIELDS_LEN]) -> FtFields {
     let mut mdid = [0u8; 2];
     mdid.copy_from_slice(&buf[0..2]);
@@ -190,11 +181,7 @@ fn deserialize_ft_fields(buf: &[u8; FT_FIELDS_LEN]) -> FtFields {
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-#[allow(
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    reason = "buffer sizes are compile-time constants matching the wire format"
-)]
+#[expect(clippy::cast_possible_truncation, reason = "PMKID_HEADER_LEN=46 and FT_FIELDS_LEN=57 fit u32")]
 pub fn write_pmkid_entry(w: &mut impl Write, entry: &PmkidEntry) -> std::io::Result<u32> {
     let mut buf = [0u8; PMKID_HEADER_LEN];
     buf[0..8].copy_from_slice(&entry.timestamp.to_le_bytes());
@@ -221,11 +208,6 @@ pub fn write_pmkid_entry(w: &mut impl Write, entry: &PmkidEntry) -> std::io::Res
 /// # Errors
 ///
 /// Returns `Err` on I/O failure.
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "buffer sizes are compile-time constants matching the wire format"
-)]
 pub fn read_pmkid_entry(r: &mut impl Read) -> std::io::Result<PmkidEntry> {
     let mut buf = [0u8; PMKID_HEADER_LEN];
     r.read_exact(&mut buf)?;
@@ -254,7 +236,6 @@ pub fn read_pmkid_entry(r: &mut impl Read) -> std::io::Result<PmkidEntry> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs, reason = "test module")]
 
     use super::*;
 

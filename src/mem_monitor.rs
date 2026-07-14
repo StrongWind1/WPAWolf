@@ -286,7 +286,6 @@ impl std::fmt::Debug for MemWatcher {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, missing_docs, reason = "test module")]
 
     use super::*;
 

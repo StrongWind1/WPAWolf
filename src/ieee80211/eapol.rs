@@ -671,15 +671,7 @@ pub fn parse_rejection_reason(data: &[u8]) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::cast_possible_truncation,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
 
     use super::*;
 
@@ -690,7 +682,6 @@ mod tests {
     /// The caller provides Key Information flag values, nonce, MIC, and optional extra
     /// Key Data bytes. Descriptor Type is set to RSN (2). Replay Counter is set to
     /// `0x0000_0000_0000_0001` unless overridden via the returned buffer.
-    #[allow(clippy::fn_params_excessive_bools, reason = "test helper matching Key Information bit flags")]
     fn make_eapol(
         key_ack: bool,
         key_mic: bool,
@@ -993,7 +984,6 @@ mod tests {
     /// Builds a SHA-384-family EAPOL-Key frame: 24-byte MIC, Key Data Length at offset 105.
     /// Used to exercise the MIC-width disambiguation path in `parse()`.
     /// [IEEE 802.11-2024] §12.7.2 Table 12-11
-    #[allow(clippy::fn_params_excessive_bools, reason = "test helper matching Key Information bit flags")]
     fn make_eapol_24(
         key_ack: bool,
         key_mic: bool,

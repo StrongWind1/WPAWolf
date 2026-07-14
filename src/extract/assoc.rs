@@ -318,14 +318,6 @@ pub fn process_assoc_or_reassoc_req(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
     use crate::ieee80211::frame;

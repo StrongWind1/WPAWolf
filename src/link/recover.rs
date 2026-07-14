@@ -252,8 +252,8 @@ pub fn recover(data: &[u8], dlt: u16) -> Option<RecoveryResult<'_>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test assertions")]
 mod tests {
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
     use super::*;
 
     fn append_fcs(data: &[u8]) -> Vec<u8> {
@@ -268,7 +268,6 @@ mod tests {
         let mut buf = Vec::with_capacity(it_len);
         buf.push(0); // it_version
         buf.push(0); // pad
-        #[allow(clippy::cast_possible_truncation, reason = "test data always < 256 bytes")]
         buf.extend_from_slice(&(it_len as u16).to_le_bytes());
         buf.extend_from_slice(&it_present.to_le_bytes());
         buf.extend_from_slice(field_data);

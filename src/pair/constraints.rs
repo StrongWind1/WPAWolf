@@ -63,7 +63,7 @@ pub const fn within_time(ts_a: u64, ts_b: u64, timeout_us: u64) -> bool {
 /// Byte-swapping detects implementations that store the RC in the wrong endianness
 /// (big-endian vs little-endian). [IEEE 802.11-2024] §12.7.2
 #[must_use]
-#[allow(clippy::similar_names, reason = "rc_a_swapped/rc_b_swapped mirror rc_a/rc_b naming pattern")]
+#[expect(clippy::similar_names, reason = "rc_a_swapped/rc_b_swapped mirror rc_a/rc_b naming pattern")]
 pub fn within_rc(msg_a: &EapolMessage, msg_b: &EapolMessage, tolerance: u8) -> Option<RcRelation> {
     let rc_a = msg_a.replay_counter;
     let rc_b = msg_b.replay_counter;
@@ -174,14 +174,6 @@ pub fn within_rc_for_combo(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use std::sync::Arc;
 

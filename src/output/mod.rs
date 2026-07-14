@@ -703,10 +703,6 @@ impl OutputContext {
                     self.disk_dedup = Some(disk_dedup::DiskDedup::new(&active)?);
                 }
             } else if self.disk_dedup.is_none() {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "saturating to usize::MAX is safe -- HashSet clamps internally"
-                )]
                 let cap = usize::try_from(estimated_hashes).unwrap_or(usize::MAX);
                 self.dedup.reserve(cap, &active);
             }
@@ -919,7 +915,7 @@ impl OutputContext {
         let pairs_written_before = stats.pairs_written;
         let dedup_dropped_before = stats.dedup_dropped_pairs;
 
-        #[allow(clippy::items_after_statements, reason = "EmitState must be defined after Pipeline 1 borrows are used")]
+        #[expect(clippy::items_after_statements, reason = "EmitState defined after Pipeline 1 borrows are consumed")]
         struct EmitState<'a> {
             sinks: &'a mut HashSinks,
             dedup: &'a mut PerSinkDedup,
@@ -1231,14 +1227,6 @@ impl OutputContext {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
     use crate::store::auxiliary::{

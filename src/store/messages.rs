@@ -296,7 +296,6 @@ impl MessageStore {
     /// index keys (cheap -- no messages loaded). In memory mode, iterates the
     /// in-memory `HashMap` keys.
     #[must_use]
-    #[allow(clippy::type_complexity, reason = "single return site; a type alias adds indirection without clarity")]
     pub fn group_keys(&self) -> Box<dyn Iterator<Item = MacPair> + '_> {
         if self.disk_mode { Box::new(self.disk_index.keys().copied()) } else { Box::new(self.groups.keys().copied()) }
     }
@@ -593,14 +592,6 @@ pub struct PendingEapol {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
     use crate::ieee80211::eapol;

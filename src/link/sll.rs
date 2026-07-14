@@ -156,7 +156,6 @@ pub fn has_ampdu_status_v2(data: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "test assertions")]
 mod tests {
     use super::*;
 

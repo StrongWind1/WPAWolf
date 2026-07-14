@@ -799,7 +799,7 @@ pub struct FtFields {
 /// Indexed by an arbitrary `u8` value, returns the two ASCII hex characters that
 /// encode it. Computed at compile time so the runtime cost is a single 16-bit load
 /// per input byte.
-#[allow(clippy::indexing_slicing, reason = "const-eval only; all indices proven in-bounds at compile time")]
+#[expect(clippy::indexing_slicing, reason = "const-eval loop; all indices proven in-bounds at compile time")]
 const HEX_LUT: [[u8; 2]; 256] = {
     let hex = b"0123456789abcdef";
     let mut table = [[0u8; 2]; 256];
@@ -822,9 +822,9 @@ const HEX_LUT: [[u8; 2]; 256] = {
 /// exactly once at the end -- no per-byte capacity checks or length increments.
 /// Benchmarked at 2.38x faster than the per-nibble `push` loop on mixed-size fields
 /// (the real `format_eapol_line` call pattern).
+#[expect(clippy::indexing_slicing, reason = "usize::from(u8) always 0..=255, in-bounds for 256-entry HEX_LUT")]
 pub fn encode_hex(bytes: &[u8], out: &mut Vec<u8>) {
     out.reserve(bytes.len() * 2);
-    #[allow(clippy::indexing_slicing, reason = "usize::from(u8) is always 0..=255, in-bounds for 256-entry HEX_LUT")]
     out.extend(bytes.iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
 }
 
@@ -834,19 +834,18 @@ pub fn encode_hex(bytes: &[u8], out: &mut Vec<u8>) {
 /// window, and bytes after the MIC. Equivalent to `eapol_with_mic_zeroed` + `encode_hex`
 /// but avoids the heap allocation for the cloned frame.
 /// Per [IEEE 802.11-2024] §12.7.2 Table 12-11: MIC starts at EAPOL-Key byte 81.
+#[expect(clippy::indexing_slicing, reason = "usize::from(u8) always 0..=255, in-bounds for 256-entry HEX_LUT")]
 pub fn encode_hex_mic_zeroed(frame: &[u8], mic_len: usize, out: &mut Vec<u8>) {
     let mic_start = 81;
     let mic_end = mic_start + mic_len;
     out.reserve(frame.len() * 2);
     let before_end = mic_start.min(frame.len());
-    #[allow(clippy::indexing_slicing, reason = "usize::from(u8) always in-bounds for 256-entry HEX_LUT")]
     out.extend(frame.get(..before_end).unwrap_or_default().iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
     let zero_count = mic_len.min(frame.len().saturating_sub(mic_start));
     for _ in 0..zero_count {
         out.extend_from_slice(b"00");
     }
     if let Some(after) = frame.get(mic_end..) {
-        #[allow(clippy::indexing_slicing, reason = "usize::from(u8) always in-bounds for 256-entry HEX_LUT")]
         out.extend(after.iter().flat_map(|&b| HEX_LUT[usize::from(b)]));
     }
 }
@@ -1123,14 +1122,6 @@ pub fn hash_slices(kind: u8, slices: &[&[u8]]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
 

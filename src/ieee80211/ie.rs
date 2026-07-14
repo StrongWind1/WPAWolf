@@ -986,15 +986,7 @@ pub fn extract_ds_channel(ies: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::cast_possible_truncation,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
 
     use super::*;
 

@@ -594,16 +594,7 @@ impl<R: Read> PacketReader for PcapngReader<R> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::cast_possible_truncation,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::panic,
-        reason = "test module -- relaxed lint policy"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
 
     use super::*;
 

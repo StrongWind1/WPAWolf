@@ -62,7 +62,7 @@ use wpawolf::{
     wpawolf --22000-out h.22000 --strict captures/
     wpawolf -o all.out -E essids.txt -W wordlist.txt captures/",
 )]
-#[allow(clippy::doc_markdown, reason = "doc comments are clap help text, not rustdoc API surface")]
+#[expect(clippy::doc_markdown, reason = "doc comments are clap help text, not rustdoc API surface")]
 struct Cli {
     /// Capture files or directories to process
     ///

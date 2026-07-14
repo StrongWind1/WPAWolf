@@ -50,7 +50,7 @@ impl DiskDedupSink {
         Ok(Self { bucket_writers: (0..NUM_BUCKETS).map(|_| None).collect(), bucket_dir, line_count: line_base })
     }
 
-    #[allow(clippy::indexing_slicing, reason = "bucket_idx always < NUM_BUCKETS from % operation")]
+    #[expect(clippy::indexing_slicing, reason = "bucket_idx always < NUM_BUCKETS from % operation")]
     fn get_or_create_writer(&mut self, bucket_idx: usize) -> Result<&mut BufWriter<std::fs::File>> {
         if self.bucket_writers[bucket_idx].is_none() {
             let path = self.bucket_dir.join(format!("b{bucket_idx:03}.bin"));
@@ -62,7 +62,7 @@ impl DiskDedupSink {
     }
 
     fn record(&mut self, fingerprint: u64) -> Result<()> {
-        #[allow(clippy::cast_possible_truncation, reason = "NUM_BUCKETS is 256, fits u64 modulo")]
+        #[expect(clippy::cast_possible_truncation, reason = "fingerprint % 256 always fits usize")]
         let bucket_idx = (fingerprint % NUM_BUCKETS as u64) as usize;
         let line_number = self.line_count;
         self.line_count += 1;
@@ -73,7 +73,7 @@ impl DiskDedupSink {
     }
 
     fn record_sentinel(&mut self, fingerprint: u64) -> Result<()> {
-        #[allow(clippy::cast_possible_truncation, reason = "NUM_BUCKETS is 256, fits u64 modulo")]
+        #[expect(clippy::cast_possible_truncation, reason = "fingerprint % 256 always fits usize")]
         let bucket_idx = (fingerprint % NUM_BUCKETS as u64) as usize;
         let writer = self.get_or_create_writer(bucket_idx)?;
         writer.write_all(&SENTINEL_LINE.to_le_bytes())?;
@@ -300,10 +300,7 @@ fn build_removal_set(bucket_dir: &Path) -> Result<HashSet<u64>> {
 fn load_bucket(path: &Path) -> Result<Vec<(u64, u64)>> {
     let file = std::fs::File::open(path)?;
     let file_len = file.metadata()?.len();
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "bucket files are small; record count fits usize on all targets"
-    )]
+    #[expect(clippy::cast_possible_truncation, reason = "bucket files are small; record count fits usize")]
     let record_count = (file_len / RECORD_SIZE as u64) as usize;
     let mut reader = BufReader::with_capacity(CLEAN_BUF_CAPACITY, file);
     let mut records = Vec::with_capacity(record_count);
@@ -335,7 +332,6 @@ fn rewrite_without_lines(output_path: &Path, removal: &HashSet<u64>) -> Result<(
 
         for (line_num, line_result) in reader.lines().enumerate() {
             let line = line_result?;
-            #[allow(clippy::cast_possible_truncation, reason = "line count fits u64 for any real file")]
             if !removal.contains(&(line_num as u64)) {
                 writer.write_all(line.as_bytes())?;
                 writer.write_all(b"\n")?;
@@ -351,14 +347,6 @@ fn rewrite_without_lines(output_path: &Path, removal: &HashSet<u64>) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
     use crate::output::dedup::SinkId;

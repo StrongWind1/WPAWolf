@@ -142,10 +142,7 @@ impl PmkidStore {
     /// Iterates over all stored PMKID entries across all (AP, STA) pairs.
     /// In disk mode, loads all entries from disk into a temporary Vec.
     #[must_use]
-    #[allow(
-        clippy::iter_without_into_iter,
-        reason = "return type is Box<dyn Iterator>; IntoIterator for &PmkidStore would add indirection without benefit"
-    )]
+    #[expect(clippy::iter_without_into_iter, reason = "Box<dyn Iterator> return makes IntoIterator impractical")]
     pub fn iter(&self) -> Box<dyn Iterator<Item = PmkidEntry> + '_> {
         if self.disk_mode {
             let all: Vec<PmkidEntry> = self.load_all_entries();
@@ -318,14 +315,6 @@ impl PmkidStore {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
 

@@ -284,14 +284,6 @@ pub fn format_eapol_line(prefix: &[u8], pair: &PairedHash, essid: &[u8]) -> Stri
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use std::sync::Arc;
 

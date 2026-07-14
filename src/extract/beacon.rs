@@ -377,15 +377,7 @@ pub fn process_beacon_or_probe_resp(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::unwrap_used,
-        clippy::indexing_slicing,
-        clippy::missing_docs_in_private_items,
-        clippy::wildcard_imports,
-        reason = "relaxed lints for test code"
-    )]
+    #![allow(clippy::cast_possible_truncation, reason = "test fixtures use small literals that fit target types")]
     use super::super::common::SUBTYPE_PROBE_RESP;
     use super::*;
     use crate::log::Logger;

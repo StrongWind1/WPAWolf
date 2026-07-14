@@ -752,14 +752,6 @@ fn detect_nonce_endianness(m1s: &[&EapolMessage], m3s: &[&EapolMessage]) -> (boo
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        missing_docs,
-        clippy::wildcard_imports,
-        reason = "test module"
-    )]
 
     use super::*;
     use crate::types::{AkmType, MacAddr, MicBytes, MsgType};
