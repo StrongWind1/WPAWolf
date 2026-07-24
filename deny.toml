@@ -26,6 +26,12 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 
+# Transitive duplicates we cannot resolve -- different direct deps pin
+# incompatible major versions of the same crate.
+skip = [
+    { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
+]
+
 [[bans.deny]]
 crate = "openssl"
 wrappers = [ ]
