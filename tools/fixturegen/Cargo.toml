@@ -33,10 +33,19 @@ wpawolf = { path = "../.." }
 
 # CLI parsing -- same minimal feature set as the wpawolf binary so cargo
 # does not pull a second copy of clap with different features.
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "color"] }
+clap = { version = "4", default-features = false, features = [
+  "std",
+  "derive",
+  "help",
+  "usage",
+  "error-context",
+  "color",
+] }
 
 # Gzip wrapper for `.pcap.gz` / `.pcapng.gz` fixture variants.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1", default-features = false, features = [
+  "rust_backend",
+] }
 
 # --- RustCrypto: every primitive named in [IEEE 802.11-2024] tables 12-9 / 12-11 ---
 # PBKDF2-HMAC-SHA1 for PMK derivation (`PSK = PBKDF2(passphrase, SSID, 4096, 32)`).

@@ -11,22 +11,22 @@
 # bools (one per AKM category or wire-format bit). Raising thresholds here
 # removes 30+ #[allow] annotations that were documenting design choices, not
 # suppressing real problems.
-cognitive-complexity-threshold          = 30
-too-many-arguments-threshold            = 18
-too-many-lines-threshold                = 500
-type-complexity-threshold               = 500
-max-struct-bools                        = 20
-max-fn-params-bools                     = 10
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 18
+too-many-lines-threshold = 500
+type-complexity-threshold = 500
+max-struct-bools = 20
+max-fn-params-bools = 10
 
 # --- Test-only relaxations -----------------------------------------------------
 # Tests deliberately panic on invariant violations  --  that's the assertion.
 # Suppressing these in production while permitting them in tests is the right
 # split. Requires Clippy >= 1.82; wpawolf MSRV is 1.85 so safe.
-allow-expect-in-tests           = true
-allow-unwrap-in-tests           = true
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
 # Test fixtures build slices of known length from byte literals; `slice.get(..)`
 # gymnastics add noise without catching any real bug.
 allow-indexing-slicing-in-tests = true
 # Tests that craft protocol headers routinely panic on malformed input; that
 # is how the property "this parser rejects garbage" is expressed.
-allow-panic-in-tests            = true
+allow-panic-in-tests = true

@@ -7,8 +7,8 @@ feature-depth = 3
 
 [advisories]
 db-path = "~/.cargo/advisory-db"
-db-urls = [ "https://github.com/rustsec/advisory-db" ]
-ignore = [ ]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
 maximum-db-staleness = "P1D"
 git-fetch-with-cli = true
 unmaintained = "all"
@@ -17,7 +17,7 @@ unused-ignored-advisory = "deny"
 yanked = "deny"
 
 [licenses]
-allow = [ "Apache-2.0", "MIT", "Unicode-3.0" ]
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
 unused-allowed-license = "deny"
 confidence-threshold = 0.95
 
@@ -29,24 +29,24 @@ highlight = "all"
 # Transitive duplicates we cannot resolve -- different direct deps pin
 # incompatible major versions of the same crate.
 skip = [
-    { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
+  { crate = "syn@2", reason = "proc-macro crates have not all upgraded to syn 3" },
 ]
 
 [[bans.deny]]
 crate = "openssl"
-wrappers = [ ]
+wrappers = []
 
 [[bans.deny]]
 crate = "openssl-sys"
-wrappers = [ ]
+wrappers = []
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
-allow-git = [ ]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
 
 [sources.allow-org]
-github = [ ]
-gitlab = [ ]
-bitbucket = [ ]
+github = []
+gitlab = []
+bitbucket = []
