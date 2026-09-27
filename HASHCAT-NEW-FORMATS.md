@@ -1,8 +1,8 @@
 # The 11 New WPA-PSK Hash Formats: How and Why
 
-> **Status: specification.** Defines the 11-type classification that wpawolf emits today on its per-AKM sinks (`-o`, `--wpa1-out`, `--wpa2-out`, ...). The hashcat side of consuming these is sketched separately in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) and is not yet implemented in upstream hashcat.
+> **Status: specification, implemented.** Defines the 11-type classification that wpawolf emits today on its per-AKM sinks (`-o`, `--wpa1-out`, `--wpa2-out`, ...). A hashcat consumer (mode 22002) implementing this format exists on [`feat/wpa-22002`](https://github.com/StrongWind1/hashcat/tree/feat/wpa-22002) and cracks all 11 types. The implementation design is documented in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
 
-A complete reference for the 11-type WPA-PSK hash classification that `wpawolf` emits and that a future hashcat module will consume. Every PSK-crackable hash defined by `[IEEE 802.11-2024]` gets exactly one type code, one line prefix, and one self-contained format. This document covers the format itself: per-row line layout, cracker math, and the design rationale for each choice. It does not cover implementation in hashcat (see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md)) and it does not cover what current hashcat understands today (see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md)).
+A complete reference for the 11-type WPA-PSK hash classification that `wpawolf` emits and that hashcat mode 22002 consumes. Every PSK-crackable hash defined by `[IEEE 802.11-2024]` gets exactly one type code, one line prefix, and one self-contained format. This document covers the format itself: per-row line layout, cracker math, and the design rationale for each choice. It does not cover implementation in hashcat (see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md)) and it does not cover what current hashcat understands today (see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md)).
 
 ---
 
@@ -283,7 +283,7 @@ A parser tokenises on `*`, reads the 2-digit type code, and from the type code l
 
 ## §6  N#E# notation: the six pair combos
 
-Every EAPOL line ends with a 1-byte `<mp>` field that encodes which two messages of the 4-way handshake formed the pair, plus three diagnostic flag bits. The byte format and bit values are identical between the new classification and the legacy scheme (the new scheme only changes which prefix the line carries, not what the trailing byte means), so a future hashcat module can reuse the existing parsing logic verbatim.
+Every EAPOL line ends with a 1-byte `<mp>` field that encodes which two messages of the 4-way handshake formed the pair, plus three diagnostic flag bits. The byte format and bit values are identical between the new classification and the legacy scheme (the new scheme only changes which prefix the line carries, not what the trailing byte means), so hashcat mode 22002 reuses the existing parsing logic verbatim.
 
 ### Notation
 
@@ -333,7 +333,7 @@ By default emitters write all 6 (resilient against retransmissions where one com
 
 ## §7  Message-pair byte (`<mp>`): complete bit spec
 
-The most underdocumented part of the legacy hashcat format. The byte is **identical** between the legacy and new classification schemes; a future hashcat kernel can use the same parsing logic for both.
+The most underdocumented part of the legacy hashcat format. The byte is **identical** between the legacy and new classification schemes; hashcat mode 22002 uses the same parsing logic for both.
 
 ### EAPOL lines (codes 1, 3, 5, 7, 9, 11)
 
@@ -442,6 +442,6 @@ Note that types 09 and 11 are the only rows with a 48-hex (24 B) `<hash>` field.
   - Table 9-190 AKM suite type codes
   - Table 12-9 integrity algorithm per AKM
 - [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md): current hashcat formats (modes 22000 + 37100), `keyver` trick, limitations
-- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md): proposed unified hashcat module that consumes this extended format
+- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md): hashcat mode 22002 implementation record
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): `wpawolf` architecture decisions
 - [`README.md`](README.md): using `wpawolf` in practice
