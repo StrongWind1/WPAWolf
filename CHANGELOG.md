@@ -8,6 +8,10 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 *(nothing yet)*
 
+### v1.3.0 (2026-09-27)
+
+Version bump for crates.io publishing. Content identical to v1.2.1; the minor bump avoids a crates.io version collision from a prior partial publish.
+
 ### v1.2.1 (2026-09-27)
 
 Crates.io publishing, CI hardening, a security dependency fix, and housekeeping. No change to hashcat-line output format; 22000 / 37100 / per-AKM lines are byte-identical to v1.2.0 for any capture.
