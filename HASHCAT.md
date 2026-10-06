@@ -6,42 +6,44 @@
 
 ## §1  Overview
 
-wpawolf classifies every PSK-crackable WPA hash into one of eleven types (§2). Types 1-7 are emitted to hashcat mode 22000, the sole output target. Types 8-11 (SHA-384 family) are classified and counted in the stats banner but not emitted -- the 24 B MIC exceeds mode 22000's fixed 16 B MIC field, and no hashcat kernel exists for them.
+wpawolf classifies every PSK-crackable WPA hash into one of eleven **hash classes** (§2). Classes 1-7 are emitted to hashcat mode 22000, the sole output target. Classes 8-11 (SHA-384 family) are classified and counted in the stats banner but not emitted -- the 24 B MIC exceeds mode 22000's fixed 16 B MIC field, and no hashcat kernel exists for them.
 
-Mode 22000 accepts four type prefixes: `01` (PMKID), `02` (EAPOL), `03` (FT PMKID), `04` (FT EAPOL). Standard records use a 9-token format; FT records (types 03/04) use a 12-token format with three additional fields (MDID, R0KH-ID, R1KH-ID).
+Mode 22000 accepts four **line prefixes**: `WPA*01*` (PMKID), `WPA*02*` (EAPOL), `WPA*03*` (FT PMKID), `WPA*04*` (FT EAPOL). Standard records use a 9-token format; FT records (`WPA*03*`/`WPA*04*`) use a 12-token format with three additional fields (MDID, R0KH-ID, R1KH-ID).
+
+**Terminology.** This document uses **"class"** (numbered 1-11) for wpawolf's internal classification and **"prefix"** (`WPA*01*`-`WPA*04*`) for the 2-digit code in token 1 of the hashcat hash line. The two numbering systems overlap but do not align: for example, class 1 (WPA1-PSK-EAPOL) emits prefix `WPA*02*`, while class 2 (WPA2-PSK-PMKID) emits prefix `WPA*01*`.
 
 wpawolf output flags:
-- `-o` / `--out`: combined output, all crackable types 1-7
-- `--wpa1-eapol`, `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`, `--ft-eapol`: per-type sinks, each maps 1:1 to a single wpawolf type
+- `-o` / `--out`: combined output, all crackable classes 1-7
+- `--wpa1-eapol`, `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`, `--ft-eapol`: per-class sinks, each maps 1:1 to a single class
 
 ---
 
-## §2  The 11-Type Master List
+## §2  The 11-Class Master List
 
 Two encoding rules cover the entire table:
 
 ```
-EVEN type code  =  PMKID attack    (no full handshake needed)
-ODD  type code  =  EAPOL attack    (needs nonce + MIC frame)
+EVEN class code  =  PMKID attack    (no full handshake needed)
+ODD  class code  =  EAPOL attack    (needs nonce + MIC frame)
 
-Ascending code  =  ascending hash complexity
+Ascending code   =  ascending hash complexity
 ```
 
-Type 01 (WPA1-PSK-EAPOL) is the only odd code without a PMKID partner: WPA1 has no PMKID field in its vendor IE.
+Class 1 (WPA1-PSK-EAPOL) is the only odd code without a PMKID partner: WPA1 has no PMKID field in its vendor IE.
 
-| Type | Name                    | AKM selector           | KDV | Attack | MIC width | hashcat status |
-|------|-------------------------|------------------------|-----|--------|-----------|----------------|
-|  1   | WPA1-PSK-EAPOL          | WPA1 vendor IE         | 1   | EAPOL  | 16 B      | emitted, cracks (aux1) |
-|  2   | WPA2-PSK-PMKID          | 2 (`00:0F:AC:02`)      | --  | PMKID  | --        | emitted, cracks (aux4) |
-|  3   | WPA2-PSK-EAPOL          | 2                      | 2   | EAPOL  | 16 B      | emitted, cracks (aux2) |
-|  4   | PSK-SHA256-PMKID        | 6 (`00:0F:AC:06`)      | --  | PMKID  | --        | emitted, **does not crack** (§7) |
-|  5   | PSK-SHA256-EAPOL        | 6                      | 3   | EAPOL  | 16 B      | emitted, cracks (aux3) |
-|  6   | FT-PSK-PMKID            | 4 (`00:0F:AC:04`)      | --  | PMKID  | --        | emitted, cracks (aux5) |
-|  7   | FT-PSK-EAPOL            | 4                      | 3   | EAPOL  | 16 B      | emitted, cracks (aux6) |
-|  8   | PSK-SHA384-PMKID        | 20 (`00:0F:AC:14`)     | --  | PMKID  | --        | classified only, not emitted |
-|  9   | PSK-SHA384-EAPOL        | 20                     | 0   | EAPOL  | 24 B      | classified only, not emitted |
-| 10   | FT-PSK-SHA384-PMKID     | 19 (`00:0F:AC:13`)     | --  | PMKID  | --        | classified only, not emitted |
-| 11   | FT-PSK-SHA384-EAPOL     | 19                     | 0   | EAPOL  | 24 B      | classified only, not emitted |
+| Class | Name                    | AKM selector           | KDV | Attack | MIC width | hashcat status |
+|-------|-------------------------|------------------------|-----|--------|-----------|----------------|
+|  1    | WPA1-PSK-EAPOL          | WPA1 vendor IE         | 1   | EAPOL  | 16 B      | emitted, cracks (aux1) |
+|  2    | WPA2-PSK-PMKID          | 2 (`00:0F:AC:02`)      | --  | PMKID  | --        | emitted, cracks (aux4) |
+|  3    | WPA2-PSK-EAPOL          | 2                      | 2   | EAPOL  | 16 B      | emitted, cracks (aux2) |
+|  4    | PSK-SHA256-PMKID        | 6 (`00:0F:AC:06`)      | --  | PMKID  | --        | emitted, **does not crack** (§7) |
+|  5    | PSK-SHA256-EAPOL        | 6                      | 3   | EAPOL  | 16 B      | emitted, cracks (aux3) |
+|  6    | FT-PSK-PMKID            | 4 (`00:0F:AC:04`)      | --  | PMKID  | --        | emitted, cracks (aux5) |
+|  7    | FT-PSK-EAPOL            | 4                      | 3   | EAPOL  | 16 B      | emitted, cracks (aux6) |
+|  8    | PSK-SHA384-PMKID        | 20 (`00:0F:AC:14`)     | --  | PMKID  | --        | classified only, not emitted |
+|  9    | PSK-SHA384-EAPOL        | 20                     | 0   | EAPOL  | 24 B      | classified only, not emitted |
+| 10    | FT-PSK-SHA384-PMKID     | 19 (`00:0F:AC:13`)     | --  | PMKID  | --        | classified only, not emitted |
+| 11    | FT-PSK-SHA384-EAPOL     | 19                     | 0   | EAPOL  | 24 B      | classified only, not emitted |
 
 AKM values reference [IEEE 802.11-2024] Table 9-190 (OUI `00:0F:AC`). KDV values reference §12.7.2 Key Information bits 0-2; PMKID-only rows have no KDV (the field exists only in EAPOL-Key frames). KDV `0` for SHA-384 EAPOL is the spec's "reserved" value; the AKM negotiates SHA-384 out of band rather than via the keyver field, because the 16 B MIC slot the keyver field selects cannot accommodate a 24 B MIC.
 
@@ -53,49 +55,49 @@ Verified against upstream hashcat branch `master`, commit `b3ecf3293`.
 
 ### Line format
 
-The canonical format uses `*` as the delimiter and the prefix `WPA`. Two shapes exist:
+The canonical format uses `*` as the delimiter and the signature `WPA`. Two shapes exist:
 
-**Standard record (9 tokens, types 01/02):**
+**Standard record (9 tokens, prefixes `WPA*01*`/`WPA*02*`):**
 ```
 WPA*TT*<hash>*<mac_ap>*<mac_sta>*<essid>*<anonce>*<eapol>*<mp>
 ```
 
-**FT record (12 tokens, types 03/04):**
+**FT record (12 tokens, prefixes `WPA*03*`/`WPA*04*`):**
 ```
 WPA*TT*<hash>*<mac_ap>*<mac_sta>*<essid>*<anonce>*<eapol>*<mp>*<mdid>*<r0khid>*<r1khid>
 ```
 
-The parser counts `*` separators before tokenizing: 11 separators = 12 tokens (FT record), otherwise 9 tokens (standard). Types 03/04 **require** 12 tokens; types 01/02 **require** 9 tokens. A mismatch returns `PARSER_SALT_VALUE`.
+The parser counts `*` separators before tokenizing: 11 separators = 12 tokens (FT record), otherwise 9 tokens (standard). `WPA*03*`/`WPA*04*` **require** 12 tokens; `WPA*01*`/`WPA*02*` **require** 9 tokens. A mismatch returns `PARSER_SALT_VALUE`.
 
 ### Field width table
 
 | Token | Field         | Width constraint        | Notes |
 |-------|---------------|-------------------------|-------|
 | 0     | Signature     | fixed 3 chars           | `WPA` |
-| 1     | Type          | fixed 2 hex chars       | `01`, `02`, `03`, or `04` |
-| 2     | Hash          | fixed 32 hex chars      | PMKID (type 01/03) or MIC (type 02/04); always 16 bytes |
+| 1     | Prefix        | fixed 2 hex chars       | `01`, `02`, `03`, or `04` |
+| 2     | Hash          | fixed 32 hex chars      | PMKID (`WPA*01*`/`WPA*03*`) or MIC (`WPA*02*`/`WPA*04*`); always 16 bytes |
 | 3     | MAC AP        | fixed 12 hex chars      | 6 bytes, lowercase hex, no separators |
 | 4     | MAC STA       | fixed 12 hex chars      | 6 bytes |
 | 5     | ESSID         | 0-64 hex chars          | 0-32 bytes raw SSID; must be even length |
-| 6     | ANonce        | 0 or 64 hex chars       | 32 bytes for EAPOL types; empty for PMKID types |
-| 7     | EAPOL         | 0 to 1024 hex chars     | `WPA_EAPOL_LEN_MAX = 512` bytes; min `sizeof(auth_packet_t) * 2 = 198` for EAPOL types; empty for PMKID |
-| 8     | message_pair  | 0 or 2 hex chars        | Required (2 chars) for EAPOL types 02/04; empty for type 01 PMKID |
-| 9     | MDID          | fixed 4 hex chars       | FT only (types 03/04): Mobility Domain ID, 2 bytes |
+| 6     | ANonce        | 0 or 64 hex chars       | 32 bytes for EAPOL prefixes; empty for PMKID prefixes |
+| 7     | EAPOL         | 0 to 1024 hex chars     | `WPA_EAPOL_LEN_MAX = 512` bytes; min `sizeof(auth_packet_t) * 2 = 198` for EAPOL prefixes; empty for PMKID |
+| 8     | message_pair  | 0 or 2 hex chars        | Required (2 chars) for `WPA*02*`/`WPA*04*`; empty for `WPA*01*` PMKID |
+| 9     | MDID          | fixed 4 hex chars       | FT only (`WPA*03*`/`WPA*04*`): Mobility Domain ID, 2 bytes |
 | 10    | R0KH-ID       | 0-96 hex chars          | FT only: R0 Key Holder ID, 0-48 bytes |
 | 11    | R1KH-ID       | 0-96 hex chars          | FT only: R1 Key Holder ID, 0-48 bytes |
 
 ### Kernel dispatch
 
-All six auxiliary kernels share `m22000_init` and `m22000_loop`, which compute `PBKDF2-HMAC-SHA1(passphrase, ESSID, 4096)` to derive the 32-byte PMK. The auxiliary kernel then uses the PMK differently depending on type and keyver:
+All six auxiliary kernels share `m22000_init` and `m22000_loop`, which compute `PBKDF2-HMAC-SHA1(passphrase, ESSID, 4096)` to derive the 32-byte PMK. The auxiliary kernel then uses the PMK differently depending on the line prefix and keyver:
 
-| Kernel | hashcat Type | Dispatch condition | Algorithm |
+| Kernel | Line Prefix  | Dispatch condition | Algorithm |
 |--------|--------------|-------------------|-----------|
-| aux1   | 02           | keyver = 1        | PRF-SHA1 PTK, HMAC-MD5 MIC (WPA1/TKIP) |
-| aux2   | 02           | keyver = 2        | PRF-SHA1 PTK, HMAC-SHA1 MIC (WPA2/CCMP) |
-| aux3   | 02           | keyver = 3        | KDF-SHA256 PTK, AES-128-CMAC MIC (WPA2/802.11w) |
-| aux4   | 01           | always            | HMAC-SHA1 PMKID (`"PMK Name" \|\| AP \|\| STA`) |
-| aux5   | 03           | always            | SHA-256 KDF chain: PMK -> PMK-R0 -> PMK-R0-Name -> PMK-R1-Name |
-| aux6   | 04           | keyver = 3 (enforced) | Full FT chain: PMK -> PMK-R0 -> PMK-R1 -> PTK, AES-128-CMAC MIC |
+| aux1   | `WPA*02*`    | keyver = 1        | PRF-SHA1 PTK, HMAC-MD5 MIC (WPA1/TKIP) |
+| aux2   | `WPA*02*`    | keyver = 2        | PRF-SHA1 PTK, HMAC-SHA1 MIC (WPA2/CCMP) |
+| aux3   | `WPA*02*`    | keyver = 3        | KDF-SHA256 PTK, AES-128-CMAC MIC (WPA2/802.11w) |
+| aux4   | `WPA*01*`    | always            | HMAC-SHA1 PMKID (`"PMK Name" \|\| AP \|\| STA`) |
+| aux5   | `WPA*03*`    | always            | SHA-256 KDF chain: PMK -> PMK-R0 -> PMK-R0-Name -> PMK-R1-Name |
+| aux6   | `WPA*04*`    | keyver = 3 (enforced) | Full FT chain: PMK -> PMK-R0 -> PMK-R1 -> PTK, AES-128-CMAC MIC |
 
 The `keyver` value is extracted from bits 0-2 of the Key Information field at offset 5 of the EAPOL frame header: `wpa->keyver = byte_swap_16(auth_packet->key_information) & 3`.
 
@@ -113,7 +115,7 @@ Any other `keyver` value returns `PARSER_SALT_VALUE`.
 
 ### Legacy format compatibility
 
-Mode 22000 auto-detects and internally converts two legacy formats:
+Mode 22000 auto-detects and internally converts two older formats:
 - **hccapx binary** (393 bytes, signature `0x58504348`, version 4): converted to `WPA*02*...`
 - **Old PMKID format** (`hash*macap*macsta*essid` or colon-separated): converted to `WPA*01*...***`
 
@@ -135,36 +137,36 @@ Mode 22000 auto-detects and internally converts two legacy formats:
 
 ---
 
-## §4  wpawolf Type -> hashcat Type Mapping
+## §4  Class-to-Prefix Mapping
 
-The definitive routing table. Every emitted hash uses mode 22000 format.
+Every emitted hash uses mode 22000 format. Class numbers (1-11) are wpawolf's internal classification; line prefixes (`WPA*01*`-`WPA*04*`) are what appears in the hash line that hashcat parses.
 
-| wpawolf Type | Name                    | hashcat Type | Kernel | Cracks? | wpawolf Sink      | Notes |
-|---|---|---|---|---|---|---|
-| 1  | WPA1-PSK-EAPOL          | 02 | aux1 (HMAC-MD5)    | YES     | `--wpa1-eapol`    | keyver=1 dispatches to MD5 kernel |
-| 2  | WPA2-PSK-PMKID          | 01 | aux4 (HMAC-SHA1)   | YES     | `--wpa2-pmkid`    | |
-| 3  | WPA2-PSK-EAPOL          | 02 | aux2 (HMAC-SHA1)   | YES     | `--wpa2-eapol`    | keyver=2 |
-| 4  | PSK-SHA256-PMKID        | 01 | aux4 (HMAC-SHA1)   | **NO**  | `--sha256-pmkid`  | hashcat bug: aux4 runs HMAC-SHA1, needs HMAC-SHA256 |
-| 5  | PSK-SHA256-EAPOL        | 02 | aux3 (AES-CMAC)    | YES     | `--sha256-eapol`  | keyver=3 |
-| 6  | FT-PSK-PMKID            | 03 | aux5 (SHA-256 KDF)  | YES     | `--ft-pmkid`      | 12-token format with FT extras |
-| 7  | FT-PSK-EAPOL            | 04 | aux6 (AES-CMAC/FT) | YES     | `--ft-eapol`      | 12-token, keyver=3 enforced |
-| 8  | PSK-SHA384-PMKID        | -- | --                 | NO      | (none)            | 24B MIC, no kernel |
-| 9  | PSK-SHA384-EAPOL        | -- | --                 | NO      | (none)            | 24B MIC, no kernel |
-| 10 | FT-PSK-SHA384-PMKID     | -- | --                 | NO      | (none)            | 24B MIC, no kernel |
-| 11 | FT-PSK-SHA384-EAPOL     | -- | --                 | NO      | (none)            | 24B MIC, no kernel |
+| Class | Name                    | Line Prefix | Kernel | Cracks? | wpawolf Sink      | Notes |
+|-------|-------------------------|-------------|--------|---------|-------------------|-------|
+| 1     | WPA1-PSK-EAPOL          | `WPA*02*`   | aux1 (HMAC-MD5)     | YES     | `--wpa1-eapol`    | keyver=1 dispatches to MD5 kernel |
+| 2     | WPA2-PSK-PMKID          | `WPA*01*`   | aux4 (HMAC-SHA1)    | YES     | `--wpa2-pmkid`    | |
+| 3     | WPA2-PSK-EAPOL          | `WPA*02*`   | aux2 (HMAC-SHA1)    | YES     | `--wpa2-eapol`    | keyver=2 |
+| 4     | PSK-SHA256-PMKID        | `WPA*01*`   | aux4 (HMAC-SHA1)    | **NO**  | `--sha256-pmkid`  | hashcat bug: aux4 runs HMAC-SHA1, needs HMAC-SHA256 |
+| 5     | PSK-SHA256-EAPOL        | `WPA*02*`   | aux3 (AES-CMAC)     | YES     | `--sha256-eapol`  | keyver=3 |
+| 6     | FT-PSK-PMKID            | `WPA*03*`   | aux5 (SHA-256 KDF)  | YES     | `--ft-pmkid`      | 12-token format with FT extras |
+| 7     | FT-PSK-EAPOL            | `WPA*04*`   | aux6 (AES-CMAC/FT)  | YES     | `--ft-eapol`      | 12-token, keyver=3 enforced |
+| 8     | PSK-SHA384-PMKID        | --          | --                  | NO      | (none)            | 24B MIC, no kernel |
+| 9     | PSK-SHA384-EAPOL        | --          | --                  | NO      | (none)            | 24B MIC, no kernel |
+| 10    | FT-PSK-SHA384-PMKID     | --          | --                  | NO      | (none)            | 24B MIC, no kernel |
+| 11    | FT-PSK-SHA384-EAPOL     | --          | --                  | NO      | (none)            | 24B MIC, no kernel |
 
 ---
 
-## §5  Per-Type Cracker Math
+## §5  Per-Class Cracker Math
 
-Every type starts from the same step. PBKDF2 is the only deliberately expensive operation; the post-PMK work is microseconds per candidate.
+Every class starts from the same step. PBKDF2 is the only deliberately expensive operation; the post-PMK work is microseconds per candidate.
 
 ```
-Step 0 (shared by all 11 types):
+Step 0 (shared by all 11 classes):
     PMK = PBKDF2-HMAC-SHA1(passphrase, SSID, 4096 rounds, 32 B)
 ```
 
-### Type 1: WPA1-PSK-EAPOL
+### Class 1: WPA1-PSK-EAPOL
 
 ```
 PMK ---[PRF-SHA1, 512 b]---> PTK
@@ -173,41 +175,41 @@ MIC = HMAC-MD5(KCK, EAPOL_zeroed)[0:16]
 ```
 KDV = 1. No PMKID partner.
 
-### Types 2 + 3: WPA2-PSK
+### Classes 2 + 3: WPA2-PSK
 
 ```
-PMKID (type 2):
+WPA2-PSK-PMKID (class 2):
     PMKID = HMAC-SHA1(PMK, "PMK Name" || AP || STA)[0:16]
 
-EAPOL (type 3):
+WPA2-PSK-EAPOL (class 3):
     PMK ---[PRF-SHA1, 384 b]---> PTK
     KCK = PTK[0:16]
     MIC = HMAC-SHA1(KCK, EAPOL_zeroed)[0:16]
 ```
 KDV = 2.
 
-### Types 4 + 5: PSK-SHA256
+### Classes 4 + 5: PSK-SHA256
 
 ```
-PMKID (type 4):
+PSK-SHA256-PMKID (class 4):
     PMKID = HMAC-SHA256(PMK, "PMK Name" || AP || STA)[0:16]
 
-EAPOL (type 5):
+PSK-SHA256-EAPOL (class 5):
     PMK ---[KDF-SHA256, 384 b]---> PTK
     KCK = PTK[0:16]
     MIC = AES-128-CMAC(KCK, EAPOL_zeroed)   [16 B]
 ```
 KDV = 3.
 
-### Types 6 + 7: FT-PSK (802.11r SHA-256)
+### Classes 6 + 7: FT-PSK (802.11r SHA-256)
 
 ```
 PMK ---[FT-KDF-SHA256]---> PMK-R0 ---[FT-KDF-SHA256]---> PMK-R1
 
-PMKID (type 6):
+FT-PSK-PMKID (class 6):
     PMKID = PMK-R1-Name = SHA256("FT-R1N" || PMK-R0-Name || R1KH-ID || STA)[0:16]
 
-EAPOL (type 7):
+FT-PSK-EAPOL (class 7):
     same chain ---> PTK
     KCK = PTK[0:16]
     MIC = AES-128-CMAC(KCK, EAPOL_zeroed)   [16 B]
@@ -215,29 +217,29 @@ EAPOL (type 7):
 
 Both rows require MDID (2 B), R0KH-ID (1-48 B), R1KH-ID (6 B) from the hash line to drive the FT chain. KDV = 3 (EAPOL).
 
-### Types 8 + 9: PSK-SHA384
+### Classes 8 + 9: PSK-SHA384
 
 ```
-PMKID (type 8):
+PSK-SHA384-PMKID (class 8):
     PMKID = HMAC-SHA384(PMK, "PMK Name" || AP || STA)[0:16]
     (still 16 B output, Truncate-128)
 
-EAPOL (type 9):
+PSK-SHA384-EAPOL (class 9):
     PMK ---[KDF-SHA384, 576 b]---> PTK
     KCK = PTK[0:24]                        <-- 24 bytes (192 bits)
     MIC = HMAC-SHA384(KCK, EAPOL_zeroed)[0:24]   <-- 24 bytes
 ```
 KDV = 0.
 
-### Types 10 + 11: FT-PSK-SHA384
+### Classes 10 + 11: FT-PSK-SHA384
 
 ```
 PMK ---[FT-KDF-SHA384]---> PMK-R0 ---[FT-KDF-SHA384]---> PMK-R1
 
-PMKID (type 10):
+FT-PSK-SHA384-PMKID (class 10):
     PMKID = SHA384("FT-R1N" || PMK-R0-Name || R1KH-ID || STA)[0:16]
 
-EAPOL (type 11):
+FT-PSK-SHA384-EAPOL (class 11):
     same chain ---> PTK
     KCK = PTK[0:24]
     MIC = HMAC-SHA384(KCK, EAPOL_zeroed)[0:24]
@@ -245,59 +247,41 @@ EAPOL (type 11):
 
 Both rows require MDID + R0KH-ID + R1KH-ID. KDV = 0 (EAPOL).
 
-### The differential view: one swap per step
-
-Reading the table top-to-bottom, each row changes exactly one or two things from the row above.
-
-```
-01 -> 03   Same PRF-SHA1 PTK; swap MIC: MD5 -> SHA1.
-03 -> 05   Swap PTK KDF: PRF-SHA1 -> KDF-SHA256; swap MIC: HMAC-SHA1 -> AES-CMAC.
-05 -> 07   Insert FT chain (PMK -> PMK-R0 -> PMK-R1) before PTK; MIC unchanged.
-02 -> 04   Same PMKID formula structure; swap hash: SHA1 -> SHA256.
-04 -> 06   Insert FT chain to derive PMKR1-Name instead of flat PMKID.
-05 -> 09   Swap PTK KDF: KDF-SHA256 -> KDF-SHA384.
-           KCK grows: 16 B -> 24 B.
-           Swap MIC: AES-CMAC-128 -> HMAC-SHA384, size 16 B -> 24 B.
-07 -> 11   Same FT chain structure and same extra fields.
-           Swap KDF: SHA-256 -> SHA-384 throughout the chain.
-           KCK grows: 16 B -> 24 B; MIC grows: 16 B -> 24 B.
-```
-
 ### Shared subtrees a cracker can cache
 
 ```
 passphrase + SSID
        |
        v
- PBKDF2-SHA1 ---------------------------------------- shared by all 11 types
+ PBKDF2-SHA1 ---------------------------------------- shared by all 11 classes
        |
-       +-- [HMAC-SHA1]   -----> PMKID         -> type 02
+       +-- [HMAC-SHA1]   -----> PMKID              -> class 2  (WPA*01*)
        |
-       +-- [PRF-SHA1]  -> KCK16 -> [MD5 MIC]    -> type 01
-       |               +--------->  [SHA1 MIC]   -> type 03
+       +-- [PRF-SHA1]  -> KCK16 -> [MD5 MIC]       -> class 1  (WPA*02*)
+       |               +--------->  [SHA1 MIC]      -> class 3  (WPA*02*)
        |
-       +-- [HMAC-SHA256] -----> PMKID         -> type 04
+       +-- [HMAC-SHA256] -----> PMKID              -> class 4  (WPA*01*)
        |
-       +-- [KDF-SHA256]  -> KCK16 -> [CMAC MIC]  -> type 05
+       +-- [KDF-SHA256]  -> KCK16 -> [CMAC MIC]    -> class 5  (WPA*02*)
        |
-       +-- [FT-KDF-SHA256] -> PMKR1-Name      -> type 06
-       |                  +-> KCK16 -> [CMAC MIC] -> type 07
+       +-- [FT-KDF-SHA256] -> PMKR1-Name           -> class 6  (WPA*03*)
+       |                  +-> KCK16 -> [CMAC MIC]  -> class 7  (WPA*04*)
        |
-       +-- [HMAC-SHA384] -----> PMKID         -> type 08
+       +-- [HMAC-SHA384] -----> PMKID              -> class 8  (not emitted)
        |
-       +-- [KDF-SHA384]  -> KCK24 -> [SHA384 MIC] -> type 09
+       +-- [KDF-SHA384]  -> KCK24 -> [SHA384 MIC]  -> class 9  (not emitted)
        |
-       +-- [FT-KDF-SHA384] -> PMKR1-Name      -> type 10
-       |                   +-> KCK24 -> [SHA384 MIC] -> type 11
+       +-- [FT-KDF-SHA384] -> PMKR1-Name           -> class 10 (not emitted)
+       |                   +-> KCK24 -> [SHA384 MIC]-> class 11 (not emitted)
 ```
 
 ---
 
 ## §6  Message-Pair Byte
 
-The trailing 1-byte `<mp>` field encodes metadata about how the hash line was constructed. The format is identical across all line types and between wpawolf and hcxpcapngtool. Constants reference `hcxtools/include/hcxpcapngtool.h`.
+The trailing 1-byte `<mp>` field encodes metadata about how the hash line was constructed. The format is identical across all line prefixes and between wpawolf and hcxpcapngtool. Constants reference `hcxtools/include/hcxpcapngtool.h`.
 
-### EAPOL lines (types 02, 04)
+### EAPOL lines (`WPA*02*`, `WPA*04*`)
 
 ```
    bit 7: NC      0x80   nonce-error-correction tolerance was needed
@@ -338,13 +322,13 @@ Hashcat reads the byte and: masks bits 0-3 to identify the combo; inspects bit 4
 
 Within a single handshake session the 6 combos produce at most 3 cryptographically unique hashes, grouped by the EAPOL frame whose MIC was computed:
 
-| Class   | Members      | Unique because of   |
-|---------|--------------|---------------------|
-| Hash-A  | N1E2, N3E2   | M2's EAPOL frame    |
-| Hash-B  | N2E3, N4E3   | M3's EAPOL frame    |
-| Hash-C  | N1E4, N3E4   | M4's EAPOL frame    |
+| Hash group | Members      | Unique because of   |
+|------------|--------------|---------------------|
+| Hash-A     | N1E2, N3E2   | M2's EAPOL frame    |
+| Hash-B     | N2E3, N4E3   | M3's EAPOL frame    |
+| Hash-C     | N1E4, N3E4   | M4's EAPOL frame    |
 
-### PMKID lines (types 01, 03)
+### PMKID lines (`WPA*01*`, `WPA*03*`)
 
 PMKID lines repurpose the `<mp>` slot as a status byte recording which side of the wire the PMKID was observed on:
 
@@ -353,8 +337,8 @@ PMKID lines repurpose the `<mp>` slot as a status byte recording which side of t
 | `0x01` | `PMKID_AP`            | AP-to-STA path (M1 KDE, Beacon, Probe Response) |
 | `0x03` | `PMKID_AP \| PMKID_APPSK256` | AP-side with PSK-SHA256 AKM hint |
 | `0x04` | `PMKID_CLIENT`        | STA-to-AP path (M2 RSN IE, Association Request) |
-| `0x10` | `PMKID_AP_FTPSK`      | FT-PSK AP-side (type 03 lines) |
-| `0x20` | `PMKID_CLIENT_FTPSK`  | FT-PSK client-side (type 03 lines) |
+| `0x10` | `PMKID_AP_FTPSK`      | FT-PSK AP-side (`WPA*03*` lines) |
+| `0x20` | `PMKID_CLIENT_FTPSK`  | FT-PSK client-side (`WPA*03*` lines) |
 
 Hashcat's PMKID parser does not use this byte for kernel dispatch; it is diagnostic metadata preserved for round-trip compatibility with hcxpcapngtool.
 
@@ -362,21 +346,21 @@ Hashcat's PMKID parser does not use this byte for kernel dispatch; it is diagnos
 
 ## §7  Known Limitations
 
-### PSK-SHA256 PMKID (wpawolf type 4)
+### PSK-SHA256-PMKID (class 4)
 
-The mode 22000 PMKID kernel (`m22000_aux4`) computes `HMAC-SHA1(PMK, "PMK Name" || AP || STA)` unconditionally. There is no AKM-dependent branch. This is correct for AKM 2 (WPA2-PSK) but **wrong** for AKM 6 (PSK-SHA256), which derives the PMKID with `HMAC-SHA256`. A candidate that should match produces a SHA-1 value that never matches the SHA-256 wire value; hashcat reports "Exhausted" with no error.
+The mode 22000 PMKID kernel (`m22000_aux4`) computes `HMAC-SHA1(PMK, "PMK Name" || AP || STA)` unconditionally. There is no AKM-dependent branch. This is correct for WPA2-PSK-PMKID (class 2) but **wrong** for PSK-SHA256-PMKID (class 4), which derives the PMKID with `HMAC-SHA256`. A candidate that should match produces a SHA-1 value that never matches the SHA-256 wire value; hashcat reports "Exhausted" with no error.
 
-wpawolf emits type 4 PMKIDs as `WPA*01*` lines because the format is valid and will "just work" if hashcat adds a SHA-256 PMKID branch. The workaround today is to attack the corresponding EAPOL line (type 5, `WPA*02*` keyver=3), which the AES-CMAC kernel handles correctly.
+wpawolf emits PSK-SHA256-PMKID (class 4) as `WPA*01*` lines because the format is valid and will work if hashcat adds a SHA-256 PMKID branch. The workaround today is to attack the corresponding EAPOL (PSK-SHA256-EAPOL, class 5, `WPA*02*` keyver=3), which the AES-CMAC kernel handles correctly.
 
-### SHA-384 family (wpawolf types 8-11)
+### SHA-384 family (classes 8-11)
 
-SHA-384 EAPOL types produce a 24 B (192-bit) MIC (`HMAC-SHA384-192`). Mode 22000's hash field is fixed at 32 hex chars (16 bytes); there is no way to express the wider MIC. Additionally, `keyver=0` (the spec's "reserved" value for SHA-384 EAPOL) is rejected by the loader: `if ((keyver != 1) && (keyver != 2) && (keyver != 3)) return PARSER_SALT_VALUE`.
+SHA-384 EAPOL classes produce a 24 B (192-bit) MIC (`HMAC-SHA384-192`). Mode 22000's hash field is fixed at 32 hex chars (16 bytes); there is no way to express the wider MIC. Additionally, `keyver=0` (the spec's "reserved" value for SHA-384 EAPOL) is rejected by the loader: `if ((keyver != 1) && (keyver != 2) && (keyver != 3)) return PARSER_SALT_VALUE`.
 
-SHA-384 PMKID types derive the PMKID with `HMAC-SHA384`, which aux4 does not implement.
+SHA-384 PMKID classes derive the PMKID with `HMAC-SHA384`, which aux4 does not implement.
 
-wpawolf classifies and counts all four SHA-384 types (8-11) in the stats banner but does not write them to any output sink.
+wpawolf classifies and counts all four SHA-384 classes (8-11) in the stats banner but does not write them to any output sink.
 
-### FT EAPOL APLESS (wpawolf type 7, combos N2E3 / N4E3)
+### FT-PSK-EAPOL APLESS (class 7, combos N2E3 / N4E3)
 
 The mode 22000 FT EAPOL kernel (`m22000_aux6`) builds the PTK derivation buffer with a hardcoded nonce layout:
 
@@ -393,9 +377,7 @@ wpawolf emits these lines per the hcxtools convention (APLESS bit set on the mes
 
 ## §8  References
 
-- hashcat source: `src/modules/module_22000.c` (1706 lines), `OpenCL/m22000-pure.cl` (1693 lines)
-- hashcat commit `6847f7793`: FT support merged into mode 22000
-- hashcat commit `5643e0f4b`: `WPA_EAPOL_LEN_MAX` raised to 512, 6th aux kernel slot added
+- hashcat source: `src/modules/module_22000.c`, `OpenCL/m22000-pure.cl`
 - [IEEE 802.11-2024]:
   - §9.4.2.24: RSN Information Element (AKM suite enumeration, Table 9-190)
   - §12.6.1.3: PMKID derivation
