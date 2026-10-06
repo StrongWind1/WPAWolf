@@ -1,6 +1,6 @@
 # Hashcat Mode 22000: WPA-PSK Hash Format Reference
 
-A single reference covering how hashcat mode 22000 reads, parses, and cracks every WPA-PSK hash type that wpawolf classifies. This document consolidates and supersedes the former `HASHCAT-CURRENT-FORMATS.md`, `HASHCAT-NEW-FORMATS.md`, and `HASHCAT-PROPOSED-CHANGES.md`.
+> Consolidates the former `HASHCAT-CURRENT-FORMATS.md`, `HASHCAT-NEW-FORMATS.md`, and `HASHCAT-PROPOSED-CHANGES.md`.
 
 ---
 
@@ -8,10 +8,10 @@ A single reference covering how hashcat mode 22000 reads, parses, and cracks eve
 
 wpawolf classifies every PSK-crackable WPA hash into one of eleven types (§2). Types 1-7 are emitted to hashcat mode 22000, the sole output target. Types 8-11 (SHA-384 family) are classified and counted in the stats banner but not emitted -- the 24 B MIC exceeds mode 22000's fixed 16 B MIC field, and no hashcat kernel exists for them.
 
-Upstream hashcat merged FT (802.11r Fast BSS Transition) support directly into mode 22000 via commit `6847f7793` ("Crack 802.11r Fast BSS Transition handshakes in mode 22000"). Mode 22000 now accepts four type prefixes: `01` (PMKID), `02` (EAPOL), `03` (FT PMKID), `04` (FT EAPOL). **Mode 37100 does not exist** in upstream hashcat -- FT hashes are mode 22000 lines with type `03` or `04` and three additional FT fields appended.
+Mode 22000 accepts four type prefixes: `01` (PMKID), `02` (EAPOL), `03` (FT PMKID), `04` (FT EAPOL). Standard records use a 9-token format; FT records (types 03/04) use a 12-token format with three additional fields (MDID, R0KH-ID, R1KH-ID).
 
-wpawolf's output flags:
-- `-o` / `--out`: combined output, all crackable types 1-7 in mode 22000 format
+wpawolf output flags:
+- `-o` / `--out`: combined output, all crackable types 1-7
 - `--wpa1-eapol`, `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`, `--ft-eapol`: per-type sinks, each maps 1:1 to a single wpawolf type
 
 ---
