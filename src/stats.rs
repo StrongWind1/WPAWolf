@@ -458,6 +458,20 @@ pub struct Stats {
     /// EAPOL pairs that passed the dedup filter and were written (useful pairs).
     pub eapol_pairs_useful: u64,
 
+    /// EAPOL hash lines emitted where the frame exceeds hashcat's
+    /// `WPA_EAPOL_LEN_MAX` (512 bytes). Informational -- the line is still written.
+    pub eapol_exceeds_hashcat_max: u64,
+    /// Distinct (AP, STA) groups in the `MessageStore`.
+    pub distinct_groups: u64,
+    /// Largest number of pairs emitted from a single (AP, STA) group.
+    pub max_pairs_per_group: u64,
+    /// Groups that produced at least one crackable EAPOL pair.
+    pub groups_with_pairs: u64,
+    /// Groups that produced zero crackable EAPOL pairs.
+    pub groups_without_pairs: u64,
+    /// Groups where all four EAPOL message types (M1+M2+M3+M4) were present.
+    pub groups_complete_4way: u64,
+
     // --- hcxpcapngtool parity stats ---
 
     // File metadata is now aggregated across the whole input set via
@@ -1387,6 +1401,10 @@ impl Stats {
         // EAPOL message counts and validity rejects.
         let eapol_total = self.eapol_m1 + self.eapol_m2 + self.eapol_m3 + self.eapol_m4;
         stat!("EAPOL messages (total)", eapol_total);
+        stat!("  distinct (AP, STA) groups", self.distinct_groups);
+        nz!("  groups with complete 4-way handshake", self.groups_complete_4way);
+        nz!("  groups producing hashes", self.groups_with_pairs);
+        nz!("  groups producing zero hashes", self.groups_without_pairs);
         if self.m1_auth_len_max > 0 {
             stat!(
                 "  M1 auth len max (body / frame)",
@@ -1415,6 +1433,7 @@ impl Stats {
             );
         }
         stat!("  M4 messages", self.eapol_m4);
+        nz!("  EAPOL frame > 512 B (exceeds hashcat limit; emitted)", self.eapol_exceeds_hashcat_max);
         // Garbage-pattern rejections. The M4-vs-rest split prints only its
         // non-zero sides: the M4 row is the spec-zero expected case (matches
         // hcxpcapngtool's eapolm4zeroedcount), the M1/M2/M3 row is the abnormal
@@ -1560,6 +1579,7 @@ impl Stats {
                 stat!("  RC gap max (suggested NC threshold)", "see --log for outlier source");
             }
         }
+        nz!("max pairs from one (AP, STA) group", self.max_pairs_per_group);
 
         // PMKID emission (post-dedup logical count). The extraction-time totals
         // and the per-AKM-family split live in Phase 3 under "PMKID store
@@ -1575,7 +1595,7 @@ impl Stats {
         nz!("  EAPOL pair duplicates", self.dedup_dropped_pairs);
         nz!("  PMKID duplicates", self.dedup_dropped_pmkids);
         // Emit-time drops of crack material we extracted but could not format.
-        nz!("hashes dropped (unclassified AKM; no 11-type)", self.emit_dropped_unclassified_akm);
+        nz!("hashes dropped (unclassified AKM; no matching class)", self.emit_dropped_unclassified_akm);
         nz!("hashes dropped (non-PSK AKM; out of scope)", self.emit_dropped_notpsk_akm);
         nz!("hashes dropped (FT context missing; no R0KH-ID)", self.emit_dropped_ft_no_context);
 
@@ -1659,6 +1679,19 @@ impl Stats {
         nz!("  PMKID hash lines", pmkid_lines);
         stat!("distinct hash types observed", found_types);
         nz!("hash types found but not written (add -o to capture)", found_not_written);
+        if self.eapol_pairs_generated > 0 && self.eapol_pairs_generated > self.eapol_pairs_useful {
+            let pct_tenths = (self.eapol_pairs_generated - self.eapol_pairs_useful).saturating_mul(1_000)
+                / self.eapol_pairs_generated.max(1);
+            stat!(
+                "dedup compression (% of generated pairs removed)",
+                format!("{}.{}", pct_tenths / 10, pct_tenths % 10)
+            );
+        }
+        if self.essid_count > 0 {
+            let resolved_tenths =
+                (self.essid_count - self.essid_unresolved_aps).saturating_mul(1_000) / self.essid_count.max(1);
+            stat!("ESSID resolution rate (%)", format!("{}.{}", resolved_tenths / 10, resolved_tenths % 10));
+        }
 
         // Run cost. Wallclock is split at the Phase 3 / Phase 4 boundary (the
         // streaming pass vs the pairing + emit pass); throughput is file bytes
