@@ -10,7 +10,7 @@
 
 <!-- How did you verify the changes? -->
 
-- [ ] `make check` passes (lint + typecheck + tests)
+- [ ] `make check-all` passes (fmt + lint + audit + typecheck + tests + doc + hygiene)
 - [ ] New/changed behavior is covered by tests
 - [ ] Documentation updated (if applicable)
 

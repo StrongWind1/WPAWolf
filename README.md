@@ -148,7 +148,7 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 | `--ft-pmkid FILE` | type 6 (`WPA*03*`) | yes - mode 22000 |
 | `--ft-eapol FILE` | type 7 (`WPA*04*`) | yes - mode 22000 |
 
-All hash sinks emit hashcat mode 22000 format. SHA-384 types (8-11) are classified and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field. See [`HASHCAT.md`](HASHCAT.md) for the type mapping, per-type cracker math, and known limitations.
+All hash sinks emit hashcat mode 22000 format. SHA-384 types (8-11) are classified and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field. See [`HASHCAT.md`](HASHCAT.md) for the class mapping, per-class cracker math, and known limitations.
 
 ### Auxiliary outputs
 
@@ -229,7 +229,7 @@ Conventional commit messages (`feat:`, `fix:`, `docs:`); run `make check` before
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, FR-* contracts |
 | [STATS.md](STATS.md) | the stats-banner contract: every line's field, spec source, reason, and drop behaviour |
 | [CHANGELOG.md](CHANGELOG.md) | per-release summary of what shipped |
-| [HASHCAT.md](HASHCAT.md) | mode 22000 format reference, 11-type mapping, per-type cracker math, known limitations |
+| [HASHCAT.md](HASHCAT.md) | mode 22000 format reference, 11-class mapping, per-class cracker math, known limitations |
 
 ---
 

@@ -200,7 +200,7 @@ Every spec-defined path that can carry an EAPOL-Key M1 / M2 / M3 / M4 frame, plu
 |---|---|---|---|---|
 | 1 | LLC/SNAP `EtherType` `0x888E` Data frame | §9.3, §12.7 | done: `extract::data` | Standard BSS uplink/downlink; ~95 % of all real EAPOL traffic. |
 | 2 | A-MSDU subframe carrying EAPOL | §9.7.2 | done: `ieee80211::amsdu` | Iterates every subframe; outer (AP, STA) is authoritative. |
-| 3 | MSDU fragmentation (multi-fragment EAPOL) | §9.2.4.4 | done: `store::fragments` | Reassembly key `(SA, RA, SeqNum)`; bounded `MAX_ENTRIES = 1024` with oldest-first eviction. WDS fragmentation is out of scope for v1 (single-MPDU WDS works). |
+| 3 | MSDU fragmentation (multi-fragment EAPOL) | §9.2.4.4 | done: `store::fragments` | Reassembly key `(SA, RA, SeqNum)`; bounded `MAX_ENTRIES = 1_000_000` with oldest-first eviction. WDS fragmentation is out of scope for v1 (single-MPDU WDS works). |
 | 4 | 4-address WDS / relay frame | §9.3.2.1.2 | done: `extract::wds` Phase 1.5 | Three-tier ladder (essid_map / ACK discovery / flag fallback); see §5.12. |
 | 5 | Mesh Data frame with Mesh Control header | §9.2.4.8.3 | done: `extract::data::process_msdu_payload` | 6 / 12 / 18-byte header decoded from QoS Control bit B0; reserved Address-Extension Mode `11` skipped silently. Counter `mesh_control_frames`. |
 | 6 | A-MPDU PHY-layer aggregation (raw delimiter stream) | §9.7.1, §10.12 | depends on PCAP source | Modern pcap drivers (mac80211, iwlwifi) split A-MPDU into individual MPDUs before delivery. radiotap A-MPDU Status field (it_present bit 20) is decoded for visibility (`stats.ampdu_status_frames`); raw-delimiter walking is not implemented because no in-the-wild capture has demonstrated raw aggregation. |
@@ -895,7 +895,7 @@ The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MA
 
 ### Hashcat compatibility matrix
 
-| Type | Hash family            | Legacy sink         | Per-AKM sink           | hashcat support today |
+| Type | Hash family            | Output prefix       | Per-AKM sink           | hashcat support today |
 | ---- | ---------------------- | ------------------- | ----------------------- | --------------------- |
 | 1    | WPA1-PSK EAPOL         | `WPA*02*` | `-o`, `--wpa1-eapol` | mode 22000 aux1, KDV=1 (HMAC-MD5 MIC) |
 | 2    | WPA2-PSK PMKID         | `WPA*01*` | `-o`, `--wpa2-pmkid` | mode 22000 aux4 (HMAC-SHA1 PMKID) |
@@ -909,7 +909,7 @@ The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MA
 | 10   | FT-PSK-SHA-384 PMKID   | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
 | 11   | FT-PSK-SHA-384 EAPOL   | — | *(not emitted)* | no kernel; 24 B MIC + SHA-384 FT chain |
 
-The combined `-o` sink receives every emitted hash regardless of the above; types 8-11 are visible there for downstream tooling that can read the 11-prefix per-AKM format directly. Update both `legacy_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
+The combined `-o` sink receives every emitted hash (types 1-7). Update both `per_type_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
 
 ---
 
@@ -1148,7 +1148,7 @@ Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay
 No memory ceiling. Memory scales with EAPOL message count, not file size. Typical 100 GB capture with <1M EAPOL messages: <250 MiB. The disk-backed fallback (invariant 2) is the backstop for degenerate inputs, not the OS OOM killer.
 
 #### FR-MSG-4
-The statistics summary is printed to stdout unconditionally after every run. stderr produces no output. wpawolf does not report process memory usage; `/proc/self/status` VmRSS is misleading. Operators run `/usr/bin/time -v wpawolf ...` for an authoritative number.
+The statistics summary is printed to stdout unconditionally after every run. stderr produces no output. wpawolf reports `peak RSS (MiB)` in the closing banner via the `sysinfo` crate and optionally prints a per-store byte-count table with `--mem-stats`. Progress lines also report current RSS. For OS-level detail, operators run `/usr/bin/time -v` or `perf stat`.
 
 ### §8.6  Pairing: FR-PAIR-*
 
@@ -1383,7 +1383,7 @@ I/O buffer: one read buffer (default 64 KiB). No full-file buffering. Streaming 
 Estimated memory for typical captures; see §4 memory budget table.
 
 #### FR-MEM-4
-wpawolf does not introspect its own memory footprint; process memory is measured externally via `/usr/bin/time -v` or `perf stat`.
+wpawolf reports peak RSS (MiB) in the closing banner via `sysinfo` and optionally prints a per-store byte-count table with `--mem-stats`. For OS-level detail, operators run `/usr/bin/time -v` or `perf stat`.
 
 #### FR-DEP-1
 Direct dependency count: 5 crates (`flate2` + `crc32fast` + `clap` + `rayon` + `sysinfo`). `flate2` pulls `miniz_oxide` and already pulled `crc32fast` transitively (promoting it to direct adds zero new supply-chain surface); `clap` pulls its derive/builder proc-macro ecosystem; `rayon` pulls `crossbeam-deque`/`crossbeam-epoch`; `sysinfo` is self-contained on Linux (adds `core-foundation-sys` on macOS).

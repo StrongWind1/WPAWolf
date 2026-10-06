@@ -291,7 +291,10 @@ Auxiliary outputs and runtime knobs.
 | `--dedup-hash-combos` | output filter: collapse 6 N#E# combos to 3 unique per session |
 | `--nc-dedup`          | output filter: collapse near-identical-nonce siblings into one FLAG_NC survivor |
 | `--nc-tolerance N`    | NC-dedup cluster span tolerance (default 8, matches hashcat `NONCE_ERROR_CORRECTIONS`) |
-| `--strict`            | shortcut: `--eapoltimeout=5 --rc-drift=8 --dedup-hash-combos --nc-dedup` |
+| `--max-eapol-per-type N` | output filter: per-type pairing cap per (AP, STA) (default 0 = off/unlimited) |
+| `--collapse-message-pair` | output filter: exclude `message_pair` byte from dedup identity |
+| `--smart`             | output filter: handshake-instance attribution (implies `--dedup-hash-combos --nc-dedup`) |
+| `--strict`            | shortcut: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` |
 | `--threads N`         | pairing thread count (default = CPU count) |
 | `--debug`             | timestamped Phase 1-4 diagnostic output to stdout |
 | `--quiet`             | suppress progress lines; closing banner still prints |
@@ -333,7 +336,7 @@ The parity test parses the oracle banner, refuses stale versions, and hard-fails
 
 ## Quality bar
 
-- 980 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
+- 969 tests (unit + binary + integration, including a superset oracle asserting `wpawolf_output >= hcxpcapngtool_output` on every fixture with `hcxpcapngtool >= 7.0.1`, a cross-file pairing oracle confirming the shared `MessageStore` reassembles handshakes split across pcap files, and the `generated_corpus` oracle that runs wpawolf against every fixture produced by the in-tree `wpawolf-fixturegen` workspace member)
 - Sibling workspace crate `tools/fixturegen` emits a deterministic pcap/pcapng corpus covering all 11 hash types, the 20 PMKID extraction sites, the 6 N#E# combos, and the link-layer / container variants. Crypto primitives anchored to KAT vectors
 - Strict clippy: `pedantic`, `nursery`, `cargo` enabled; `-D warnings`
 - `#![forbid(unsafe_code)]` at crate root
@@ -375,7 +378,7 @@ Notable recent work, summarised here for upgraders; full per-release detail is i
 - **Operator-experience pass (v0.3.0)** driven by a regression run against an out-of-tree dataset: multi-file Phase 1 banner (file-format / endian / network-type histograms across the whole input set), unresolved-SSID hashes are now dropped rather than silently emitted as uncrackable lines (with an `[essid_not_found_summary]` log entry per affected AP), lazy hash-sink files (configured-but-empty sinks no longer leave 0-byte files on disk), and a stat-line clarity pass that suffixes every issue counter with `(frame dropped)`, `(recovered)`, or `(diagnostic; ...)` so operators can tell loss from recovery at a glance. The biggest semantic relabel: `Mesh Data frames with Mesh Control header skipped` -> `Mesh Data frames recovered (Mesh Control header unwrapped)`.
 - **Eight-sink CLI surface** that surfaces the 11-type classification at the file level: `-o` is the primary combined sink (all crackable types 1-7, mode 22000 format), and per-type sinks (`--wpa1-eapol`, `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`, `--ft-eapol`) each route a single wpawolf type. The Phase 4 banner gains one row per sink with file path + lines written + dedup dropped.
 
-Wire-level correctness improvements that landed alongside the nine-sink surface:
+Wire-level correctness improvements that landed alongside the eight-sink surface:
 
 - **KDV-first AKM reconciliation** in `store_eapol_key`. The wire-level Key Descriptor Version (KDV bits B0-B2 of EAPOL Key Information per [IEEE 802.11-2024] §12.7.3) is consulted *before* the AKM map: KDV=1 forces `Wpa1`, KDV=2 collapses non-FT to `Wpa2Psk`, KDV=3 collapses non-FT to `PskSha256`. The FT family (`FtPsk` / `FtPskSha384`) is preserved across KDV=2/3 because FT can legitimately use either MIC. Mixed-mode beacons (RSN + WPA1 vendor IE; PSK + PSK-SHA256 advertised simultaneously) regularly produce an AKM map that disagrees with the actual wire bytes, so KDV is the only signal we can stake the type prefix on; legacy mode 22000 auto-detected via the keyver byte but the new prefix-trusting modules silently fail on a mislabelled line.
 - **PMKID-AKM decoupling** for vendor M1 quirks. Various consumer router firmware regularly emits an M1 with KDV=1 (HMAC-MD5 MIC) AND a PMKID KDE in Key Data: a wire-level inconsistency where the descriptor type is RSN (0x02) but the MIC algorithm is the legacy WPA1 one. The PMKID itself is still computed with the AKM-defined PRF (HMAC-SHA1 for AKM 2), so it remains crackable. wpawolf promotes the PMKID's `AkmType` from `Wpa1` to `Wpa2Psk` while keeping the EAPOL classification as `Wpa1`. Without this, `from_akm_and_attack(Wpa1, is_pmkid=true) -> None` would silently drop the PMKID at output.
@@ -384,13 +387,11 @@ Wire-level correctness improvements that landed alongside the nine-sink surface:
 - **MSDU fragment reassembly** (`src/store/fragments.rs`). Per-(SA, RA, SeqNum) buffer of fragments accepted in any arrival order; the concatenated MSDU body is returned once the final fragment plus all predecessors are present. Most EAPOL fits in one MPDU but FT-PSK M2 with extended IEs occasionally fragments. Stats: `fragment_stats.{fragments_seen, fragments_reassembled, fragments_incomplete, fragments_dropped_safety_cap}`.
 - **Cross-file pairing test** (`tests/integration/cross_file_pairing.rs`). Splits a real-world capture at its midpoint into two files, runs wpawolf on the directory, asserts the output set matches the single-file baseline. Regression oracle for the shared-`MessageStore` invariant that lets handshakes survive `tcpdump`-rolled capture boundaries.
 
-Documentation split into a six-doc layout:
+Documentation split into a four-doc layout:
 
 - [`README.md`](README.md): project intro plus the operator-facing CLI surface (every output sink, examples, stats banner, hashcat drop-in workflow).
 - [`ARCHITECTURE.md`](ARCHITECTURE.md), the why: pipeline shape, invariants, EAPOL pairing, PMKID extraction, output fan-out / dedup design, FR-* contracts, stats catalogue.
 - [`CHANGELOG.md`](CHANGELOG.md) (this file): per-release summary of what shipped, what changed, and what was removed.
-- [`HASHCAT.md`](HASHCAT.md): mode 22000 format reference, 11-type mapping, per-type cracker math, message-pair byte, known limitations.
-- [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md), why the 11-type classification exists and how each row works: encoding rules, per-type cracker math (PBKDF2 -> PMKID / PTK / MIC), hash-line layout (16 B vs 24 B MIC, FT extras), N#E# vs M#E# notation, complete message-pair byte specification.
-- [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md), sketch of two new modes (22002 passphrase-side, 22003 PMK-side) consuming all 11 types: parsed-line struct widening, loader dispatch, per-kernel work items, migration path.
+- [`HASHCAT.md`](HASHCAT.md): mode 22000 format reference, 11-type mapping, encoding rules, per-type cracker math (PBKDF2 -> PMKID / PTK / MIC), hash-line layout (16 B vs 24 B MIC, FT extras), N#E# vs M#E# notation, complete message-pair byte specification, proposed new modes (22002 passphrase-side, 22003 PMK-side), known limitations.
 
-Known follow-ups: dedicated hashcat 24 B MIC kernel for the SHA-384 family (types 8-11); the lines are emitted today on the relevant per-AKM sinks but cannot be cracked without an upstream kernel update.
+Known follow-ups: dedicated hashcat 24 B MIC kernel for the SHA-384 family (types 8-11); the hashes are classified and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field, and no upstream hashcat kernel exists for them.
