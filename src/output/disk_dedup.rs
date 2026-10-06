@@ -353,7 +353,7 @@ mod tests {
 
     fn active_mask_single() -> [bool; SinkId::COUNT] {
         let mut m = [false; SinkId::COUNT];
-        m[SinkId::Out22000.as_index()] = true;
+        m[SinkId::OutCombined.as_index()] = true;
         m
     }
 
@@ -383,11 +383,11 @@ mod tests {
 
         let mut dd = DiskDedup::new(&active_mask_single()).unwrap();
         // Record 3 unique fingerprints.
-        dd.record(SinkId::Out22000, 100).unwrap();
-        dd.record(SinkId::Out22000, 200).unwrap();
-        dd.record(SinkId::Out22000, 300).unwrap();
+        dd.record(SinkId::OutCombined, 100).unwrap();
+        dd.record(SinkId::OutCombined, 200).unwrap();
+        dd.record(SinkId::OutCombined, 300).unwrap();
 
-        dd.clean_all(|sink| if sink == SinkId::Out22000 { Some(out_path.clone()) } else { None }).unwrap();
+        dd.clean_all(|sink| if sink == SinkId::OutCombined { Some(out_path.clone()) } else { None }).unwrap();
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(content, "line_a\nline_b\nline_c\n");
@@ -415,13 +415,13 @@ mod tests {
         }
 
         let mut dd = DiskDedup::new(&active_mask_single()).unwrap();
-        dd.record(SinkId::Out22000, 100).unwrap(); // line 0
-        dd.record(SinkId::Out22000, 200).unwrap(); // line 1
-        dd.record(SinkId::Out22000, 300).unwrap(); // line 2
-        dd.record(SinkId::Out22000, 100).unwrap(); // line 3 -- dup of 0
-        dd.record(SinkId::Out22000, 200).unwrap(); // line 4 -- dup of 1
+        dd.record(SinkId::OutCombined, 100).unwrap(); // line 0
+        dd.record(SinkId::OutCombined, 200).unwrap(); // line 1
+        dd.record(SinkId::OutCombined, 300).unwrap(); // line 2
+        dd.record(SinkId::OutCombined, 100).unwrap(); // line 3 -- dup of 0
+        dd.record(SinkId::OutCombined, 200).unwrap(); // line 4 -- dup of 1
 
-        dd.clean_all(|sink| if sink == SinkId::Out22000 { Some(out_path.clone()) } else { None }).unwrap();
+        dd.clean_all(|sink| if sink == SinkId::OutCombined { Some(out_path.clone()) } else { None }).unwrap();
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(content, "unique_a\nunique_b\nunique_c\n");
@@ -449,12 +449,12 @@ mod tests {
         // Flush a sentinel for fingerprint 100 (was in memory).
         let mut sentinel_set = HashSet::new();
         sentinel_set.insert(100u64);
-        dd.flush_hashset(SinkId::Out22000, &sentinel_set).unwrap();
+        dd.flush_hashset(SinkId::OutCombined, &sentinel_set).unwrap();
         // Record output lines.
-        dd.record(SinkId::Out22000, 100).unwrap(); // line 0 -- dup of sentinel
-        dd.record(SinkId::Out22000, 200).unwrap(); // line 1 -- unique
+        dd.record(SinkId::OutCombined, 100).unwrap(); // line 0 -- dup of sentinel
+        dd.record(SinkId::OutCombined, 200).unwrap(); // line 1 -- unique
 
-        dd.clean_all(|sink| if sink == SinkId::Out22000 { Some(out_path.clone()) } else { None }).unwrap();
+        dd.clean_all(|sink| if sink == SinkId::OutCombined { Some(out_path.clone()) } else { None }).unwrap();
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(content, "unique_line\n", "sentinel should cause line 0 to be removed");
@@ -484,21 +484,21 @@ mod tests {
 
         // Switch mid-stream: two lines already written to this sink -> base 2.
         let mut offsets = [0usize; SinkId::COUNT];
-        offsets[SinkId::Out22000.as_index()] = 2;
+        offsets[SinkId::OutCombined.as_index()] = 2;
         let mut dd = DiskDedup::new_with_offsets(&active_mask_single(), &offsets).unwrap();
 
         // Pre-switch in-memory fingerprints become sentinels.
         let mut sentinels = HashSet::new();
         sentinels.insert(100u64);
         sentinels.insert(200u64);
-        dd.flush_hashset(SinkId::Out22000, &sentinels).unwrap();
+        dd.flush_hashset(SinkId::OutCombined, &sentinels).unwrap();
 
         // Post-switch write-through records number from the seeded base (2, 3, 4).
-        dd.record(SinkId::Out22000, 300).unwrap(); // line 2
-        dd.record(SinkId::Out22000, 400).unwrap(); // line 3
-        dd.record(SinkId::Out22000, 100).unwrap(); // line 4 -- dup of sentinel 100
+        dd.record(SinkId::OutCombined, 300).unwrap(); // line 2
+        dd.record(SinkId::OutCombined, 400).unwrap(); // line 3
+        dd.record(SinkId::OutCombined, 100).unwrap(); // line 4 -- dup of sentinel 100
 
-        dd.clean_all(|sink| if sink == SinkId::Out22000 { Some(out_path.clone()) } else { None }).unwrap();
+        dd.clean_all(|sink| if sink == SinkId::OutCombined { Some(out_path.clone()) } else { None }).unwrap();
 
         let content = std::fs::read_to_string(&out_path).unwrap();
         // Without line-base seeding the removal set would target line 2 and delete

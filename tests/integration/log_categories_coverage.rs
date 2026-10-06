@@ -173,7 +173,7 @@ fn run_with_log(pcap_path: &str, log_path: &str, extra_args: &[&str]) {
     let _ = fs::remove_file(log_path);
     let out_path = format!("{log_path}.22000");
     let _ = fs::remove_file(&out_path);
-    let mut args: Vec<&str> = vec!["--log", log_path, "--22000-out", &out_path];
+    let mut args: Vec<&str> = vec!["--log", log_path, "-o", &out_path];
     args.extend_from_slice(extra_args);
     args.push(pcap_path);
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf")).args(&args).status().expect("failed to spawn wpawolf");
@@ -351,7 +351,7 @@ fn no_log_path_does_not_create_file() {
 
     let out_path = "/tmp/wpawolf_logcov_nolog.22000";
     let _ = fs::remove_file(out_path);
-    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf")).args(["--22000-out", out_path, pcap]).status().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf")).args(["-o", out_path, pcap]).status().unwrap();
     assert!(status.success());
     assert!(!Path::new(unset_log).exists(), "no-op logger must not create the file");
 }
@@ -427,7 +427,7 @@ fn invalid_protocol_version_is_forgiven_not_logged() {
     let _ = fs::remove_file(&out_path);
     let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--log", log, "--22000-out", &out_path, pcap])
+        .args(["--log", log, "-o", &out_path, pcap])
         .stdout(stdout_file)
         .status()
         .unwrap();
@@ -483,7 +483,7 @@ fn skipped_input_routes_unknown_format_files_through_log_not_stderr() {
 
     let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--log", &log, "--22000-out", &out_path, &zero_byte, &junk, &real_pcap])
+        .args(["--log", &log, "-o", &out_path, &zero_byte, &junk, &real_pcap])
         .stdout(stdout_file)
         .status()
         .unwrap();
@@ -549,7 +549,7 @@ fn directory_walk_filters_sub_4_byte_stubs_silently() {
 
     let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--log", &log, "--22000-out", &out_path, dir])
+        .args(["--log", &log, "-o", &out_path, dir])
         .stderr(stdout_file)
         .status()
         .unwrap();

@@ -1,12 +1,11 @@
 //! Phase 4 -- Emit: output coordination (PMKID pipeline + EAPOL pair pipeline run independently). See ARCHITECTURE.md §3.4 + §7.
 //!
-//! Opens every configured hash sink (legacy `--22000-out` / `--37100-out` plus the
-//! 11-type per-AKM sinks `--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--ft-out`,
-//! `--psk-sha384-out`, `--ft-psk-sha384-out`, and the combined `-o`) and the auxiliary
-//! wordlists. Every emitted hash is fanned out to *every* configured sink whose
-//! accept-set contains the classified `HashType`, with the appropriate per-sink line
-//! prefix and per-sink dedup. The PMKID and EAPOL pipelines run to completion
-//! independently (Invariant OUT-1 in `ARCHITECTURE.md §7`).
+//! Opens every configured hash sink (`-o` combined plus per-type sinks `--wpa1-eapol`,
+//! `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`,
+//! `--ft-eapol`) and the auxiliary wordlists. All sinks emit hashcat mode 22000 format
+//! (types 01-04). Every emitted hash is fanned out to the combined sink plus the
+//! matching per-type sink, with per-sink dedup. The PMKID and EAPOL pipelines run to
+//! completion independently (Invariant OUT-1 in `ARCHITECTURE.md §7`).
 
 pub mod dedup;
 pub mod device_info;
@@ -80,24 +79,22 @@ impl Default for EssidFilterConfig {
 /// All fields are optional so the caller can enable any subset of outputs.
 #[derive(Debug, Default)]
 pub struct OutputPaths {
-    /// `--22000-out` -- legacy hashcat mode 22000 (every non-FT hash, `WPA*01*`/`WPA*02*`).
-    pub out_22000: Option<PathBuf>,
-    /// `--37100-out` -- legacy hashcat mode 37100 (every FT hash, `WPA*03*`/`WPA*04*`).
-    pub out_37100: Option<PathBuf>,
-    /// `-o`/`--out` -- combined 11-type per-AKM file (every emitted hash).
+    /// `-o`/`--out` -- combined output (all crackable types 1-7, mode 22000 format).
     pub out_combined: Option<PathBuf>,
-    /// `--wpa1-out` -- type 1 only.
-    pub out_wpa1: Option<PathBuf>,
-    /// `--wpa2-out` -- types 2 + 3.
-    pub out_wpa2: Option<PathBuf>,
-    /// `--psk-sha256-out` -- types 4 + 5.
-    pub out_psk_sha256: Option<PathBuf>,
-    /// `--ft-out` -- types 6 + 7 (FT-PSK SHA-256, FT extras appended).
-    pub out_ft: Option<PathBuf>,
-    /// `--psk-sha384-out` -- types 8 + 9.
-    pub out_psk_sha384: Option<PathBuf>,
-    /// `--ft-psk-sha384-out` -- types 10 + 11 (FT-PSK SHA-384, FT extras appended).
-    pub out_ft_psk_sha384: Option<PathBuf>,
+    /// `--wpa1-eapol` -- type 1 only.
+    pub out_wpa1_eapol: Option<PathBuf>,
+    /// `--wpa2-pmkid` -- type 2 only.
+    pub out_wpa2_pmkid: Option<PathBuf>,
+    /// `--wpa2-eapol` -- type 3 only.
+    pub out_wpa2_eapol: Option<PathBuf>,
+    /// `--sha256-pmkid` -- type 4 only.
+    pub out_sha256_pmkid: Option<PathBuf>,
+    /// `--sha256-eapol` -- type 5 only.
+    pub out_sha256_eapol: Option<PathBuf>,
+    /// `--ft-pmkid` -- type 6 only (FT extras appended).
+    pub out_ft_pmkid: Option<PathBuf>,
+    /// `--ft-eapol` -- type 7 only (FT extras appended).
+    pub out_ft_eapol: Option<PathBuf>,
     /// Path for ESSID list output (`-E`): AP-advertised ESSIDs.
     pub essid_list: Option<PathBuf>,
     /// Path for Probe Request ESSID list output (`-R`): client-requested ESSIDs.
@@ -212,11 +209,11 @@ pub struct OutputStats {
 
     /// Unique crackable hashes *found* in the capture, keyed by `HashType`,
     /// counted independently of which output sinks are configured. A hash whose
-    /// only candidate sinks are unconfigured (e.g. the SHA-384 family with just
-    /// `--22000-out`) is absent from `hash_type_emitted` but still counted here,
-    /// so the banner reports the full 11-type inventory of the capture's content.
-    /// Deduped via `found_dedup` in memory mode; pre-dedup (write-through) in
-    /// disk mode, matching `hash_type_emitted`.
+    /// sinks are unconfigured (e.g. the SHA-384 family, which has no sinks) is
+    /// absent from `hash_type_emitted` but still counted here, so the banner
+    /// reports the full 11-type inventory of the capture's content. Deduped via
+    /// `found_dedup` in memory mode; pre-dedup (write-through) in disk mode,
+    /// matching `hash_type_emitted`.
     pub hash_type_found: HashMap<HashType, u64>,
 
     /// Hash lines emitted with an empty SSID because `essid_map` had no entry for
@@ -266,9 +263,7 @@ impl OutputStats {
 ///
 /// `path` is set at construction time, but no `File` is opened until the first
 /// write. Sinks that never receive a hash line therefore never call
-/// `File::create`, and an empty file is never left on disk -- the reason
-/// `--psk-sha384-out` etc. used to materialize as 0-byte files when the
-/// capture had no matching hashes.
+/// `File::create`, and an empty file is never left on disk.
 struct LazySink {
     path: PathBuf,
     writer: Option<BufWriter<std::fs::File>>,
@@ -306,15 +301,14 @@ impl HashSinks {
     fn open(paths: &OutputPaths) -> Self {
         let lazy = |p: Option<&Path>| p.map(|p| LazySink { path: p.to_path_buf(), writer: None });
         let sinks = [
-            lazy(paths.out_22000.as_deref()),
-            lazy(paths.out_37100.as_deref()),
             lazy(paths.out_combined.as_deref()),
-            lazy(paths.out_wpa1.as_deref()),
-            lazy(paths.out_wpa2.as_deref()),
-            lazy(paths.out_psk_sha256.as_deref()),
-            lazy(paths.out_ft.as_deref()),
-            lazy(paths.out_psk_sha384.as_deref()),
-            lazy(paths.out_ft_psk_sha384.as_deref()),
+            lazy(paths.out_wpa1_eapol.as_deref()),
+            lazy(paths.out_wpa2_pmkid.as_deref()),
+            lazy(paths.out_wpa2_eapol.as_deref()),
+            lazy(paths.out_sha256_pmkid.as_deref()),
+            lazy(paths.out_sha256_eapol.as_deref()),
+            lazy(paths.out_ft_pmkid.as_deref()),
+            lazy(paths.out_ft_eapol.as_deref()),
         ];
         Self { sinks }
     }
@@ -349,54 +343,29 @@ impl HashSinks {
     }
 }
 
-/// Returns the per-AKM extended sink that accepts a given `HashType`, if any.
-const fn extended_sink_for(ht: HashType) -> SinkId {
+/// Returns the per-type sink for a given `HashType`, or `None` for types 8-11
+/// (SHA-384 family: classified and counted but not emitted -- the 24 B MIC
+/// cannot fit mode 22000's 16 B field).
+const fn per_type_sink_for(ht: HashType) -> Option<SinkId> {
     match ht {
-        HashType::Wpa1Eapol => SinkId::OutWpa1,
-        HashType::Wpa2PskPmkid | HashType::Wpa2PskEapol => SinkId::OutWpa2,
-        HashType::PskSha256Pmkid | HashType::PskSha256Eapol => SinkId::OutPskSha256,
-        HashType::FtPskPmkid | HashType::FtPskEapol => SinkId::OutFt,
-        HashType::PskSha384Pmkid | HashType::PskSha384Eapol => SinkId::OutPskSha384,
-        HashType::FtPskSha384Pmkid | HashType::FtPskSha384Eapol => SinkId::OutFtPskSha384,
-    }
-}
-
-/// Returns the legacy sink (`Out22000` / `Out37100`) for a given `HashType`,
-/// or `None` for hash types whose wire shape hashcat's legacy kernels cannot
-/// parse.
-///
-/// SHA-384 personal (types 8/9) and SHA-384 FT (types 10/11) carry a 24-byte
-/// HMAC-SHA384-192 MIC and a SHA-384 PMKID derivation. hashcat's mode 22000
-/// kernel rejects any line whose MIC field is not exactly 16 bytes
-/// (`[hashcat module_22000.c:check_token]`), and mode 37100 only ships a
-/// SHA-256 FT key-hierarchy kernel -- so writing those lines into the legacy
-/// sinks generates `Token length exception` parse errors at hashcat startup
-/// and pollutes the input file. The dedicated per-AKM sinks
-/// (`--psk-sha384-out` / `--ft-psk-sha384-out`) and the combined `-o` sink
-/// continue to receive these lines under their `WPA*08*..*11*` prefixes,
-/// where downstream tooling can recognise the wider MIC width.
-const fn legacy_sink_for(ht: HashType) -> Option<SinkId> {
-    match ht {
-        // SHA-384 family: skip legacy sinks (no compatible hashcat kernel).
+        HashType::Wpa1Eapol => Some(SinkId::OutWpa1Eapol),
+        HashType::Wpa2PskPmkid => Some(SinkId::OutWpa2Pmkid),
+        HashType::Wpa2PskEapol => Some(SinkId::OutWpa2Eapol),
+        HashType::PskSha256Pmkid => Some(SinkId::OutSha256Pmkid),
+        HashType::PskSha256Eapol => Some(SinkId::OutSha256Eapol),
+        HashType::FtPskPmkid => Some(SinkId::OutFtPmkid),
+        HashType::FtPskEapol => Some(SinkId::OutFtEapol),
         HashType::PskSha384Pmkid
         | HashType::PskSha384Eapol
         | HashType::FtPskSha384Pmkid
         | HashType::FtPskSha384Eapol => None,
-        // FT-PSK-SHA-256 (types 6/7) -> mode 37100.
-        HashType::FtPskPmkid | HashType::FtPskEapol => Some(SinkId::Out37100),
-        // Everything else (WPA1 / WPA2 / PSK-SHA-256) -> mode 22000.
-        HashType::Wpa1Eapol
-        | HashType::Wpa2PskPmkid
-        | HashType::Wpa2PskEapol
-        | HashType::PskSha256Pmkid
-        | HashType::PskSha256Eapol => Some(SinkId::Out22000),
     }
 }
 
 // --- Fan-out item ---
 
 /// Renders a 6-byte AP MAC as a 12-char lowercase hex string for `[essid_not_found]`
-/// log lines. Same encoding hashcat expects for the AP field in 22000/37100 lines.
+/// log lines. Same encoding hashcat expects for the AP field in mode 22000 lines.
 fn format_mac_hex(mac: crate::types::MacAddr) -> String {
     let b = mac.0;
     format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", b[0], b[1], b[2], b[3], b[4], b[5])
@@ -412,14 +381,9 @@ enum FanItem<'a> {
     Eapol { pair: &'a PairedHash, ft: Option<&'a FtFields>, essid: &'a [u8] },
 }
 
-/// Returns the prefix for a given `(sink, ht)` pair.
-const fn prefix_for(sink: SinkId, ht: HashType) -> &'static [u8] {
-    if matches!(sink, SinkId::Out22000 | SinkId::Out37100) { ht.legacy_prefix().0 } else { ht.extended_prefix() }
-}
-
-/// Builds a PMKID line for a given `(item, sink, ht)` triple.
-fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sink: SinkId, ht: HashType) -> String {
-    let prefix = prefix_for(sink, ht);
+/// Builds a PMKID line for a given `(entry, ft, essid, ht)`.
+fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], ht: HashType) -> String {
+    let prefix = ht.prefix().0;
     ft.map_or_else(|| format_pmkid_line(prefix, entry, essid), |ft| format_pmkid_ft_line(prefix, entry, ft, essid))
 }
 
@@ -431,8 +395,8 @@ fn build_pmkid_line(entry: &PmkidEntry, ft: Option<&FtFields>, essid: &[u8], sin
 /// `true`. Per-sink line and dedup counters are bumped inside.
 ///
 /// For EAPOL items, the hex body (everything after the 7-byte prefix) is built once
-/// and reused across all accepting sinks. This avoids redundant EAPOL-frame hex
-/// encoding and MIC-zeroing clones when a line fans out to 2-3 sinks.
+/// and reused across both sinks. This avoids redundant EAPOL-frame hex encoding and
+/// MIC-zeroing clones.
 fn fan_out(
     sinks: &mut HashSinks,
     dedup: &mut PerSinkDedup,
@@ -441,8 +405,10 @@ fn fan_out(
     ht: HashType,
     item: FanItem<'_>,
 ) -> Result<bool> {
-    let candidates: [Option<SinkId>; 3] = [legacy_sink_for(ht), Some(extended_sink_for(ht)), Some(SinkId::OutCombined)];
+    let combined = if ht.hashcat_mode().is_some() { Some(SinkId::OutCombined) } else { None };
+    let candidates: [Option<SinkId>; 2] = [combined, per_type_sink_for(ht)];
     let disk_mode = dd.is_some();
+    let prefix = ht.prefix().0;
 
     // Pre-build the EAPOL body once (prefix-independent) if any sink will accept it.
     let eapol_body: Option<Vec<u8>> = match item {
@@ -480,14 +446,13 @@ fn fan_out(
             let writer = lazy.writer()?;
             match (&eapol_body, item) {
                 (Some(body), FanItem::Eapol { .. }) => {
-                    let prefix = prefix_for(sink, ht);
                     writer.write_all(prefix)?;
                     writer.write_all(body)?;
                     writer.write_all(b"\n")?;
                 },
                 _ => {
                     if let FanItem::Pmkid { entry, ft, essid } = item {
-                        let line = build_pmkid_line(entry, ft, essid, sink, ht);
+                        let line = build_pmkid_line(entry, ft, essid, ht);
                         writeln!(writer, "{line}")?;
                     }
                 },
@@ -778,8 +743,8 @@ impl OutputContext {
     /// Session-level FT-context backfill: each `(AP, STA)` group mapped to the best
     /// R0KH-ID-bearing `FtFields` seen in any of its EAPOL messages. Lets an FT-PSK
     /// PMKID whose own carrier frame (e.g. an M1 PMKID KDE) omitted the R0KH-ID still
-    /// emit its standalone WPA*03 / WPA*06 line, matching hcxpcapngtool's cross-frame
-    /// backfill \[`hcxpcapngtool.c`:2807-2884\]; otherwise the line is dropped
+    /// emit its standalone WPA*03* line, matching hcxpcapngtool's cross-frame backfill
+    /// \[`hcxpcapngtool.c`:2807-2884\]; otherwise the line is dropped
     /// (`emit_dropped_ft_no_context`) -- a never-miss gap for FT-PSK PMKIDs.
     fn build_ft_backfill(message_store: &MessageStore) -> HashMap<MacPair, Box<FtFields>> {
         let mut map: HashMap<MacPair, Box<FtFields>> = HashMap::new();
@@ -1281,37 +1246,21 @@ mod tests {
     }
 
     #[test]
-    fn extended_sink_routes_match_hash_type_family() {
+    fn per_type_sink_routes_match_hash_type() {
         for ht in HashType::all() {
-            let sink = extended_sink_for(ht);
+            let sink = per_type_sink_for(ht);
             let expected = match ht.type_code() {
-                1 => SinkId::OutWpa1,
-                2 | 3 => SinkId::OutWpa2,
-                4 | 5 => SinkId::OutPskSha256,
-                6 | 7 => SinkId::OutFt,
-                8 | 9 => SinkId::OutPskSha384,
-                10 | 11 => SinkId::OutFtPskSha384,
+                1 => Some(SinkId::OutWpa1Eapol),
+                2 => Some(SinkId::OutWpa2Pmkid),
+                3 => Some(SinkId::OutWpa2Eapol),
+                4 => Some(SinkId::OutSha256Pmkid),
+                5 => Some(SinkId::OutSha256Eapol),
+                6 => Some(SinkId::OutFtPmkid),
+                7 => Some(SinkId::OutFtEapol),
+                8..=11 => None,
                 _ => unreachable!(),
             };
             assert_eq!(sink, expected, "{}", ht.name());
-        }
-    }
-
-    #[test]
-    fn legacy_sink_routes_match_is_ft() {
-        // SHA-384 hash types (8/9/10/11) skip the legacy sinks because hashcat's
-        // mode 22000 / 37100 kernels reject the 24-byte HMAC-SHA384-192 MIC at
-        // the parser; see `legacy_sink_for` doc.
-        for ht in HashType::all() {
-            let expected = match ht {
-                HashType::PskSha384Pmkid
-                | HashType::PskSha384Eapol
-                | HashType::FtPskSha384Pmkid
-                | HashType::FtPskSha384Eapol => None,
-                _ if ht.is_ft() => Some(SinkId::Out37100),
-                _ => Some(SinkId::Out22000),
-            };
-            assert_eq!(legacy_sink_for(ht), expected, "{}", ht.name());
         }
     }
 }

@@ -172,7 +172,7 @@ pub struct Stats {
     /// Handshakes / PMKIDs dropped at emit because the AKM is a recognised non-PSK
     /// suite (`AkmType::NotPsk`: enterprise 802.1X / FT-802.1X / SAE / OWE / FILS /
     /// PASN). Out of v1 scope -- the PMK is not `PBKDF2(PSK)`, so no crackable mode
-    /// 22000 / 37100 line exists. [ARCHITECTURE.md §2.3, §8.6 FR-OUT-*]
+    /// 22000 line exists. [ARCHITECTURE.md §2.3, §8.6 FR-OUT-*]
     pub emit_dropped_notpsk_akm: u64,
     /// FT hashes (types 6/7/10/11) dropped at emit because the FT context was
     /// incomplete (no R0KH-ID), so the `WPA*03*`/`WPA*04*` FT line could not be
@@ -240,7 +240,7 @@ pub struct Stats {
     // [IEEE 802.11-2024] §9.4.2.24.3, Table 9-190
     /// Association Requests with AKM 2 (WPA2-PSK; hashcat mode 22000).
     pub assoc_req_wpa2_psk: u64,
-    /// Association Requests with AKM 4 only (FT-PSK, SHA-256 chain; hashcat mode 37100).
+    /// Association Requests with AKM 4 only (FT-PSK, SHA-256 chain; hashcat mode 22000 type 03/04).
     pub assoc_req_ft_psk: u64,
     /// Association Requests with AKM 19 only (FT-PSK-SHA384; no hashcat module).
     pub assoc_req_ft_psk_sha384: u64,
@@ -274,7 +274,7 @@ pub struct Stats {
     pub assoc_req_wpa1: u64,
     /// Reassociation Requests with AKM 2 (WPA2-PSK; hashcat mode 22000).
     pub reassoc_req_wpa2_psk: u64,
-    /// Reassociation Requests with AKM 4 only (FT-PSK, SHA-256 chain; hashcat mode 37100).
+    /// Reassociation Requests with AKM 4 only (FT-PSK, SHA-256 chain; hashcat mode 22000 type 03/04).
     pub reassoc_req_ft_psk: u64,
     /// Reassociation Requests with AKM 19 only (FT-PSK-SHA384; no hashcat module).
     pub reassoc_req_ft_psk_sha384: u64,
@@ -430,7 +430,7 @@ pub struct Stats {
     /// uniquely RC-link to one instance (rc=1-pinned / cross-seed; never-miss
     /// keep-all). Informational. [smart-pairing-design.md §6.2]
     pub smart_ambiguous_kept: u64,
-    /// `--smart`: FT (mode 37100) MIC-frames retaining a non-APLESS survivor after
+    /// `--smart`: FT (mode 22000 types 03/04) MIC-frames retaining a non-APLESS survivor after
     /// pruning, satisfying clause F. Informational. [smart-pairing-design.md §6.2]
     pub smart_ft_nonapless_kept: u64,
 
@@ -744,16 +744,14 @@ pub struct Stats {
     /// PMKIDs from OSEN IE in Association Request (S20). [Hotspot 2.0 OSEN spec]
     pub pmkid_osen: u64,
 
-    // PMKID by-AKM counters (determines hashcat mode).
+    // PMKID by-AKM counters (determines hashcat type prefix).
     /// PMKIDs from non-FT PSK suites (WPA2-PSK / PSK-SHA256 / PSK-SHA384).
-    /// Routed to hashcat mode 22000 (`--22000-out`); SHA-384 lines (Type 8)
-    /// also reach the dedicated `--psk-sha384-out` sink. Cracking SHA-384
-    /// awaits a hashcat kernel that supports the 24-byte MIC.
+    /// Types 2/4 route to mode 22000 as `WPA*01*`; SHA-384 (type 8) is
+    /// classified but not emitted (24 B MIC exceeds mode 22000's 16 B field).
     pub pmkid_wpa2_psk: u64,
     /// PMKIDs from FT-PSK suites (FT-PSK / FT-PSK-SHA384).
-    /// Routed to hashcat mode 37100 (`--37100-out`); SHA-384 lines (Type 10)
-    /// also reach the dedicated `--ft-psk-sha384-out` sink. Cracking SHA-384
-    /// awaits a hashcat kernel that supports the 24-byte MIC.
+    /// Type 6 routes to mode 22000 as `WPA*03*` (12-token FT format); SHA-384
+    /// (type 10) is classified but not emitted.
     pub pmkid_ft_psk: u64,
 
     // Frame-level action counters.
@@ -788,66 +786,60 @@ pub struct Stats {
     //
     // Each `lines_<sink>` is the count of hash lines that survived that sink's dedup
     // and were written to the configured file. `dropped_<sink>` is the count of lines
-    // suppressed by that sink's dedup. A single logical hash fans out to up to three
-    // sinks (legacy + per-AKM-family + combined), so the per-sink counters do not sum
-    // to the Phase 5 logical hash total. See `ARCHITECTURE.md §7`.
-    /// `--22000-out` lines written.
-    pub lines_22000: u64,
-    /// `--37100-out` lines written.
-    pub lines_37100: u64,
-    /// `-o`/`--out` (combined per-AKM) lines written.
+    // suppressed by that sink's dedup. A single logical hash fans out to up to two
+    // sinks (combined + per-type), so the per-sink counters do not sum to the Phase 5
+    // logical hash total. See `ARCHITECTURE.md §7`.
+    /// `-o`/`--out` (all crackable types 1-7, mode 22000) lines written.
     pub lines_combined: u64,
-    /// `--wpa1-out` lines written.
-    pub lines_wpa1: u64,
-    /// `--wpa2-out` lines written.
-    pub lines_wpa2: u64,
-    /// `--psk-sha256-out` lines written.
-    pub lines_psk_sha256: u64,
-    /// `--ft-out` lines written.
-    pub lines_ft: u64,
-    /// `--psk-sha384-out` lines written.
-    pub lines_psk_sha384: u64,
-    /// `--ft-psk-sha384-out` lines written.
-    pub lines_ft_psk_sha384: u64,
+    /// `--wpa1-eapol` (type 1) lines written.
+    pub lines_wpa1_eapol: u64,
+    /// `--wpa2-pmkid` (type 2) lines written.
+    pub lines_wpa2_pmkid: u64,
+    /// `--wpa2-eapol` (type 3) lines written.
+    pub lines_wpa2_eapol: u64,
+    /// `--sha256-pmkid` (type 4) lines written.
+    pub lines_sha256_pmkid: u64,
+    /// `--sha256-eapol` (type 5) lines written.
+    pub lines_sha256_eapol: u64,
+    /// `--ft-pmkid` (type 6) lines written.
+    pub lines_ft_pmkid: u64,
+    /// `--ft-eapol` (type 7) lines written.
+    pub lines_ft_eapol: u64,
 
-    /// `--22000-out` lines suppressed by dedup.
-    pub dropped_22000: u64,
-    /// `--37100-out` lines suppressed by dedup.
-    pub dropped_37100: u64,
     /// `-o`/`--out` lines suppressed by dedup.
     pub dropped_combined: u64,
-    /// `--wpa1-out` lines suppressed by dedup.
-    pub dropped_wpa1: u64,
-    /// `--wpa2-out` lines suppressed by dedup.
-    pub dropped_wpa2: u64,
-    /// `--psk-sha256-out` lines suppressed by dedup.
-    pub dropped_psk_sha256: u64,
-    /// `--ft-out` lines suppressed by dedup.
-    pub dropped_ft: u64,
-    /// `--psk-sha384-out` lines suppressed by dedup.
-    pub dropped_psk_sha384: u64,
-    /// `--ft-psk-sha384-out` lines suppressed by dedup.
-    pub dropped_ft_psk_sha384: u64,
+    /// `--wpa1-eapol` lines suppressed by dedup.
+    pub dropped_wpa1_eapol: u64,
+    /// `--wpa2-pmkid` lines suppressed by dedup.
+    pub dropped_wpa2_pmkid: u64,
+    /// `--wpa2-eapol` lines suppressed by dedup.
+    pub dropped_wpa2_eapol: u64,
+    /// `--sha256-pmkid` lines suppressed by dedup.
+    pub dropped_sha256_pmkid: u64,
+    /// `--sha256-eapol` lines suppressed by dedup.
+    pub dropped_sha256_eapol: u64,
+    /// `--ft-pmkid` lines suppressed by dedup.
+    pub dropped_ft_pmkid: u64,
+    /// `--ft-eapol` lines suppressed by dedup.
+    pub dropped_ft_eapol: u64,
 
     // --- Output file configuration (set by main before run_output) ---
-    /// Path for `--22000-out`, or empty when not configured.
-    pub path_22000: String,
-    /// Path for `--37100-out`, or empty when not configured.
-    pub path_37100: String,
-    /// Path for `-o`/`--out` combined per-AKM, or empty when not configured.
+    /// Path for `-o`/`--out`, or empty when not configured.
     pub path_combined: String,
-    /// Path for `--wpa1-out`, or empty when not configured.
-    pub path_wpa1: String,
-    /// Path for `--wpa2-out`, or empty when not configured.
-    pub path_wpa2: String,
-    /// Path for `--psk-sha256-out`, or empty when not configured.
-    pub path_psk_sha256: String,
-    /// Path for `--ft-out`, or empty when not configured.
-    pub path_ft: String,
-    /// Path for `--psk-sha384-out`, or empty when not configured.
-    pub path_psk_sha384: String,
-    /// Path for `--ft-psk-sha384-out`, or empty when not configured.
-    pub path_ft_psk_sha384: String,
+    /// Path for `--wpa1-eapol`, or empty when not configured.
+    pub path_wpa1_eapol: String,
+    /// Path for `--wpa2-pmkid`, or empty when not configured.
+    pub path_wpa2_pmkid: String,
+    /// Path for `--wpa2-eapol`, or empty when not configured.
+    pub path_wpa2_eapol: String,
+    /// Path for `--sha256-pmkid`, or empty when not configured.
+    pub path_sha256_pmkid: String,
+    /// Path for `--sha256-eapol`, or empty when not configured.
+    pub path_sha256_eapol: String,
+    /// Path for `--ft-pmkid`, or empty when not configured.
+    pub path_ft_pmkid: String,
+    /// Path for `--ft-eapol`, or empty when not configured.
+    pub path_ft_eapol: String,
     /// Path for ESSID list output, or empty when -E was not given.
     pub essid_list_path: String,
     /// Path for probe-request ESSID list output, or empty when -R was not given.
@@ -875,7 +867,7 @@ pub struct Stats {
     /// independent of which output sinks were configured. Equals
     /// `hash_type_emitted` for any type with a configured accepting sink; for a
     /// type with no configured sink (e.g. the SHA-384 family with only
-    /// `--22000-out`) `hash_type_emitted` is 0 but this still counts what the
+    /// `-o`) `hash_type_emitted` is 0 but this still counts what the
     /// capture contained. Drives the per-type "found / written" rows and the
     /// "distinct hash types observed" count.
     pub hash_type_found: HashMap<HashType, u64>,
@@ -1306,7 +1298,7 @@ impl Stats {
         nz!("ASSOCIATION REQUEST (total)", self.assoc_req_frames);
         nz!("  WPA1 (vendor IE 00:50:F2:01, mode 22000)", self.assoc_req_wpa1);
         nz!("  WPA2-PSK (AKM 2, mode 22000)", self.assoc_req_wpa2_psk);
-        nz!("  FT-PSK (AKM 4, mode 37100)", self.assoc_req_ft_psk);
+        nz!("  FT-PSK (AKM 4, mode 22000 type 03/04)", self.assoc_req_ft_psk);
         nz!("  FT-PSK-SHA384 (AKM 19, no module)", self.assoc_req_ft_psk_sha384);
         nz!("  PSK-SHA256 (AKM 6, mode 22000)", self.assoc_req_psk_sha256);
         nz!("  PSK-SHA384 (AKM 20, no module)", self.assoc_req_psk_sha384);
@@ -1324,7 +1316,7 @@ impl Stats {
         nz!("REASSOCIATION REQUEST (total)", self.reassoc_req_frames);
         nz!("  WPA1 (vendor IE 00:50:F2:01, mode 22000)", self.reassoc_req_wpa1);
         nz!("  WPA2-PSK (AKM 2, mode 22000)", self.reassoc_req_wpa2_psk);
-        nz!("  FT-PSK (AKM 4, mode 37100)", self.reassoc_req_ft_psk);
+        nz!("  FT-PSK (AKM 4, mode 22000 type 03/04)", self.reassoc_req_ft_psk);
         nz!("  FT-PSK-SHA384 (AKM 19, no module)", self.reassoc_req_ft_psk_sha384);
         nz!("  PSK-SHA256 (AKM 6, mode 22000)", self.reassoc_req_psk_sha256);
         nz!("  PSK-SHA384 (AKM 20, no module)", self.reassoc_req_psk_sha384);
@@ -1515,7 +1507,7 @@ impl Stats {
         // sink-independent inventory (what the capture contains); the "written"
         // column is what reached a configured output file. They differ when a type
         // has no configured accepting sink -- e.g. the SHA-384 family with only
-        // `--22000-out` shows "14 / 0": found in the capture, not written.
+        // `-o` shows "14 / 0": found in the capture, not written.
         if self.hash_type_found.values().any(|&n| n > 0) {
             let _ = writeln!(out, "per-hash-type found / written (per ARCHITECTURE.md §2):");
             for ht in HashType::all() {
@@ -1590,24 +1582,16 @@ impl Stats {
         // Per-sink hash output rows. Only configured sinks render (decision:
         // banner space goes to what the run actually produced); the trailing
         // one-liner counts the rest so the full sink surface stays discoverable.
-        // The legacy 22000 / 37100 sinks remain hashcat-compatible via the
-        // 4-prefix scheme; the per-AKM-family and combined sinks emit the
-        // 11-type classification prefixes from `ARCHITECTURE.md §2`.
-        let sinks: [(&str, &str, u64, u64); 9] = [
-            ("--22000-out (legacy mode 22000)", &self.path_22000, self.lines_22000, self.dropped_22000),
-            ("--37100-out (legacy mode 37100)", &self.path_37100, self.lines_37100, self.dropped_37100),
-            ("-o / --out (combined per-AKM)", &self.path_combined, self.lines_combined, self.dropped_combined),
-            ("--wpa1-out (type 1)", &self.path_wpa1, self.lines_wpa1, self.dropped_wpa1),
-            ("--wpa2-out (types 2+3)", &self.path_wpa2, self.lines_wpa2, self.dropped_wpa2),
-            ("--psk-sha256-out (types 4+5)", &self.path_psk_sha256, self.lines_psk_sha256, self.dropped_psk_sha256),
-            ("--ft-out (types 6+7)", &self.path_ft, self.lines_ft, self.dropped_ft),
-            ("--psk-sha384-out (types 8+9)", &self.path_psk_sha384, self.lines_psk_sha384, self.dropped_psk_sha384),
-            (
-                "--ft-psk-sha384-out (types 10+11)",
-                &self.path_ft_psk_sha384,
-                self.lines_ft_psk_sha384,
-                self.dropped_ft_psk_sha384,
-            ),
+        // All sinks emit hashcat mode 22000 format (types 01-04).
+        let sinks: [(&str, &str, u64, u64); 8] = [
+            ("-o / --out (all types, mode 22000)", &self.path_combined, self.lines_combined, self.dropped_combined),
+            ("--wpa1-eapol (type 1)", &self.path_wpa1_eapol, self.lines_wpa1_eapol, self.dropped_wpa1_eapol),
+            ("--wpa2-pmkid (type 2)", &self.path_wpa2_pmkid, self.lines_wpa2_pmkid, self.dropped_wpa2_pmkid),
+            ("--wpa2-eapol (type 3)", &self.path_wpa2_eapol, self.lines_wpa2_eapol, self.dropped_wpa2_eapol),
+            ("--sha256-pmkid (type 4)", &self.path_sha256_pmkid, self.lines_sha256_pmkid, self.dropped_sha256_pmkid),
+            ("--sha256-eapol (type 5)", &self.path_sha256_eapol, self.lines_sha256_eapol, self.dropped_sha256_eapol),
+            ("--ft-pmkid (type 6)", &self.path_ft_pmkid, self.lines_ft_pmkid, self.dropped_ft_pmkid),
+            ("--ft-eapol (type 7)", &self.path_ft_eapol, self.lines_ft_eapol, self.dropped_ft_eapol),
         ];
         let mut hash_sinks_unconfigured = 0u64;
         for (label, path, lines, dropped) in sinks {
@@ -2298,19 +2282,16 @@ mod tests {
         s.dedup_dropped_pmkids = 1;
         s.emit_dropped_unclassified_akm = 1;
         s.emit_dropped_ft_no_context = 1;
-        s.path_22000 = "h.22000".to_owned();
-        s.lines_22000 = 1;
-        s.dropped_22000 = 1;
-        s.path_37100 = "h.37100".to_owned();
-        s.lines_37100 = 1;
-        s.path_combined = "h.all".to_owned();
+        s.path_combined = "h.22000".to_owned();
         s.lines_combined = 1;
-        s.path_wpa1 = "h.wpa1".to_owned();
-        s.path_wpa2 = "h.wpa2".to_owned();
-        s.path_psk_sha256 = "h.s256".to_owned();
-        s.path_ft = "h.ft".to_owned();
-        s.path_psk_sha384 = "h.s384".to_owned();
-        s.path_ft_psk_sha384 = "h.fts384".to_owned();
+        s.dropped_combined = 1;
+        s.path_wpa1_eapol = "h.wpa1-eapol".to_owned();
+        s.path_wpa2_pmkid = "h.wpa2-pmkid".to_owned();
+        s.path_wpa2_eapol = "h.wpa2-eapol".to_owned();
+        s.path_sha256_pmkid = "h.sha256-pmkid".to_owned();
+        s.path_sha256_eapol = "h.sha256-eapol".to_owned();
+        s.path_ft_pmkid = "h.ft-pmkid".to_owned();
+        s.path_ft_eapol = "h.ft-eapol".to_owned();
         s.essid_list_path = "essids.txt".to_owned();
         s.entries_essid_list = 1;
         s.probe_list_path = "probes.txt".to_owned();

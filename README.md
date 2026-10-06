@@ -32,16 +32,15 @@
 - **Garbage-pattern rejection** - nonces / MICs / PMKIDs checked against five pattern classes
 - **Disk-backed fallback** - heavy stores spill to disk at 80 % RAM so corpus-scale runs finish instead of OOMing
 - **Fast** - >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **966 tests**; `make check-all` zero-warning under strict clippy
+- **976 tests**; `make check-all` zero-warning under strict clippy
 
 ---
 
 ## Example
 
 ```sh
-wpawolf --22000-out hashes.22000 --37100-out hashes.37100 capture.pcap
+wpawolf -o hashes.22000 capture.pcap
 hashcat -m 22000 hashes.22000 wordlist.txt
-hashcat -m 37100 hashes.37100 wordlist.txt
 ```
 
 Sample output (stats banner, truncated):
@@ -53,7 +52,7 @@ EAPOL pairs generated (total, pre-dedup)....................: 105
 EAPOL pairs written (post-dedup)............................: 105
   N1E2 challenge (ANonce from M1, EAPOL from M2)............: 22
   N3E2 authorized (ANonce from M3, EAPOL from M2)...........: 18
---22000-out (legacy mode 22000).............................: hashes.22000
+-o / --out (all types, mode 22000)..........................: hashes.22000
   lines written.............................................: 108
 === Phase 5: Report =================================================
 hashes emitted (total)......................................: 147
@@ -92,26 +91,23 @@ Requires a stable Rust toolchain (see `rust-toolchain.toml`).
 ## Examples
 
 ```sh
-# Legacy 22000 + 37100 (what hashcat cracks today).
-wpawolf --22000-out hashes.22000 --37100-out hashes.37100 *.pcap
+# All crackable hashes in mode 22000 format.
+wpawolf -o hashes.22000 *.pcap
 
-# Combined output: every hash in the extended 11-type format.
-wpawolf -o all-hashes.out *.pcap
-
-# Per-AKM split for triage.
-wpawolf --wpa2-out wpa2.out --ft-out ft.out --psk-sha384-out psk384.out capture.pcapng.gz
+# Per-type split for triage.
+wpawolf --wpa2-eapol wpa2.22000 --ft-eapol ft.22000 capture.pcapng.gz
 
 # Maximum extraction: all hash sinks + all auxiliaries.
-wpawolf --22000-out h.22000 --37100-out h.37100 -o all.out \
+wpawolf -o all.22000 \
         -E essids.txt -R probes.txt -W wordlist.txt \
         -I identities.txt -U usernames.txt -D devices.txt \
         --log run.log captures/*
 
 # hcxpcapngtool-shape output via the bundled shortcut.
-wpawolf --22000-out hashes.22000 --strict captures/
+wpawolf -o hashes.22000 --strict captures/
 
 # Custom tight filters: 3 s session window, RC drift 4, single-threaded.
-wpawolf --22000-out hashes.22000 --eapoltimeout 3 --rc-drift 4 \
+wpawolf -o hashes.22000 --eapoltimeout 3 --rc-drift 4 \
         --dedup-hash-combos --threads 1 capture.pcap
 ```
 
@@ -143,17 +139,16 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 
 | Flag | Categories | Cracks in hashcat today? |
 |---|---|---|
-| `--22000-out FILE` | every non-FT hash (`WPA*01*`/`WPA*02*`) | yes - mode 22000 |
-| `--37100-out FILE` | every FT hash (`WPA*03*`/`WPA*04*`) | yes - mode 37100 |
-| `-o`, `--out FILE` | every emitted hash (`WPA*01*..*11*`, per-AKM format) | no - needs proposed mode 22002/22003 |
-| `--wpa1-out FILE` | category 1 | no |
-| `--wpa2-out FILE` | categories 2 + 3 | no |
-| `--psk-sha256-out FILE` | categories 4 + 5 | no |
-| `--ft-out FILE` | categories 6 + 7 | no |
-| `--psk-sha384-out FILE` | categories 8 + 9 | no |
-| `--ft-psk-sha384-out FILE` | categories 10 + 11 | no |
+| `-o FILE` / `--out FILE` | all crackable hashes, types 1-7 (`WPA*01*`-`WPA*04*`) | yes - mode 22000 |
+| `--wpa1-eapol FILE` | type 1 (`WPA*02*`) | yes - mode 22000 |
+| `--wpa2-pmkid FILE` | type 2 (`WPA*01*`) | yes - mode 22000 |
+| `--wpa2-eapol FILE` | type 3 (`WPA*02*`) | yes - mode 22000 |
+| `--sha256-pmkid FILE` | type 4 (`WPA*01*`) | yes - mode 22000 |
+| `--sha256-eapol FILE` | type 5 (`WPA*02*`) | yes - mode 22000 |
+| `--ft-pmkid FILE` | type 6 (`WPA*03*`) | yes - mode 22000 |
+| `--ft-eapol FILE` | type 7 (`WPA*04*`) | yes - mode 22000 |
 
-The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix format described in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). No current hashcat mode reads it; proposed modes 22002/22003 are sketched in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
+All hash sinks emit hashcat mode 22000 format. SHA-384 types (8-11) are classified and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field. See [`HASHCAT.md`](HASHCAT.md) for the type mapping, per-type cracker math, and known limitations.
 
 ### Auxiliary outputs
 
@@ -170,9 +165,9 @@ The per-AKM sinks (`-o` and the six per-family flags) use an eleven-prefix forma
 
 ### `--prefix` and shared `/dev/*` sinks
 
-`--prefix PREFIX` sets a default path for every hash and auxiliary sink at once: each sink left unset writes to `PREFIX` plus its own suffix (`PREFIX.22000`, `PREFIX.37100`, `PREFIX.combined`, `PREFIX.wpa1`, `PREFIX.wpa2`, `PREFIX.psk-sha256`, `PREFIX.ft`, `PREFIX.psk-sha384`, `PREFIX.ft-psk-sha384`, `PREFIX.essid`, `PREFIX.probe`, `PREFIX.wordlist`, `PREFIX.identity`, `PREFIX.username`, `PREFIX.device`, `PREFIX.wordlist-scan`, `PREFIX.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool's `--prefix`.
+`--prefix PREFIX` sets a default path for every hash and auxiliary sink at once: each sink left unset writes to `PREFIX` plus its own suffix (`PREFIX.22000`, `PREFIX.wpa1-eapol`, `PREFIX.wpa2-pmkid`, `PREFIX.wpa2-eapol`, `PREFIX.sha256-pmkid`, `PREFIX.sha256-eapol`, `PREFIX.ft-pmkid`, `PREFIX.ft-eapol`, `PREFIX.essid`, `PREFIX.probe`, `PREFIX.wordlist`, `PREFIX.identity`, `PREFIX.username`, `PREFIX.device`, `PREFIX.wordlist-scan`, `PREFIX.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool's `--prefix`.
 
-Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout --22000-out /dev/stdout -E /dev/stdout capture.pcap` streams the extended hashes, the legacy 22000 hashes, and the ESSID list all to stdout. Real files must still be unique - only `/dev/*` targets are exempt from the duplicate-path check.
+Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout -E /dev/stdout capture.pcap` streams the hashes and the ESSID list to stdout. Real files must still be unique -- only `/dev/*` targets are exempt from the duplicate-path check.
 
 ### Output options
 
@@ -234,9 +229,7 @@ Conventional commit messages (`feat:`, `fix:`, `docs:`); run `make check` before
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, FR-* contracts |
 | [STATS.md](STATS.md) | the stats-banner contract: every line's field, spec source, reason, and drop behaviour |
 | [CHANGELOG.md](CHANGELOG.md) | per-release summary of what shipped |
-| [HASHCAT-CURRENT-FORMATS.md](HASHCAT-CURRENT-FORMATS.md) | modes 22000 + 37100 as they exist in hashcat today |
-| [HASHCAT-NEW-FORMATS.md](HASHCAT-NEW-FORMATS.md) | the 11 hash types: per-AKM cracker math, line layout, message-pair byte |
-| [HASHCAT-PROPOSED-CHANGES.md](HASHCAT-PROPOSED-CHANGES.md) | proposed modes 22002 / 22003 (design, not implemented) |
+| [HASHCAT.md](HASHCAT.md) | mode 22000 format reference, 11-type mapping, per-type cracker math, known limitations |
 
 ---
 

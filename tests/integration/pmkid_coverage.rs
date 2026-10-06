@@ -1,13 +1,13 @@
-//! Integration test: PMKID source coverage and output format validation validation.
+//! Integration test: PMKID source coverage and output format validation.
 //!
 //! Builds a minimal crafted pcap in memory containing two frames:
-//!   1. Assoc Request (S3) with a PSK PMKID in the RSN IE -> WPA\*01\* in 22000 output
-//!   2. FT Auth seq=1 (S5) with an FT-PSK PMKID, MDE, and FTE (R0KH-ID) -> WPA\*03\* in 37100 output
+//!   1. Assoc Request (S3) with a PSK PMKID in the RSN IE -> WPA\*01\* in `-o` output
+//!   2. FT Auth seq=1 (S5) with an FT-PSK PMKID, MDE, and FTE (R0KH-ID) -> WPA\*03\* in `-o` output
 //!
 //! Assertions:
 //!   - At least one WPA\*01\* line produced for the PSK PMKID
 //!   - At least one WPA\*03\* line produced for the FT-PSK PMKID
-//!   - No duplicate lines in either output file
+//!   - No duplicate lines in output
 //!   - Every WPA\*01\* line has exactly 9 `*`-separated fields
 //!   - Every WPA\*03\* line has exactly 12 `*`-separated fields
 
@@ -114,7 +114,7 @@ fn assoc_req_frame(ap: [u8; 6], sta: [u8; 6], pmkid: &[u8; 16]) -> Vec<u8> {
 /// Build an 802.11 FT Authentication frame (subtype=11, algo=2, seq=1) with FT-PSK PMKID.
 ///
 /// Includes MDE (tag 54) and FTE (tag 55) with R0KH-ID subelement so that
-/// `ft.r0khid_len > 0` and the entry is routed to 37100 output.
+/// `ft.r0khid_len > 0` and the entry is routed to FT output (WPA*03*).
 /// Per `frame::parse` mgmt convention: AP=Addr3, STA=Addr2.
 /// [IEEE 802.11-2024] §13.8.3, §9.4.2.45 (MDE), §9.4.2.46 (FTE)
 fn ft_auth_frame(ap: [u8; 6], sta: [u8; 6], pmkid: &[u8; 16]) -> Vec<u8> {
@@ -156,7 +156,7 @@ fn build_fixture_pcap() -> Vec<u8> {
     let frame1 = assoc_req_frame(ap_mac, sta_mac, &psk_pmkid);
     pcap.extend_from_slice(&pcap_packet_record(1000, &frame1));
 
-    // Packet 2: FT Auth seq=1 with FT-PSK PMKID + MDE + FTE -> S5 -> WPA*03* in 37100
+    // Packet 2: FT Auth seq=1 with FT-PSK PMKID + MDE + FTE -> S5 -> WPA*03* in -o
     let frame2 = ft_auth_frame(ap_mac, sta_mac, &ft_pmkid);
     pcap.extend_from_slice(&pcap_packet_record(1001, &frame2));
 
@@ -173,47 +173,41 @@ fn read_nonempty_lines(path: &Path) -> Vec<String> {
 fn pmkid_coverage_format_and_dedup() {
     // Write fixture pcap to a temp path.
     let pcap_path = "/tmp/wpawolf_t1311_fixture.pcap";
-    let out22_path = "/tmp/wpawolf_t1311.22000";
-    let out37_path = "/tmp/wpawolf_t1311.37100";
+    let out_path = "/tmp/wpawolf_t1311.22000";
 
     fs::write(pcap_path, build_fixture_pcap()).expect("write fixture pcap");
 
-    // Run wpawolf with both output modes.
+    // Run wpawolf with -o (both PSK and FT PMKIDs land in the same file).
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", out22_path, "--37100-out", out37_path, pcap_path])
+        .args(["-o", out_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero: {status}");
 
-    let lines22 = read_nonempty_lines(Path::new(out22_path));
-    let lines37 = read_nonempty_lines(Path::new(out37_path));
+    let lines = read_nonempty_lines(Path::new(out_path));
 
-    // --- Dedup: no duplicate lines in either output ---
-    let set22: HashSet<&str> = lines22.iter().map(String::as_str).collect();
-    assert_eq!(lines22.len(), set22.len(), "duplicate lines in 22000 output");
-    let set37: HashSet<&str> = lines37.iter().map(String::as_str).collect();
-    assert_eq!(lines37.len(), set37.len(), "duplicate lines in 37100 output");
+    // --- Dedup: no duplicate lines in output ---
+    let set: HashSet<&str> = lines.iter().map(String::as_str).collect();
+    assert_eq!(lines.len(), set.len(), "duplicate lines in output");
 
     // --- At least one line of each expected type ---
     assert!(
-        lines22.iter().any(|l| l.starts_with("WPA*01*")),
-        "expected at least one WPA*01* line in 22000 output; got: {lines22:?}"
+        lines.iter().any(|l| l.starts_with("WPA*01*")),
+        "expected at least one WPA*01* line in output; got: {lines:?}"
     );
     assert!(
-        lines37.iter().any(|l| l.starts_with("WPA*03*")),
-        "expected at least one WPA*03* line in 37100 output; got: {lines37:?}"
+        lines.iter().any(|l| l.starts_with("WPA*03*")),
+        "expected at least one WPA*03* line in output; got: {lines:?}"
     );
 
     // --- Field counts: WPA*01* must have 9 fields, WPA*03* must have 12 fields ---
     // Format: WPA*{type}*{pmkid}*{ap}*{sta}*{essid}***{mp}         (9 fields)
     //         WPA*{type}*{pmkid}*{ap}*{sta}*{essid}***{mp}*{mdid}*{r0khid}*{r1khid} (12 fields)
-    for line in &lines22 {
+    for line in &lines {
         if line.starts_with("WPA*01*") {
             let count = line.split('*').count();
             assert_eq!(count, 9, "WPA*01* line has wrong field count (expected 9): {line}");
         }
-    }
-    for line in &lines37 {
         if line.starts_with("WPA*03*") || line.starts_with("WPA*04*") {
             let count = line.split('*').count();
             assert_eq!(count, 12, "WPA*03*/04* line has wrong field count (expected 12): {line}");

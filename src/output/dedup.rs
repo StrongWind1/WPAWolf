@@ -100,35 +100,33 @@ impl Default for DedupSet {
 
 /// Identifies which output sink a fingerprint belongs to.
 ///
-/// Lets the per-sink dedup keep one `HashSet<u64>` per configured sink. The same
-/// logical hash is written to multiple sinks (with different per-sink prefixes); each
-/// sink dedups independently so an internal duplicate within a sink is suppressed but
-/// the same hash still appears in every other sink it routes to.
+/// Each per-type sink maps 1:1 to a single wpawolf hash type (1-7). `OutCombined`
+/// (`-o`) receives every crackable hash. All sinks emit hashcat mode 22000 format.
+/// Per-sink dedup keeps one `HashSet<u64>` per configured sink so the same logical
+/// hash can land in multiple sinks without any one suppressing another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SinkId {
-    /// `--22000-out` (legacy hashcat mode 22000, WPA*01*/WPA*02* prefixes).
-    Out22000,
-    /// `--37100-out` (legacy hashcat mode 37100, WPA*03*/WPA*04* prefixes).
-    Out37100,
-    /// `-o`/`--out` (combined 11-type extended, every emitted hash).
+    /// `-o`/`--out` (all crackable types 1-7, mode 22000 format).
     OutCombined,
-    /// `--wpa1-out` (type 1).
-    OutWpa1,
-    /// `--wpa2-out` (types 2 + 3).
-    OutWpa2,
-    /// `--psk-sha256-out` (types 4 + 5).
-    OutPskSha256,
-    /// `--ft-out` (types 6 + 7).
-    OutFt,
-    /// `--psk-sha384-out` (types 8 + 9).
-    OutPskSha384,
-    /// `--ft-psk-sha384-out` (types 10 + 11).
-    OutFtPskSha384,
+    /// `--wpa1-eapol` (type 1).
+    OutWpa1Eapol,
+    /// `--wpa2-pmkid` (type 2).
+    OutWpa2Pmkid,
+    /// `--wpa2-eapol` (type 3).
+    OutWpa2Eapol,
+    /// `--sha256-pmkid` (type 4).
+    OutSha256Pmkid,
+    /// `--sha256-eapol` (type 5).
+    OutSha256Eapol,
+    /// `--ft-pmkid` (type 6).
+    OutFtPmkid,
+    /// `--ft-eapol` (type 7).
+    OutFtEapol,
 }
 
 impl SinkId {
     /// Total number of sink kinds. Kept in sync with the `SinkId` enum manually.
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 8;
 
     /// Numeric index used to address the per-sink `HashSet` array in `PerSinkDedup`.
     #[must_use]
@@ -140,15 +138,14 @@ impl SinkId {
     #[must_use]
     pub const fn from_index(idx: usize) -> Option<Self> {
         match idx {
-            0 => Some(Self::Out22000),
-            1 => Some(Self::Out37100),
-            2 => Some(Self::OutCombined),
-            3 => Some(Self::OutWpa1),
-            4 => Some(Self::OutWpa2),
-            5 => Some(Self::OutPskSha256),
-            6 => Some(Self::OutFt),
-            7 => Some(Self::OutPskSha384),
-            8 => Some(Self::OutFtPskSha384),
+            0 => Some(Self::OutCombined),
+            1 => Some(Self::OutWpa1Eapol),
+            2 => Some(Self::OutWpa2Pmkid),
+            3 => Some(Self::OutWpa2Eapol),
+            4 => Some(Self::OutSha256Pmkid),
+            5 => Some(Self::OutSha256Eapol),
+            6 => Some(Self::OutFtPmkid),
+            7 => Some(Self::OutFtEapol),
             _ => None,
         }
     }

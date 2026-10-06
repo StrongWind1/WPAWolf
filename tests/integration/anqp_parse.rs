@@ -178,7 +178,7 @@ fn anqp_elements_parsed_into_wordlist_only() {
     fs::write(pcap_path, build_fixture_pcap()).expect("write fixture pcap");
 
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash, "-W", wordlist_path, "-E", essid_path, "-R", probe_path, pcap_path])
+        .args(["-o", dummy_hash, "-W", wordlist_path, "-E", essid_path, "-R", probe_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero: {status}");

@@ -6,7 +6,7 @@
 //! auxiliary sets for probe ESSIDs, EAP identities, usernames, and WPS device info.
 //! `AkmMap` records the AKM type observed in Beacon/ProbeResponse RSN IEs so that
 //! subsequent EAPOL frames for the same AP are tagged for correct output routing
-//! (mode 22000 vs 37100). See `ARCHITECTURE.md §3.3` for data structure details and
+//! (mode 22000 type dispatch). See `ARCHITECTURE.md §3.3` for data structure details and
 //! memory budget estimates.
 
 pub mod auxiliary;
@@ -28,7 +28,7 @@ pub use essid::EssidMap;
 /// Two-layer AKM lookup: per-(AP, STA) overrides per-AP default.
 ///
 /// Used during Phase 1 (Collect) to tag EAPOL messages with the correct AKM type for
-/// output routing (mode 22000 vs 37100).
+/// output routing (mode 22000 type dispatch: 01/02 vs 03/04).
 ///
 /// Beacons / `ProbeResponses` populate the AP-wide table via `insert`: `detect_akm`
 /// returns the **first** AKM suite listed in the RSN IE, which is the PSK entry in
@@ -39,8 +39,9 @@ pub use essid::EssidMap;
 /// per-pair table via `insert_sta`. `get_best` prefers the per-pair entry because it
 /// is authoritative for that handshake, falling back to the AP-wide entry when only
 /// a Beacon has been observed. Without this, APs supporting both PSK and FT-PSK route
-/// every handshake to mode 22000, never mode 37100 -- matching the observation that
-/// upstream hcxpcapngtool emits FT-PSK hashes while wpawolf previously did not.
+/// every handshake to type 02 (non-FT EAPOL), never type 04 (FT EAPOL) -- matching
+/// the observation that upstream hcxpcapngtool emits FT-PSK hashes while wpawolf
+/// previously did not.
 ///
 /// AKM suite type bytes are read from the RSN IE AKM Suite List (OUI `00:0F:AC`) per
 /// IEEE 802.11-2024 §9.4.2.24, Table 9-190.

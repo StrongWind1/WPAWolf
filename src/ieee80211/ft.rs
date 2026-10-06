@@ -4,7 +4,7 @@
 //! FT Capability byte per IEEE 802.11-2024 §9.4.2.45, and the Fast Transition Element
 //! (FTE, Element ID 55) for `ANonce`, `SNonce`, MIC, and subelements including R0KH-ID
 //! (subelement type 3) and R1KH-ID (subelement type 1) per §9.4.2.46. These fields
-//! are required for hashcat mode 37100 (FT-PSK) output.
+//! are required for hashcat mode 22000 FT types 03/04 (FT-PSK) output.
 
 use crate::types::FtFields;
 
@@ -127,7 +127,7 @@ pub fn parse_fte(value: &[u8]) -> Option<FteInfo> {
     Some(FteInfo { anonce, snonce, r1khid, r0khid })
 }
 
-/// Extracts FT fields for mode 37100 from tagged parameters.
+/// Extracts FT fields for mode 22000 types 03/04 from tagged parameters.
 ///
 /// Looks for both MDE (id=54) and FTE (id=55). Returns populated `FtFields` only
 /// when both are found. R0KH-ID is truncated to 48 bytes if longer (spec max is 48).

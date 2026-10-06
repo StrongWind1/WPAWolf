@@ -36,9 +36,8 @@ fn binary_path() -> PathBuf {
     PathBuf::from(target).join("target").join("release").join("wpawolf")
 }
 
-/// Run wpawolf with the combined `-o` sink so every extended type
-/// (including PSK-SHA256, FT, and SHA-384 families that bypass `--22000-out`)
-/// is captured.
+/// Run wpawolf with the combined `-o` sink so every crackable type (1-7)
+/// is captured. SHA-384 types (8-11) are classified but not emitted.
 fn run_wpawolf(input: &Path) -> String {
     let bin = binary_path();
     let combined =
@@ -114,11 +113,11 @@ fn rc_endianness_fixtures_emit_le_be_flags_under_rc_drift() {
     assert!(status.success(), "wpawolf --rc-drift failed on the endianness fixtures");
     let content = fs::read_to_string(&combined).unwrap_or_default();
     // OR the message-pair byte (the final `*`-separated field) of every non-FT
-    // EAPOL line (WPA*03*), then check the LE (0x20) and BE (0x40) bits both
+    // EAPOL line (WPA*02*), then check the LE (0x20) and BE (0x40) bits both
     // appear across the corpus output. [FLAG_LE / FLAG_BE -- src/pair/mod.rs]
     let mut flag_bits: u8 = 0;
     for line in content.lines() {
-        if !line.starts_with("WPA*03*") {
+        if !line.starts_with("WPA*02*") {
             continue;
         }
         flag_bits |= u8::from_str_radix(line.rsplit('*').next().unwrap_or(""), 16).unwrap_or(0);
@@ -156,13 +155,12 @@ fn packet_accounting_holds_across_generated_corpus() {
 }
 
 /// The per-hash-type breakdown reports what the capture CONTAINS, not just what
-/// reached an output file. The SHA-384 family (types 8-11) has no legacy sink, so
-/// a run with only `--22000-out` writes none of it -- but the banner must still
-/// report those types as *found* (so an operator knows the capture holds crackable
-/// material their flags did not write). Drives a SHA-384 fixture with only
-/// `--22000-out` and asserts the type appears in the found/written block with
-/// written = 0, that "distinct hash types observed" still counts it, and that the
-/// "found but not written" alert fires.
+/// reached an output file. The SHA-384 family (types 8-11) has no hashcat kernel
+/// (24 B MIC cannot fit mode 22000's 16 B field), so `-o` writes none of it --
+/// but the banner must still report those types as *found* (so an operator knows
+/// the capture holds material that cannot be cracked today). Drives a SHA-384
+/// fixture with `-o` and asserts the type appears in the found block with
+/// written = 0 and the "found but not written" alert fires.
 #[test]
 fn sha384_types_reported_as_found_without_a_matching_sink() {
     let fixture = Path::new(CORPUS_ROOT).join("11_types/type08_psksha384_pmkid.pcap");
@@ -170,23 +168,21 @@ fn sha384_types_reported_as_found_without_a_matching_sink() {
         return; // corpus not generated
     }
     let bin = binary_path();
-    let out22000 =
+    let out_path =
         std::env::temp_dir().join(format!("wpawolf-sha384-{}-{}.22000", std::process::id(), unique_suffix()));
-    let _ = fs::remove_file(&out22000);
-    // ONLY --22000-out -- no -o, no --psk-sha384-out -- so SHA-384 has no sink.
-    let output = Command::new(&bin).arg("--22000-out").arg(&out22000).arg(&fixture).output().expect("spawn wpawolf");
+    let _ = fs::remove_file(&out_path);
+    let output = Command::new(&bin).arg("-o").arg(&out_path).arg(&fixture).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf failed on the SHA-384 fixture");
     let banner = String::from_utf8_lossy(&output.stdout).into_owned();
 
     // The SHA-384 PMKID type is found in the capture even though no sink wrote it.
     assert!(banner.contains("PSK-SHA384-PMKID"), "SHA-384 type missing from found block:\n{banner}");
-    // The inventory counts it; the operator is told to add -o to capture it.
     assert!(banner.contains("hash types found but not written"), "missing found-not-written alert:\n{banner}");
     assert!(banner.contains("distinct hash types observed"), "missing distinct-types row:\n{banner}");
-    // Nothing was written to the only configured sink (lazy: file may not exist).
-    let written = fs::read_to_string(&out22000).map_or(0, |s| s.lines().count());
-    assert_eq!(written, 0, "SHA-384 must not reach the --22000-out sink");
-    let _ = fs::remove_file(&out22000);
+    // Nothing was written (lazy: file may not exist).
+    let written = fs::read_to_string(&out_path).map_or(0, |s| s.lines().count());
+    assert_eq!(written, 0, "SHA-384 must not reach the -o sink");
+    let _ = fs::remove_file(&out_path);
 }
 
 #[test]
@@ -206,6 +202,13 @@ fn every_type_fixture_emits_at_least_one_22000_line() {
     for entry in fs::read_dir(&dir).expect("readdir") {
         let path = entry.expect("entry").path();
         if path.extension().is_none_or(|e| e != "pcap" && e != "pcapng") {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        // SHA-384 types (8-11) are classified but not emitted -- no hashcat kernel.
+        if name.contains("sha384") {
+            let lines = run_wpawolf(&path);
+            assert!(lines.is_empty(), "{} should produce no output (SHA-384 not emitted)", path.display());
             continue;
         }
         let lines = run_wpawolf(&path);
@@ -512,8 +515,8 @@ fn non_emitting_s_sites_increment_their_stats_counter() {
 /// File B alone has no Beacon/Probe Response, so the AP's SSID is unresolved
 /// and wpawolf drops every uncrackable hash (logging the AP under
 /// `[essid_not_found_summary]` in --log instead). The joint A+B run resolves
-/// the SSID from file A's Beacon and emits both the M1 PMKID line (`WPA*02*`)
-/// and the EAPOL pair line (`WPA*03*`).
+/// the SSID from file A's Beacon and emits both the M1 PMKID line (`WPA*01*`)
+/// and the EAPOL pair line (`WPA*02*`).
 #[test]
 fn multi_file_pairing_resolves_across_files() {
     let path_a = Path::new(CORPUS_ROOT).join("edge/multi_file_a.pcap");
@@ -528,8 +531,8 @@ fn multi_file_pairing_resolves_across_files() {
 
     // File A in isolation: Beacon supplies the SSID and the M1 carries a PMKID;
     // emit the M1 PMKID line. No EAPOL pair (no M2/M3/M4 in this file).
-    assert!(out_alone_a.contains("WPA*02*"), "file A alone should emit the M1 PMKID line");
-    assert!(!out_alone_a.contains("WPA*03*"), "file A alone has no M2/M3/M4 -- no EAPOL pair should emit");
+    assert!(out_alone_a.contains("WPA*01*"), "file A alone should emit the M1 PMKID line");
+    assert!(!out_alone_a.contains("WPA*02*"), "file A alone has no M2/M3/M4 -- no EAPOL pair should emit");
 
     // File B in isolation: no Beacon means no SSID; uncrackable hashes are
     // dropped, so no `WPA*` lines should appear. The cross-file branch below
@@ -543,8 +546,8 @@ fn multi_file_pairing_resolves_across_files() {
 
     // Joint run: file A's Beacon resolves the SSID for file B's frames, so
     // both the M1 PMKID line and the EAPOL pair line ship.
-    assert!(out_joint.contains("WPA*02*"), "joint run missing the M1 PMKID line (cross-file PMKID resolution broke)");
-    assert!(out_joint.contains("WPA*03*"), "joint run missing the EAPOL pair line (cross-file pairing broke)");
+    assert!(out_joint.contains("WPA*01*"), "joint run missing the M1 PMKID line (cross-file PMKID resolution broke)");
+    assert!(out_joint.contains("WPA*02*"), "joint run missing the EAPOL pair line (cross-file pairing broke)");
 
     // Joint run must produce strictly more lines than file A alone (file B
     // alone produces zero).

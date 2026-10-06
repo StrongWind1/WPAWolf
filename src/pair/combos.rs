@@ -563,7 +563,7 @@ fn select_smart(
     }
     stats.smart_uncrackable_dropped += dropped;
     // M2/M4 survivors are non-APLESS (N1E2 / N3E2 / N1E4 / N3E4), so an FT session
-    // with any M2/M4 MIC retains a 37100-crackable survivor -- clause F holds by
+    // with any M2/M4 MIC retains an FT-crackable survivor -- clause F holds by
     // construction.
     if eapol_msg.akm.is_ft() {
         stats.smart_ft_nonapless_kept += 1;
@@ -694,7 +694,7 @@ pub struct PairFilterStats {
     /// `--smart`: MIC-frames kept against all candidates because the MIC did not
     /// uniquely RC-link to one instance (rc=1-pinned / cross-seed). Informational.
     pub smart_ambiguous_kept: u64,
-    /// `--smart`: FT (mode 37100) MIC-frames where a non-APLESS survivor was
+    /// `--smart`: FT (mode 22000 type 04) MIC-frames where a non-APLESS survivor was
     /// retained after pruning, satisfying clause F. Informational.
     pub smart_ft_nonapless_kept: u64,
 }

@@ -39,7 +39,7 @@ pub struct PmkidEntry {
     pub pmkid: [u8; 16],
     /// Where this PMKID was extracted from.
     pub source: PmkidSource,
-    /// AKM type for correct hash-line routing (22000 vs 37100).
+    /// AKM type for correct hash-line routing (mode 22000 type dispatch).
     pub akm: AkmType,
     /// FT fields, present only for FT-PSK PMKIDs. Boxed because >99.9% of entries
     /// are non-FT.

@@ -267,7 +267,7 @@ fn data_frame_uplink(ap: [u8; 6], sta: [u8; 6], body: &[u8]) -> Vec<u8> {
 /// Builds the four EAPOL-Key data frames of a WPA2-PSK 4-way handshake.
 ///
 /// M1 carries a PMKID KDE so both `WPA*01*` (PMKID line) and `WPA*02*` (EAPOL
-/// pair line) reach the legacy `--22000-out` sink. M4 carries the same SNonce
+/// pair line) reach the `-o` sink. M4 carries the same SNonce
 /// as M2 (matches non-conforming firmware that copies M2's SNonce into M4 per
 /// [IEEE 802.11-2024] §12.7.6.5 NOTE 9). The spec-mandated all-zero M4 Key
 /// Nonce is dropped at extract because the resulting hash line is

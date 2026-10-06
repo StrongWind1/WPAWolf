@@ -6,7 +6,7 @@ This document is the canonical specification for the wpawolf codebase. Source fi
 
 ## §1  Project scope
 
-wpawolf is a pure-Rust rewrite of `hcxpcapngtool` that reads pcap, pcapng, and gzip-compressed captures and emits hashcat mode 22000 and 37100 hash lines. Scope: WPA1, WPA2, and WPA3 personal-PSK handshake extraction (plain PSK, PSK-SHA256/384, and FT-PSK / 802.11r) plus PMKID extraction from every spec-defined location. Enterprise (EAP-TLS / PEAP), pure SAE, OWE, WEP, DPP / Wi-Fi Easy Connect, and inner-EAP hash harvest are out of scope for v1. DPP frames provision credentials over public-key exchange instead of a PSK handshake, so they yield nothing crackable as a mode 22000 / 37100 hash and are not parsed beyond the generic action-frame counter.
+wpawolf is a pure-Rust rewrite of `hcxpcapngtool` that reads pcap, pcapng, and gzip-compressed captures and emits hashcat mode 22000 hash lines (types 01-04: PMKID, EAPOL, FT PMKID, FT EAPOL). Scope: WPA1, WPA2, and WPA3 personal-PSK handshake extraction (plain PSK, PSK-SHA256/384, and FT-PSK / 802.11r) plus PMKID extraction from every spec-defined location. Enterprise (EAP-TLS / PEAP), pure SAE, OWE, WEP, DPP / Wi-Fi Easy Connect, and inner-EAP hash harvest are out of scope for v1. DPP frames provision credentials over public-key exchange instead of a PSK handshake, so they yield nothing crackable as a mode 22000 hash and are not parsed beyond the generic action-frame counter.
 
 Primary design goal: **never miss an extractable hash**. Defaults are unfiltered; operators narrow output via output-filter flags. Every hash a conformant reference extractor produces must also appear in wpawolf output (`tests/integration/superset_test.rs` is the regression oracle).
 
@@ -14,10 +14,10 @@ File-only tool: no capture, no injection, no cracking. Authorised use only.
 
 ### Tool-landscape niche
 
-| Tool | Lang | pcap/pcapng/gzip | WPA2-PSK | PMKID | FT-PSK | mode 22000 | mode 37100 | Dedup |
-|---|---|---|---|---|---|---|---|---|
-| **wpawolf** | Rust | yes / yes / yes | yes | yes | yes (no 512 B parse gate) | yes | yes | global SipHash set |
-| **hcxpcapngtool** | C | yes / yes / yes | yes | yes | yes (parse cap 512 B; legacy hccap/hccapx output paths drop > 255 B) | yes | yes | full dedup at write time (equivalent to wpawolf) |
+| Tool | Lang | pcap/pcapng/gzip | WPA2-PSK | PMKID | FT-PSK | mode 22000 | Dedup |
+|---|---|---|---|---|---|---|---|
+| **wpawolf** | Rust | yes / yes / yes | yes | yes | yes (no 512 B parse gate) | yes (types 01-04) | global SipHash set |
+| **hcxpcapngtool** | C | yes / yes / yes | yes | yes | yes (parse cap 512 B; legacy hccap/hccapx output paths drop > 255 B) | yes | full dedup at write time (equivalent to wpawolf) |
 | `wpapcap2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
 | `wlan2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
 
@@ -59,31 +59,23 @@ The eleven canonical names (used verbatim in stats, source code, and output line
 | 10 | FT-PSK-SHA384-PMKID       | 19 (`00:0F:AC:13`) | n/a |
 | 11 | FT-PSK-SHA384-EAPOL       | 19               | 0   |
 
-**See [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) for the deep dive:** the encoding rules, per-type cracker math (PBKDF2 -> PMK -> PMKID / PTK / MIC paths), the differential view between adjacent rows, the shared-subtree map a cracker can cache, the complete hash-line field layout including the 24 B MIC SHA-384 split, the full message-pair byte specification (combo discriminant + APLESS / NC / LE / BE flag bits, plus the separate PMKID-line PMKID_AP / PMKID_CLIENT / PMKID_APPSK256 byte values), and the N#E# vs M#E# notation translation table.
-
-For how the 11 types currently route through hashcat modes 22000 and 37100 (legacy four-prefix scheme, the `keyver` trick, support matrix per row), see [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md). For a sketch of two new hashcat modes (22002 passphrase-side, 22003 PMK-side) that consume all 11 types, see [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md).
+**See [`HASHCAT.md`](HASHCAT.md) for the deep dive:** the mode 22000 format reference (4 type prefixes, 6 aux kernels), the encoding rules, per-type cracker math (PBKDF2 -> PMK -> PMKID / PTK / MIC paths), the definitive wpawolf-to-hashcat type mapping, the message-pair byte specification, and known limitations (PSK-SHA256 PMKID miscrack, SHA-384 inexpressible).
 
 For how `wpawolf` writes lines and which CLI flags route hashes to which sink, see [`README.md`](README.md).
 
 ### §2.2  Where the deep detail lives
 
-The deep per-type detail (PBKDF2 shared foundation, per-type post-PMK computation, hash-line format with field widths, differential view between adjacent rows, shared-subtree overlap map, and the complete message-pair byte specification including PMKID-line semantics) lives in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md). How those 11 types are reached through current hashcat (modes 22000 + 37100, the four legacy prefixes, the `keyver` trick, per-row support matrix) is in [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md). The new-modules sketch (22002 / 22003) for future kernels that consume all 11 types is in [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md). The operator-facing CLI / output-sink reference lives in [`README.md`](README.md). This document focuses on `wpawolf`'s architecture decisions only.
+The deep per-type detail (PBKDF2 shared foundation, per-type post-PMK computation, hash-line format with field widths, the complete message-pair byte specification including PMKID-line semantics, and the type-mapping table showing which hashcat kernel cracks each type) lives in [`HASHCAT.md`](HASHCAT.md). The operator-facing CLI / output-sink reference lives in [`README.md`](README.md). This document focuses on `wpawolf`'s architecture decisions only.
 
 | Looking for...                                       | Read this                                    |
 |------------------------------------------------------|----------------------------------------------|
-| Cracker math for type N                              | [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §4 |
-| Hash-line field layout / widths                      | [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §5 |
-| N#E# vs M#E# notation; what triggers each combo      | [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §6 |
-| Message-pair byte spec (EAPOL + PMKID)               | [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §7 |
-| Current hashcat 4-prefix scheme + per-row support    | [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §3-§8 |
-| `keyver` byte trick (how WPA*02* fans out)           | [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §4 |
-| What a future hashcat module must implement          | [`HASHCAT-PROPOSED-CHANGES.md`](HASHCAT-PROPOSED-CHANGES.md) §3-§6 |
+| Mode 22000 format + type mapping + cracker math      | [`HASHCAT.md`](HASHCAT.md) §3-§5 |
+| Message-pair byte spec (EAPOL + PMKID)               | [`HASHCAT.md`](HASHCAT.md) §6 |
+| Known limitations (PSK-SHA256 PMKID, SHA-384)        | [`HASHCAT.md`](HASHCAT.md) §7 |
 | `wpawolf` CLI flags, output sinks, examples          | [`README.md`](README.md) |
-| How `wpawolf` stays drop-in for current hashcat      | [`README.md`](README.md) + [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md) §7 |
 | Current state and quality bar                        | [`CHANGELOG.md`](CHANGELOG.md) |
 
-The 11 types differ in exactly four dimensions after the PMK step: **PMKID hash primitive**, **PTK KDF**, **KCK size**, and **MIC algorithm
-+ size**. FT variants (types 6, 7, 10, 11) also add an intermediate PMK-R0 -> PMK-R1 hierarchy step before the PTK, which requires MDID, R0KH-ID, and R1KH-ID in the hash line. See `HASHCAT-NEW-FORMATS.md` §4 for the algebra.
+The 11 types differ in exactly four dimensions after the PMK step: **PMKID hash primitive**, **PTK KDF**, **KCK size**, and **MIC algorithm + size**. FT variants (types 6, 7, 10, 11) also add an intermediate PMK-R0 -> PMK-R1 hierarchy step before the PTK, which requires MDID, R0KH-ID, and R1KH-ID in the hash line. See `HASHCAT.md` §5 for the algebra.
 
 ### §2.3  Type-routing decision tree
 
@@ -247,7 +239,7 @@ Items 1-5, 9, 10 are all live transport vectors with end-to-end coverage. Items 
 
 `src/output/`:
 
-- `hashcat.rs` formats `WPA*01*` through `WPA*11*` lines. The MIC field in `<EAPOL>` is zeroed at format time per FR-OUT-8.
+- `hashcat.rs` formats `WPA*01*` through `WPA*04*` lines (mode 22000). The MIC field in `<EAPOL>` is zeroed at format time per FR-OUT-8.
 - `wordlists.rs` writes `-E`, `-R`, `-W`, `-I`, `-U` files in autohex form (NUL trim per `crate::types::trim_nul_padding`).
 - `device_info.rs` writes `-D` (deduped by MAC, sorted by manufacturer).
 - `dedup.rs` is the in-memory `PerSinkDedup` (one `HashSet<u64>` of SipHash-1-3 fingerprints per sink). PMKID and EAPOL fingerprints have disjoint field sets prefixed by the hash-line kind byte (see §7). Under memory pressure it hands off to `disk_dedup.rs`: hash lines are written through to their files immediately (accepting transient duplicates) while each line's `(0-based line number, fingerprint)` is appended to one of 256 per-sink bucket files (`fingerprint % 256`), and a post-run cleaning pass rewrites every file dropping all but the first occurrence of each fingerprint. The handoff happens either before Phase 4 from the pre-pass cost estimate (`would_spill`), or mid-emission: the `MemWatcher` sets a `disk_trip` flag when sampled RSS crosses 80 %, and the emit loop polls it, seeds the new `DiskDedup` with each sink's current line count (`len_for_sink`), flushes the in-memory fingerprints into the buckets as `u64::MAX` sentinel records (so they count as the already-written first occurrence), drops the in-memory set, and write-throughs from there. The watcher only signals; the emit loop performs the switch.
@@ -294,7 +286,7 @@ The memory cost is acceptable because EAPOL frames are a tiny fraction of total 
 
 ### 3. No EAPOL size gate
 
-Upstream drops EAPOL frames > 255 B via `EAPOL_AUTHLEN_OLD_MAX`. wpawolf emits every valid EAPOL-Key frame regardless of length. FT-PSK M2 frames in real captures reach 510 B because the Key Data contains a full RSN IE plus MDE plus FTE; hcxtools silently truncates these. wpawolf does not. If hashcat refuses an oversized frame today, that is hashcat's bug to fix, not wpawolf's; mode 37100 PR #4645 raised the buffer to 1024 bytes for exactly this reason.
+Upstream drops EAPOL frames > 255 B via `EAPOL_AUTHLEN_OLD_MAX`. wpawolf emits every valid EAPOL-Key frame regardless of length. FT-PSK M2 frames in real captures reach 510 B because the Key Data contains a full RSN IE plus MDE plus FTE; hcxtools silently truncates these. wpawolf does not. If hashcat refuses an oversized frame today, that is hashcat's bug to fix, not wpawolf's; upstream hashcat raised `WPA_EAPOL_LEN_MAX` to 512 bytes for exactly this reason.
 
 ### 4. Relay frames are first-class
 
@@ -501,7 +493,7 @@ When KDV = 0, the MIC algorithm is implicit from the negotiated AKM:
 | 22, 23 (802.1X-SHA384) | HMAC-SHA-384, **24 B** |
 | 24, 25 (SAE H2E) | AES-128-CMAC, 16 B |
 
-AKMs 19 and 20 produce a 24-byte MIC. Existing hashcat mode 22000 expects a 16-byte MIC; emitting a truncated 24-byte MIC would be the same silent wrong-answer trap as the AKM-6 PMKID SHA1/SHA256 mismatch. These AKMs are counted in stats and routed to the per-AKM format-only sinks `--psk-sha384-out` (types 8/9) and `--ft-psk-sha384-out` (types 10/11); the legacy `--22000-out` and `--37100-out` sinks deliberately skip them.
+AKMs 19 and 20 produce a 24-byte MIC. Hashcat mode 22000 expects a 16-byte MIC; emitting a truncated 24-byte MIC would be the same silent wrong-answer trap as the AKM-6 PMKID SHA1/SHA256 mismatch. These AKMs are classified and counted in stats but not emitted to any hashcat sink -- the 24 B MIC cannot fit mode 22000's 16 B field.
 
 ### §5.5  What the cracker verifies
 
@@ -612,9 +604,9 @@ For FT-PSK (AKM 4 / AKM 19) the FT-PTK derivation pins both nonces and the BSSID
 FT-PTK = KDF-Hash(PMK-R1, "FT-PTK", SNonce || ANonce || BSSID || SPA)
 ```
 
-A given EAPOL frame's MIC is therefore verifiable only by reconstructing that exact `(SNonce, ANonce, BSSID, SPA)` quadruple. hashcat's mode 37100 kernel verifies the line as written; it reads the ANonce from the line and the SNonce from the embedded EAPOL body. Combos where those two nonce sources disagree (typical of M3-derived APless pairs that wpawolf emits for max coverage) cannot pass mode 37100's MIC check no matter the PSK.
+A given EAPOL frame's MIC is therefore verifiable only by reconstructing that exact `(SNonce, ANonce, BSSID, SPA)` quadruple. hashcat's mode 22000 aux6 kernel (FT EAPOL, type 04) verifies the line as written; it reads the ANonce from the line and the SNonce from the embedded EAPOL body. Combos where those two nonce sources disagree (typical of M3-derived APless pairs that wpawolf emits for max coverage) cannot pass mode 22000's FT MIC check no matter the PSK.
 
-This is intentional and not a bug. wpawolf still emits all six N#E# combos per FR-PAIR-* (max coverage, "never miss a hash") because (a) future hashcat versions may add APless FT MIC verification, and (b) operators may post-process the file with a different cracker. The generated test corpus's t06 / t07 fixtures consequently produce four EAPOL lines each, of which exactly two crack with `hashcat -m 37100`. That ratio is the expected outcome, not a corpus defect.
+This is intentional and not a bug. wpawolf still emits all six N#E# combos per FR-PAIR-* (max coverage, "never miss a hash") because (a) future hashcat versions may add APless FT MIC verification, and (b) operators may post-process the file with a different cracker. The generated test corpus's t06 / t07 fixtures consequently produce four EAPOL lines each, of which exactly two crack with `hashcat -m 22000`. That ratio is the expected outcome, not a corpus defect.
 
 If an operator wants only the verifiable subset for FT, the simplest mechanical filter is:
 
@@ -683,7 +675,7 @@ WDS classification runs in **Phase 1.5** (`src/extract/wds.rs`) after the `essid
 
 ### §5.13  Why FT-PSK frames break hcxtools
 
-FT-PSK M2 frames routinely reach 400-510 B because the Key Data contains a full RSN IE plus MDE (5 B) plus FTE (90-200 B). hcxpcapngtool's `EAPOL_AUTHLEN_OLD_MAX = 255` silently drops these. wpawolf has no size gate (§4 invariant 3); every valid EAPOL frame is stored and emitted. hashcat mode 37100 PR #4645 raised its buffer to 1024 B; captures made today crack once the PR is fully merged.
+FT-PSK M2 frames routinely reach 400-510 B because the Key Data contains a full RSN IE plus MDE (5 B) plus FTE (90-200 B). hcxpcapngtool's `EAPOL_AUTHLEN_OLD_MAX = 255` silently drops these. wpawolf has no size gate (§4 invariant 3); every valid EAPOL frame is stored and emitted. Upstream hashcat raised `WPA_EAPOL_LEN_MAX` to 512 B; captures made today crack with `hashcat -m 22000`.
 
 ---
 
@@ -710,7 +702,7 @@ Per `[IEEE 802.11-2024]` §12.7.1.3 the HMAC primitive varies by AKM:
 |-----|----------|------|---------------|------------|------------|
 | WPA1 | `00-50-F2:01` | WPA-PSK (TKIP) | none: WPA1 has no PMKID | PBKDF2-SHA1 | n/a |
 | **2** | `00-0F-AC:2` | **WPA2-PSK** | `Truncate-128(HMAC-SHA1(PMK, "PMK Name" \|\| AA \|\| SPA))` | PBKDF2-SHA1 | yes: hashcat 22000 |
-| 4 | `00-0F-AC:4` | FT-PSK-SHA256 | Two-step FT chain (see §6.3) | PBKDF2-SHA1 -> FT KDF | yes: hashcat 37100 |
+| 4 | `00-0F-AC:4` | FT-PSK-SHA256 | Two-step FT chain (see §6.3) | PBKDF2-SHA1 -> FT KDF | yes: hashcat 22000 type 03/04 |
 | **6** | `00-0F-AC:6` | PSK-SHA256 | `Truncate-128(HMAC-SHA256(PMK, "PMK Name" \|\| AA \|\| SPA))` | PBKDF2-SHA1 | yes via EAPOL; PMKID broken in hashcat (§6.7) |
 | 1 | `00-0F-AC:1` | 802.1X-SHA1 | HMAC-SHA1 | EAP MSK | no: PMK from server |
 | 3 | `00-0F-AC:3` | FT-802.1X | FT chain | EAP MSK | no |
@@ -747,27 +739,27 @@ PMKID  =  PMK-R1-Name  =  Truncate-128(SHA256("FT-R1N" || PMK-R0-Name || R1KH-ID
 
 For AKM 19 (FT-PSK-SHA384) the same chain runs on KDF-SHA384 throughout.
 
-To emit a crackable `WPA*06*` (FT-PSK PMKID) line we need:
+To emit a crackable `WPA*03*` (FT-PSK PMKID) line we need:
 
 - **MDID** (2 B): Mobility Domain ID, from MDE (tag 54).
 - **R0KH-ID** (1-48 B): R0 Key Holder ID, from FTE (tag 55) subelement 3.
 - **R1KH-ID** (6 B): R1 Key Holder ID, from FTE subelement 1 (usually = AP MAC).
 
-All three must appear in the hash line for hashcat 37100 to walk the chain. wpawolf's FT extraction is in `src/ieee80211/ft.rs`.
+All three must appear in the hash line for hashcat mode 22000 type 03 to walk the chain. wpawolf's FT extraction is in `src/ieee80211/ft.rs`.
 
 ### §6.4  AKM routing decision
 
-After extraction, the PMKID is routed based on the AKM detected from the Beacon / ProbeResponse RSN IE for the AP's BSSID, with the per-`(AP, STA)` observed AKM (from the M2 RSN IE in Key Data) winning over the AP-wide default. If no Beacon was captured for the AP (AKM is Unknown), wpawolf defaults to 22000 output; the PMKID is not discarded just because the AKM is unknown.
+After extraction, the PMKID is routed based on the AKM detected from the Beacon / ProbeResponse RSN IE for the AP's BSSID, with the per-`(AP, STA)` observed AKM (from the M2 RSN IE in Key Data) winning over the AP-wide default. If no Beacon was captured for the AP (AKM is Unknown), wpawolf defaults to WPA*01* (type 01) output; the PMKID is not discarded just because the AKM is unknown.
 
 | Detected AKM | Output sinks | hash type code | Notes |
 |--------------|--------------|----------------|-------|
-| AKM 2 (PSK) | `--22000-out`, `-o`, `--wpa2-out` | type 02 | Primary target |
-| AKM 6 (PSK-SHA256) | `--22000-out`, `-o`, `--psk-sha256-out` | type 04 | hashcat aux4 currently broken (§6.7) |
-| AKM 4 (FT-PSK) with FT fields | `--37100-out`, `-o`, `--ft-out` | type 06 | Requires MDID + R0KH-ID + R1KH-ID |
-| AKM 20 (PSK-SHA384) | `-o`, `--psk-sha384-out` | type 08 | Needs HMAC-SHA384 PMKID kernel |
-| AKM 19 (FT-PSK-SHA384) with FT fields | `-o`, `--ft-psk-sha384-out` | type 10 | Needs FT-KDF-SHA384 chain |
+| AKM 2 (PSK) | `-o`, `--wpa2-pmkid` | type 02, `WPA*01*` | Primary target |
+| AKM 6 (PSK-SHA256) | `-o`, `--sha256-pmkid` | type 04, `WPA*01*` | hashcat aux4 runs SHA1 only; emits but does not crack |
+| AKM 4 (FT-PSK) with FT fields | `-o`, `--ft-pmkid` | type 06, `WPA*03*` | Requires MDID + R0KH-ID + R1KH-ID |
+| AKM 20 (PSK-SHA384) | *(not emitted)* | type 08 | 24 B MIC, no hashcat kernel |
+| AKM 19 (FT-PSK-SHA384) with FT fields | *(not emitted)* | type 10 | 24 B MIC, no hashcat kernel |
 | AKM 1, 3, 5, 8, 9, 11-18, 21, 24, 25 | dropped at emit | n/a | non-PSK AKM -> `AkmType::NotPsk`; a KDV-2/3 handshake / PMKID from one is dropped and counted in `emit_dropped_notpsk_akm` |
-| Unknown (no AKM evidence) | `--22000-out`, `-o`, `--wpa2-out` | type 02 | optimistic default (never-miss); distinct from `NotPsk` |
+| Unknown (no AKM evidence) | `-o`, `--wpa2-pmkid` | type 02, `WPA*01*` | optimistic default (never-miss); distinct from `NotPsk` |
 
 This is always-on; there is no AKM filter flag. Enterprise (802.1X / FT-802.1X / CCKM) and SAE networks **do** run a 4-way EAPOL-Key handshake -- their PMK just comes from an EAP / SAE exchange rather than `PBKDF2(PSK, SSID)` -- so wpawolf parses those frames. When the AP advertises a non-PSK AKM and **no** PSK-family suite (2/4/6/19/20), the AKM resolves to `AkmType::NotPsk` and the handshake / PMKID is dropped at emit (counted in `emit_dropped_notpsk_akm`) rather than emitted as an uncrackable PSK line. A mixed PSK + 802.1X AP and a WPA3-transition PSK + SAE AP still emit their genuine PSK clients, because the discriminator is per-`(AP, STA)` and keyed on the presence of a PSK suite, not on the KDV byte. (Earlier releases routed by KDV and mis-emitted these as PSK types -- the false-positive that prompted the `NotPsk` classifier.)
 
@@ -787,7 +779,7 @@ Per-location notes follow. Each maps to a `PmkidSource` enum variant. The summar
 - **S3: Association Request RSN IE.** Spec: §9.4.2.24.5, §12.6.8.3. `PmkidSource::AssocRequest`.
 - **S4: Reassociation Request RSN IE.** Spec: §9.4.2.24.5, §13.4, §13.8.3. `PmkidSource::ReassocRequest`. For FT over-the-air roaming the PMKID list carries PMKR1Name and MDE + FTE accompany.
 - **S5: FT Auth seq=1.** Algorithm = 2 (FBT). Spec: §13.8.3. `PmkidSource::FtAuthStaToAp`. RSNE list carries PMKR0Name; FTE carries R0KH-ID and ANonce; MDE carries MDID.
-- **S6: FT Auth seq=2.** Algorithm = 2. Spec: §13.8.3. `PmkidSource::FtAuthApToSta`. RSNE list carries PMKR1Name; FTE carries R0KH-ID (subelement 3) and R1KH-ID (subelement 1), everything needed to construct a `WPA*06*` line.
+- **S6: FT Auth seq=2.** Algorithm = 2. Spec: §13.8.3. `PmkidSource::FtAuthApToSta`. RSNE list carries PMKR1Name; FTE carries R0KH-ID (subelement 3) and R1KH-ID (subelement 1), everything needed to construct a `WPA*03*` (FT PMKID) line.
 - **S7: FILS Auth seq=1.** Algorithm = 4 or 5. Spec: §12.11.2.3.2. `PmkidSource::FilsAuthStaToAp`. PMK from EAP rMSK; not PSK-crackable.
 - **S8: FILS Auth seq=2.** Spec: §12.11.2.3.4. `PmkidSource::FilsAuthApToSta`. AP echoes the chosen PMKID.
 - **S9: PASN Auth seq=1.** Spec: §12.13.1-2. `PmkidSource::PasnAuthStaToAp`. Crackable only when base AKMP is PSK or FT-PSK.
@@ -867,7 +859,7 @@ Every PMKID passes through two gates at store time and one gate at emit time:
 
 1. **Garbage-pattern rejection** (§4 invariant 7): a 16-byte PMKID matching `null` (all-zero), `ff` (all-0xFF), `repeat_1` (all-same-byte), `repeat_2` (2-byte period), or `repeat_4` (4-byte period) is rejected unconditionally. Separate counters `null_pmkid_rejected`, `ff_pmkid_rejected`, and `repeat_pmkid_rejected` surface the breakdown.
 2. **Per-(AP, STA) deduplication**: if the same 16-byte PMKID value has already been stored for this `(AP MAC, STA MAC)` pair, the duplicate is dropped silently. Different PMKID values for the same pair are all kept.
-3. **Length sanity for FT**: emitting `WPA*06*` / `WPA*10*` requires non-empty MDID, R0KH-ID, and R1KH-ID. PMKIDs from FT locations with missing FT material are stored but not emitted to `--37100-out` / `--ft-out` / `--ft-psk-sha384-out`.
+3. **Length sanity for FT**: emitting `WPA*03*` (FT PMKID) requires non-empty MDID, R0KH-ID, and R1KH-ID. PMKIDs from FT locations with missing FT material are stored but not emitted.
 
 hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-zero or all-0xFF, treating these as PLCP bit errors. wpawolf's whole-field period-2 / period-4 checks cover the deterministic synthetic-pattern cases that motivated hcx's window heuristic; we do not extend the check to arbitrary 4-byte windows because that becomes heuristic (a real HMAC output occasionally has an internal 4-byte run that matches `null` or `ff` but is not garbage as a whole).
 
@@ -875,7 +867,7 @@ hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-
 
 **AKM 6 PMKID broken in hashcat.** hashcat mode 22000's PMKID path (`m22000_aux4`) currently uses HMAC-SHA1 for all PMKID lines regardless of AKM. AKM 6 PMKIDs require HMAC-SHA256, so the correct passphrase produces a SHA256-based PMKID that never matches the SHA1-based computation; hashcat reports "Exhausted" with no error. Workaround: attack via the EAPOL MIC instead (mode 22000's EAPOL path `m22000_aux3` correctly handles AKM 6 with AES-128-CMAC). wpawolf emits the type-04 PMKID line regardless so it will work if/when hashcat is fixed.
 
-**AKMs 19, 20 (SHA-384 PSK).** PMK derivable from passphrase (PBKDF2-SHA1, same as AKM 2) but MIC uses HMAC-SHA-384 (24 B) and no hashcat module exists. wpawolf captures and stores the PMKID and routes the lines to `--psk-sha384-out` (type 8/9) or `--ft-psk-sha384-out` (type 10/11). See the §7 compatibility matrix for hashcat support status.
+**AKMs 19, 20 (SHA-384 PSK).** PMK derivable from passphrase (PBKDF2-SHA1, same as AKM 2) but MIC uses HMAC-SHA-384 (24 B) and no hashcat kernel exists. wpawolf classifies and counts the PMKID but does not emit it -- the 24 B MIC cannot fit mode 22000's 16 B field. See the §7 compatibility matrix and `HASHCAT.md` §7 for details.
 
 **FT Action frames and PMF.** FT Action frames (category 6) are in the robust management frame set and *can* be PMF-encrypted. An encrypted FT Action frame is opaque; wpawolf cannot extract the PMKID. The FT over-the-air path (S5 / S6, using Authentication frames) is not PMF-protected so it is always accessible; S11-S13 are captured opportunistically.
 
@@ -887,35 +879,35 @@ hcxtools additionally rejects PMKIDs where any consecutive 4-byte window is all-
 
 ## §7  Hashcat output: architectural decisions
 
-The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MAC / ESSID encoding) live in [`HASHCAT-NEW-FORMATS.md`](HASHCAT-NEW-FORMATS.md) §5. How the 11 types currently route through hashcat modes 22000 / 37100 lives in [`HASHCAT-CURRENT-FORMATS.md`](HASHCAT-CURRENT-FORMATS.md). The complete operator-facing CLI / sink reference (every `--*-out` flag, routing rules, stats output) lives in [`README.md`](README.md). This section captures only the architecture-level decisions behind the output stage.
+The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MAC / ESSID encoding), the wpawolf-to-hashcat type mapping, and the message-pair byte specification live in [`HASHCAT.md`](HASHCAT.md). The complete operator-facing CLI / sink reference lives in [`README.md`](README.md). This section captures only the architecture-level decisions behind the output stage.
 
-**Per-sink fan-out with per-sink dedup.** A single classified hash is written to up to three sinks per emission: the legacy `--22000-out` *or* `--37100-out` (chosen by `is_ft`), the per-AKM-family per-AKM sink for the hash's row (`--wpa1-out` ... `--ft-psk-sha384-out`), and the combined `-o` per-AKM sink. Each sink keeps its own dedup `HashSet<u64>` so a logical hash that fans out to N sinks lands once per sink without one suppressing another. The same SipHash-1-3 fingerprint scheme is used across all sinks (kind byte + PMKID/MIC + AP + STA + nonce/eapol + ESSID + message-pair); see §4 invariant 5.
+**Per-sink fan-out with per-sink dedup.** A single classified hash is written to up to two sinks per emission: the combined `-o` sink (all crackable types 1-7) and the per-type sink for the hash's wpawolf type (`--wpa1-eapol` ... `--ft-eapol`). SHA-384 types (8-11) are classified but not emitted. Each sink keeps its own dedup `HashSet<u64>` so a logical hash that fans out to N sinks lands once per sink without one suppressing another. The same SipHash-1-3 fingerprint scheme is used across all sinks (kind byte + PMKID/MIC + AP + STA + nonce/eapol + ESSID + message-pair); see §4 invariant 5.
 
 **Logical-vs-line counting.** `hashes emitted (total)` in the Phase 5 report counts logical hashes (one per `HashType` row, regardless of fan-out). The Phase 4 `lines written` per-sink counters count physical lines on disk, so they do not sum to the logical total when multiple sinks are configured. This is the right semantics for both audit ("how many distinct hashes did this capture yield?") and operations ("how big will my hash file be?").
 
-**Legacy vs extended prefix selection.** `HashType::legacy_prefix()` and `HashType::per-AKM format_prefix()` are the two sources of truth (in `src/types.rs`). Legacy sinks call the legacy prefix, per-AKM sinks call the extended prefix; nothing else in the output pipeline knows the difference. Adding a new sink is one match-arm change.
+**Prefix selection.** `HashType::prefix()` is the single source of truth (in `src/types.rs`). It returns the mode 22000 prefix (`WPA*01*` PMKID, `WPA*02*` EAPOL, `WPA*03*` FT PMKID, `WPA*04*` FT EAPOL). All sinks use the same prefix for a given hash type. Adding a new sink is one match-arm change.
 
 **PMKID and EAPOL pipelines run as separate passes** (Invariant OUT-1 in §4 invariant 6). A single `(AP, STA)` session can yield up to four distinct hash lines: 1 PMKID plus up to 3 equivalence-class EAPOL pairs (FR-PAIR-5). This is correct and expected; downstream tools that expect one line per session are wrong.
 
-**FT context required for FT lines.** `wpawolf` only emits FT lines (legacy `WPA*03*` / `WPA*04*` and per-AKM format `WPA*06*` / `WPA*07*` / `WPA*10*` / `WPA*11*`) when MDID, R0KH-ID, and R1KH-ID are all present in the captured handshake. FT-PSK PMKIDs / EAPOL pairs without an FTE in the same handshake are dropped at emission time; hashcat 37100 cannot crack them without the chain.
+**FT context required for FT lines.** `wpawolf` only emits FT lines (`WPA*03*` / `WPA*04*`) when MDID, R0KH-ID, and R1KH-ID are all present in the captured handshake. FT-PSK PMKIDs / EAPOL pairs without an FTE in the same handshake are dropped at emission time; hashcat mode 22000 cannot crack them without the chain.
 
-**SHA-384 deliberately bypasses legacy sinks.** PSK-SHA384 and FT-PSK-SHA384 hashes (types 8-11) are *not* written to the legacy `--22000-out` / `--37100-out` sinks. `legacy_sink_for` in `src/output/mod.rs` returns `None` for these hash types. The reason is hashcat's mode 22000 strict-checks the MIC field at exactly 16 bytes (`module_22000.c::check_token`) and rejects any line with a wider MIC at parser startup with a `Token length exception`; mode 37100 only ships a SHA-256 FT key-hierarchy kernel and rejects the SHA-384 chain the same way. Routing the 24-byte HMAC-SHA384-192 MIC through those sinks would therefore poison the input file with unparseable lines. The dedicated per-AKM sinks (`--psk-sha384-out`, `--ft-psk-sha384-out`) and the combined `-o` sink continue to receive these lines under the `WPA*08*..*11*` extended prefix, where downstream tooling can recognise the wider MIC width.
+**SHA-384 not emitted.** PSK-SHA384 and FT-PSK-SHA384 hashes (types 8-11) are classified and counted but not written to any hashcat sink. `per_type_sink_for` in `src/output/mod.rs` returns `None` for these hash types, and the `fan_out` function gates `OutCombined` behind `ht.hashcat_mode().is_some()`. The reason is hashcat's mode 22000 strict-checks the MIC field at exactly 16 bytes (`module_22000.c::check_token`) and rejects any line with a wider MIC at parser startup with a `Token length exception`. The 24-byte HMAC-SHA384-192 MIC cannot be expressed in this format.
 
 ### Hashcat compatibility matrix
 
 | Type | Hash family            | Legacy sink         | Per-AKM sink           | hashcat support today |
 | ---- | ---------------------- | ------------------- | ----------------------- | --------------------- |
-| 1    | WPA1-PSK EAPOL         | `--22000-out` (`WPA*02*`) | `--wpa1-out` (`WPA*01*`) | mode 22000, KDV=1 (HMAC-MD5 MIC) |
-| 2    | WPA2-PSK PMKID         | `--22000-out` (`WPA*01*`) | `--wpa2-out` (`WPA*02*`) | mode 22000 |
-| 3    | WPA2-PSK EAPOL         | `--22000-out` (`WPA*02*`) | `--wpa2-out` (`WPA*03*`) | mode 22000, KDV=2 (HMAC-SHA1-128) |
-| 4    | PSK-SHA-256 PMKID      | `--22000-out` (`WPA*01*`) | `--psk-sha256-out` (`WPA*04*`) | mode 22000 PMKID kernel reads HMAC-SHA1 only; the line emits but does not crack |
-| 5    | PSK-SHA-256 EAPOL      | `--22000-out` (`WPA*02*`) | `--psk-sha256-out` (`WPA*05*`) | mode 22000, KDV=3 (AES-128-CMAC MIC); cracks |
-| 6    | FT-PSK PMKID           | `--37100-out` (`WPA*03*`) | `--ft-out` (`WPA*06*`) | mode 37100 (SHA-256 FT chain) |
-| 7    | FT-PSK EAPOL           | `--37100-out` (`WPA*04*`) | `--ft-out` (`WPA*07*`) | mode 37100 (SHA-256 FT chain) |
-| 8    | PSK-SHA-384 PMKID      | *(skipped)*         | `--psk-sha384-out` (`WPA*08*`) | no kernel; per-AKM sink only |
-| 9    | PSK-SHA-384 EAPOL      | *(skipped)*         | `--psk-sha384-out` (`WPA*09*`) | no kernel (24 B MIC); per-AKM sink only |
-| 10   | FT-PSK-SHA-384 PMKID   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*10*`) | no kernel; per-AKM sink only |
-| 11   | FT-PSK-SHA-384 EAPOL   | *(skipped)*         | `--ft-psk-sha384-out` (`WPA*11*`) | no kernel (24 B MIC + SHA-384 FT chain); per-AKM sink only |
+| 1    | WPA1-PSK EAPOL         | `WPA*02*` | `-o`, `--wpa1-eapol` | mode 22000 aux1, KDV=1 (HMAC-MD5 MIC) |
+| 2    | WPA2-PSK PMKID         | `WPA*01*` | `-o`, `--wpa2-pmkid` | mode 22000 aux4 (HMAC-SHA1 PMKID) |
+| 3    | WPA2-PSK EAPOL         | `WPA*02*` | `-o`, `--wpa2-eapol` | mode 22000 aux2, KDV=2 (HMAC-SHA1-128 MIC) |
+| 4    | PSK-SHA-256 PMKID      | `WPA*01*` | `-o`, `--sha256-pmkid` | mode 22000 aux4 runs HMAC-SHA1 only; emits but does not crack |
+| 5    | PSK-SHA-256 EAPOL      | `WPA*02*` | `-o`, `--sha256-eapol` | mode 22000 aux3, KDV=3 (AES-128-CMAC MIC); cracks |
+| 6    | FT-PSK PMKID           | `WPA*03*` | `-o`, `--ft-pmkid` | mode 22000 aux5 (SHA-256 FT chain) |
+| 7    | FT-PSK EAPOL           | `WPA*04*` | `-o`, `--ft-eapol` | mode 22000 aux6 (SHA-256 FT chain, AES-CMAC) |
+| 8    | PSK-SHA-384 PMKID      | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 9    | PSK-SHA-384 EAPOL      | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 10   | FT-PSK-SHA-384 PMKID   | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 11   | FT-PSK-SHA-384 EAPOL   | — | *(not emitted)* | no kernel; 24 B MIC + SHA-384 FT chain |
 
 The combined `-o` sink receives every emitted hash regardless of the above; types 8-11 are visible there for downstream tooling that can read the 11-prefix per-AKM format directly. Update both `legacy_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
 
@@ -1206,43 +1198,43 @@ Build an ESSID map: `AP_MAC -> Vec<(ESSID, timestamp)>`. Populated from Beacons 
 When generating a hash line, look up the AP MAC in the ESSID map. If multiple ESSIDs exist for the same AP (SSID change), use the one closest in time to the handshake.
 
 #### FR-ESSID-3
-If no ESSID is found for an AP, **drop** the would-have-been-emitted hash line and account for it via the `[essid_not_found_summary]` log category in `--log` (one line per affected AP with `dropped=N`, `first_seen_us=`, `last_seen_us=`). Hashcat derives the PMK from PSK + ESSID, so an empty-ESSID line can never match; emitting it would waste downstream cracking time and trigger `Salt-value exception` / `Token length exception` parser errors in mode 22000 / 37100. The Phase 3 stats banner surfaces the same information as `hash lines dropped (no SSID resolved; not crackable)` with the `distinct APs dropped` sub-counter.
+If no ESSID is found for an AP, **drop** the would-have-been-emitted hash line and account for it via the `[essid_not_found_summary]` log category in `--log` (one line per affected AP with `dropped=N`, `first_seen_us=`, `last_seen_us=`). Hashcat derives the PMK from PSK + ESSID, so an empty-ESSID line can never match; emitting it would waste downstream cracking time and trigger `Salt-value exception` / `Token length exception` parser errors in mode 22000. The Phase 3 stats banner surfaces the same information as `hash lines dropped (no SSID resolved; not crackable)` with the `distinct APs dropped` sub-counter.
 
 #### FR-OUT-1
-Mode 22000 PMKID line shape (canonical type 02; types 04, 08 use the same shape with only the `<XX>` code changing):
+Mode 22000 PMKID line shape (type 01):
 
 ```
-WPA*02*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>
+WPA*01*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>
        32hex   12hex    12hex    0-128hex   2hex
 ```
 
 Trailing `***` = three empty fields (reserved, maintain field count). See §7.2.
 
 #### FR-OUT-2
-Mode 22000 EAPOL line shape (canonical type 03):
+Mode 22000 EAPOL line shape (type 02):
 
 ```
-WPA*03*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>
+WPA*02*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>
        32hex 12hex    12hex    0-128hex 64hex   var hex 2hex
 ```
 
 `<MIC>` is the original Key MIC extracted before zeroing. `<NONCE>` is the **external** nonce. `<EAPOL>` is the raw frame with the Key MIC field zeroed at offset 77..(77+MIC_len). MIC length is AKM-dependent per Table 12-11; current hashcat 22000 only accepts 16 B. `<MP>` per §5.7. See §7.3.
 
 #### FR-OUT-3
-Mode 37100 FT PMKID line (type 06):
+Mode 22000 FT PMKID line (type 03, 12 tokens):
 
 ```
-WPA*06*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>****<MDID>*<R0KHID>*<R1KHID>
-       32hex   12hex    12hex    0-128hex      4hex  var hex   12hex
+WPA*03*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>*<MDID>*<R0KHID>*<R1KHID>
+       32hex   12hex    12hex    0-128hex  2hex 4hex  var hex   12hex
 ```
 
-Four empty fields (reserved + mode 22000 compat padding). See §7.2.
+Three empty fields (nonce, eapol, empty for PMKID). See §7.2.
 
 #### FR-OUT-4
-Mode 37100 FT EAPOL line (type 07):
+Mode 22000 FT EAPOL line (type 04, 12 tokens):
 
 ```
-WPA*07*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>*<MDID>*<R0KHID>*<R1KHID>
+WPA*04*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>*<MDID>*<R0KHID>*<R1KHID>
 ```
 
 FT-PSK M2 EAPOL frames often exceed 255 bytes (real captures: 256-510) because of embedded FT IEs. wpawolf emits without truncation.
@@ -1294,16 +1286,15 @@ Output flags:
 
 | Flag | Long | Description |
 |------|------|-------------|
-|            | `--prefix PREFIX`         | derive a default path for every hash + auxiliary sink (`PREFIX.22000`, `PREFIX.37100`, `PREFIX.combined`, the six per-AKM sinks, `PREFIX.essid` ... `PREFIX.log`); an explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool `--prefix` |
-|            | `--22000-out FILE`        | hashcat mode 22000 (legacy `WPA*01*`/`WPA*02*`; every non-FT hash) |
-|            | `--37100-out FILE`        | hashcat mode 37100 (legacy `WPA*03*`/`WPA*04*`; every FT hash) |
-| `-o FILE`  | `--out FILE`              | combined 11-type classification file (every emitted hash, prefixes `WPA*01*..*11*`) |
-|            | `--wpa1-out FILE`         | type 1 only (per-AKM format `WPA*01*`) |
-|            | `--wpa2-out FILE`         | types 2 + 3 (per-AKM format `WPA*02*`/`WPA*03*`) |
-|            | `--psk-sha256-out FILE`   | types 4 + 5 (per-AKM format `WPA*04*`/`WPA*05*`) |
-|            | `--ft-out FILE`           | types 6 + 7 (per-AKM format `WPA*06*`/`WPA*07*`, FT extras) |
-|            | `--psk-sha384-out FILE`   | types 8 + 9 (per-AKM format `WPA*08*`/`WPA*09*`, no kernel yet) |
-|            | `--ft-psk-sha384-out FILE`| types 10 + 11 (per-AKM format `WPA*10*`/`WPA*11*`, FT extras, no kernel yet) |
+|            | `--prefix PREFIX`         | derive a default path for every hash + auxiliary sink (`PREFIX.22000`, the seven per-type sinks, `PREFIX.essid` ... `PREFIX.log`); an explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool `--prefix` |
+| `-o FILE`  | `--out FILE`              | all crackable hashes (types 1-7), mode 22000 format (`WPA*01*`-`WPA*04*`) |
+|            | `--wpa1-eapol FILE`       | type 1 only (`WPA*02*`) |
+|            | `--wpa2-pmkid FILE`       | type 2 only (`WPA*01*`) |
+|            | `--wpa2-eapol FILE`       | type 3 only (`WPA*02*`) |
+|            | `--sha256-pmkid FILE`     | type 4 only (`WPA*01*`) |
+|            | `--sha256-eapol FILE`     | type 5 only (`WPA*02*`) |
+|            | `--ft-pmkid FILE`         | type 6 only (`WPA*03*`, FT extras) |
+|            | `--ft-eapol FILE`         | type 7 only (`WPA*04*`, FT extras) |
 | `-E FILE` | `--essid-output`    | unique ESSIDs from AP-side frames (autohex) |
 | `-R FILE` | `--probe-output`    | unique ESSIDs from client-side frames (Probe Requests, Action MR) |
 | `-W FILE` | `--wordlist-output` | leaked-text wordlist (superset of -E and -R, plus WPS strings, EAP identities, country codes, etc.) |
@@ -1315,7 +1306,7 @@ Output flags:
 
 All string outputs (-E, -R, -W, -I, -U, and string fields of -D) use hashcat / hcxtools autohex format: bytes in printable ASCII range 0x20-0x7E are written as-is; all other byte sequences are encoded as `$HEX[<lowercase hex>]`.
 
-Two sinks pointed at the same real file are rejected up front (silent data loss), but any output may target a `/dev/*` special file (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`) and several sinks may share one -- `wpawolf -o /dev/stdout --22000-out /dev/stdout -E /dev/stdout capture.pcap` streams all three formats to stdout. `/dev/*` targets are exempt from both the duplicate-path rejection and the parent-directory writability probe (whose parent, `/dev`, is not a normal writable directory).
+Two sinks pointed at the same real file are rejected up front (silent data loss), but any output may target a `/dev/*` special file (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`) and several sinks may share one -- `wpawolf -o /dev/stdout -E /dev/stdout capture.pcap` streams both formats to stdout. `/dev/*` targets are exempt from both the duplicate-path rejection and the parent-directory writability probe (whose parent, `/dev`, is not a normal writable directory).
 
 #### FR-CLI-3
 Output-filter and runtime flags (unfiltered defaults):
@@ -1371,7 +1362,7 @@ Output is a strict content-superset of any conformant reference extractor runnin
 Zero duplicate hash lines in output. Verified by `sort | uniq -d` producing empty output.
 
 #### FR-CORRECT-3
-Every emitted hash line must be format-valid per the hashcat mode 22000 / 37100 specification.
+Every emitted hash line must be format-valid per the hashcat mode 22000 specification.
 
 #### FR-PERF-1
 Process pcapng input at >= 200 MB/s on a single core (bounded by I/O, not CPU). Parser must not be the bottleneck.
@@ -1506,7 +1497,7 @@ pub enum MsgType { M1 = 1, M2 = 2, M3 = 3, M4 = 4 }
 pub enum AkmType {
     Wpa1,          // WPA legacy (vendor IE 00:50:F2:01, HMAC-MD5 MIC, KDV=1)
     Wpa2Psk,       // AKM 2: HMAC-SHA1 PMKID, PRF-SHA1 PTK, KDV=2
-    FtPsk,         // AKM 4: FT-SHA256 chain PMKID, mode 37100
+    FtPsk,         // AKM 4: FT-SHA256 chain PMKID, mode 22000 type 03/04
     FtPskSha384,   // AKM 19: FT-SHA384 chain PMKID, HMAC-SHA384-192 MIC
     PskSha256,     // AKM 6: HMAC-SHA256 PMKID, AES-CMAC MIC, KDV=3
     PskSha384,     // AKM 20: HMAC-SHA384-192 MIC (24 B), KDF-SHA384 PTK

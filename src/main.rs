@@ -46,7 +46,7 @@ use wpawolf::{
 
 // --- CLI ---
 
-/// WPA/WPA2/WPA3 PSK-family (incl. PSK-SHA256/384 and FT-PSK) handshake + PMKID extractor for hashcat (all 11 hash types, modes 22000/37100).
+/// WPA/WPA2/WPA3 PSK-family (incl. PSK-SHA256 and FT-PSK) handshake + PMKID extractor for hashcat mode 22000 (types 01-04).
 ///
 /// Reads pcap, pcapng, and gzip-compressed captures. Wide defaults: all 6 N#E# combos, unlimited session window, no replay-counter check. Garbage nonces/MICs/PMKIDs are always rejected. Use output-filter flags to narrow.
 #[derive(Parser, Debug)]
@@ -57,10 +57,9 @@ use wpawolf::{
     long_about = None,
     arg_required_else_help = true,
     after_help = "\x1b[1;33mEXAMPLES:\x1b[0m
-    wpawolf --22000-out h.22000 capture.pcap
-    wpawolf --22000-out h.22000 --37100-out h.37100 *.pcap
-    wpawolf --22000-out h.22000 --strict captures/
-    wpawolf -o all.out -E essids.txt -W wordlist.txt captures/",
+    wpawolf -o hashes.22000 capture.pcap
+    wpawolf -o hashes.22000 --strict captures/
+    wpawolf -o hashes.22000 -E essids.txt -W wordlist.txt captures/",
 )]
 #[expect(clippy::doc_markdown, reason = "doc comments are clap help text, not rustdoc API surface")]
 struct Cli {
@@ -72,52 +71,44 @@ struct Cli {
 
     /// Write every hash + auxiliary output to <PREFIX>.<ext>
     ///
-    /// Sets a default path for every hash sink (`.22000`, `.37100`, `.combined`, `.wpa1`, `.wpa2`, `.psk-sha256`, `.ft`, `.psk-sha384`, `.ft-psk-sha384`) and every auxiliary sink (`.essid`, `.probe`, `.wordlist`, `.identity`, `.username`, `.device`, `.wordlist-scan`, `.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool --prefix.
+    /// Sets a default path for every hash sink (`.22000`, `.wpa1-eapol`, `.wpa2-pmkid`, `.wpa2-eapol`, `.sha256-pmkid`, `.sha256-eapol`, `.ft-pmkid`, `.ft-eapol`) and every auxiliary sink (`.essid`, `.probe`, `.wordlist`, `.identity`, `.username`, `.device`, `.wordlist-scan`, `.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool --prefix.
     #[arg(long = "prefix", value_name = "PREFIX", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 0)]
     prefix: Option<std::path::PathBuf>,
 
     // ---- Hash output ----
-    /// Write mode-22000 hashes (non-FT, hashcat-compatible)
+    /// Write all crackable hashes (types 1-7, mode 22000 format)
     ///
-    /// Every non-FT hash goes here. Line prefixes: WPA*01* (PMKID), WPA*02* (EAPOL). Drop-in for `hashcat -m 22000`.
-    #[arg(long = "22000-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 1)]
-    out_22000: Option<std::path::PathBuf>,
+    /// Every hashcat-crackable hash goes here: WPA*01* (PMKID), WPA*02* (EAPOL), WPA*03* (FT PMKID), WPA*04* (FT EAPOL). Drop-in for `hashcat -m 22000`.
+    #[arg(short = 'o', long = "out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 1)]
+    out: Option<std::path::PathBuf>,
 
-    /// Write mode-37100 hashes (FT-PSK, hashcat-compatible)
-    ///
-    /// Every FT hash goes here. Line prefixes: WPA*03* (PMKID), WPA*04* (EAPOL). Drop-in for `hashcat -m 37100`.
-    #[arg(long = "37100-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 2)]
-    out_37100: Option<std::path::PathBuf>,
+    /// Write WPA1 EAPOL hashes only (type 1, WPA*02* format)
+    #[arg(long = "wpa1-eapol", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 2)]
+    out_wpa1_eapol: Option<std::path::PathBuf>,
 
-    /// Write all hashes in the extended 11-type format
-    ///
-    /// Every emitted hash with its per-AKM prefix (WPA*01*..*11*). Not hashcat-readable today; useful for triage and future tooling.
-    #[arg(short = 'o', long = "out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 3)]
-    out_combined: Option<std::path::PathBuf>,
+    /// Write WPA2-PSK PMKID hashes (type 2, WPA*01* format)
+    #[arg(long = "wpa2-pmkid", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 3)]
+    out_wpa2_pmkid: Option<std::path::PathBuf>,
 
-    /// Write WPA1-PSK hashes only (type 1)
-    #[arg(long = "wpa1-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 4)]
-    out_wpa1: Option<std::path::PathBuf>,
+    /// Write WPA2-PSK EAPOL hashes (type 3, WPA*02* format)
+    #[arg(long = "wpa2-eapol", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 4)]
+    out_wpa2_eapol: Option<std::path::PathBuf>,
 
-    /// Write WPA2-PSK hashes (types 2+3)
-    #[arg(long = "wpa2-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 5)]
-    out_wpa2: Option<std::path::PathBuf>,
+    /// Write PSK-SHA256 PMKID hashes (type 4, WPA*01* format)
+    #[arg(long = "sha256-pmkid", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 5)]
+    out_sha256_pmkid: Option<std::path::PathBuf>,
 
-    /// Write PSK-SHA256 hashes (types 4+5)
-    #[arg(long = "psk-sha256-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 6)]
-    out_psk_sha256: Option<std::path::PathBuf>,
+    /// Write PSK-SHA256 EAPOL hashes (type 5, WPA*02* format)
+    #[arg(long = "sha256-eapol", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 6)]
+    out_sha256_eapol: Option<std::path::PathBuf>,
 
-    /// Write FT-PSK hashes (types 6+7)
-    #[arg(long = "ft-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 7)]
-    out_ft: Option<std::path::PathBuf>,
+    /// Write FT-PSK PMKID hashes (type 6, WPA*03* format with FT extras)
+    #[arg(long = "ft-pmkid", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 7)]
+    out_ft_pmkid: Option<std::path::PathBuf>,
 
-    /// Write PSK-SHA384 hashes (types 8+9)
-    #[arg(long = "psk-sha384-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 8)]
-    out_psk_sha384: Option<std::path::PathBuf>,
-
-    /// Write FT-PSK-SHA384 hashes (types 10+11)
-    #[arg(long = "ft-psk-sha384-out", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 9)]
-    out_ft_psk_sha384: Option<std::path::PathBuf>,
+    /// Write FT-PSK EAPOL hashes (type 7, WPA*04* format with FT extras)
+    #[arg(long = "ft-eapol", value_name = "FILE", value_hint = clap::ValueHint::FilePath, help_heading = "Hash output", display_order = 8)]
+    out_ft_eapol: Option<std::path::PathBuf>,
 
     // ---- Auxiliary output ----
     /// Write AP-side SSIDs (autohex)
@@ -325,8 +316,8 @@ const fn apply_strict_defaults(cli: &mut Cli) {
 
 /// Expand `--prefix PREFIX` into a default path for every hash and auxiliary
 /// sink: each sink left unset gets `PREFIX` + its suffix (e.g. `run.22000`,
-/// `run.essid`). An explicit per-sink flag is never overwritten, so callers can
-/// set the bulk of the outputs by prefix and redirect individual sinks by hand.
+/// `run.wpa2-eapol`). An explicit per-sink flag is never overwritten, so callers
+/// can set the bulk of the outputs by prefix and redirect individual sinks by hand.
 /// Mirrors hcxpcapngtool's `--prefix`.
 fn apply_prefix_defaults(cli: &mut Cli) {
     let Some(prefix) = cli.prefix.clone() else {
@@ -339,16 +330,15 @@ fn apply_prefix_defaults(cli: &mut Cli) {
         s.push(suffix);
         std::path::PathBuf::from(s)
     };
-    let slots: [(&mut Option<std::path::PathBuf>, &str); 17] = [
-        (&mut cli.out_22000, ".22000"),
-        (&mut cli.out_37100, ".37100"),
-        (&mut cli.out_combined, ".combined"),
-        (&mut cli.out_wpa1, ".wpa1"),
-        (&mut cli.out_wpa2, ".wpa2"),
-        (&mut cli.out_psk_sha256, ".psk-sha256"),
-        (&mut cli.out_ft, ".ft"),
-        (&mut cli.out_psk_sha384, ".psk-sha384"),
-        (&mut cli.out_ft_psk_sha384, ".ft-psk-sha384"),
+    let slots: [(&mut Option<std::path::PathBuf>, &str); 16] = [
+        (&mut cli.out, ".22000"),
+        (&mut cli.out_wpa1_eapol, ".wpa1-eapol"),
+        (&mut cli.out_wpa2_pmkid, ".wpa2-pmkid"),
+        (&mut cli.out_wpa2_eapol, ".wpa2-eapol"),
+        (&mut cli.out_sha256_pmkid, ".sha256-pmkid"),
+        (&mut cli.out_sha256_eapol, ".sha256-eapol"),
+        (&mut cli.out_ft_pmkid, ".ft-pmkid"),
+        (&mut cli.out_ft_eapol, ".ft-eapol"),
         (&mut cli.essid_output, ".essid"),
         (&mut cli.probe_output, ".probe"),
         (&mut cli.wordlist_output, ".wordlist"),
@@ -382,15 +372,14 @@ fn main() {
     apply_prefix_defaults(&mut cli);
 
     // At least one output must be requested.
-    let has_output = cli.out_22000.is_some()
-        || cli.out_37100.is_some()
-        || cli.out_combined.is_some()
-        || cli.out_wpa1.is_some()
-        || cli.out_wpa2.is_some()
-        || cli.out_psk_sha256.is_some()
-        || cli.out_ft.is_some()
-        || cli.out_psk_sha384.is_some()
-        || cli.out_ft_psk_sha384.is_some()
+    let has_output = cli.out.is_some()
+        || cli.out_wpa1_eapol.is_some()
+        || cli.out_wpa2_pmkid.is_some()
+        || cli.out_wpa2_eapol.is_some()
+        || cli.out_sha256_pmkid.is_some()
+        || cli.out_sha256_eapol.is_some()
+        || cli.out_ft_pmkid.is_some()
+        || cli.out_ft_eapol.is_some()
         || cli.essid_output.is_some()
         || cli.probe_output.is_some()
         || cli.wordlist_output.is_some()
@@ -400,7 +389,7 @@ fn main() {
         || cli.wordlist_scan.is_some();
     if !has_output {
         println!(
-            "error: no output specified (use --22000-out, --37100-out, -o/--out, --wpa1-out, --wpa2-out, --psk-sha256-out, --ft-out, --psk-sha384-out, --ft-psk-sha384-out, -E, -R, -W, -I, -U, -D, or --wordlist-scan)"
+            "error: no output specified (use -o/--out, --wpa1-eapol, --wpa2-pmkid, --wpa2-eapol, --sha256-pmkid, --sha256-eapol, --ft-pmkid, --ft-eapol, -E, -R, -W, -I, -U, -D, or --wordlist-scan)"
         );
         println!("Run with --help for usage.");
         std::process::exit(1);
@@ -409,15 +398,14 @@ fn main() {
     // Reject duplicate output paths -- two sinks writing the same file causes silent data loss.
     {
         let paths: Vec<&std::path::Path> = [
-            cli.out_22000.as_deref(),
-            cli.out_37100.as_deref(),
-            cli.out_combined.as_deref(),
-            cli.out_wpa1.as_deref(),
-            cli.out_wpa2.as_deref(),
-            cli.out_psk_sha256.as_deref(),
-            cli.out_ft.as_deref(),
-            cli.out_psk_sha384.as_deref(),
-            cli.out_ft_psk_sha384.as_deref(),
+            cli.out.as_deref(),
+            cli.out_wpa1_eapol.as_deref(),
+            cli.out_wpa2_pmkid.as_deref(),
+            cli.out_wpa2_eapol.as_deref(),
+            cli.out_sha256_pmkid.as_deref(),
+            cli.out_sha256_eapol.as_deref(),
+            cli.out_ft_pmkid.as_deref(),
+            cli.out_ft_eapol.as_deref(),
             cli.essid_output.as_deref(),
             cli.probe_output.as_deref(),
             cli.wordlist_output.as_deref(),
@@ -432,7 +420,7 @@ fn main() {
         .collect();
         let mut seen = std::collections::HashSet::with_capacity(paths.len());
         for p in &paths {
-            // `/dev/*` targets (e.g. -o /dev/stdout --22000-out /dev/stdout) are
+            // `/dev/*` targets (e.g. -o /dev/stdout --wpa2-eapol /dev/stdout) are
             // intentionally shareable across sinks; only real files must be unique.
             if is_shareable_output(p) {
                 continue;
@@ -701,15 +689,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
     let pair_config = build_pair_config(cli);
 
     let paths = OutputPaths {
-        out_22000: cli.out_22000.clone(),
-        out_37100: cli.out_37100.clone(),
-        out_combined: cli.out_combined.clone(),
-        out_wpa1: cli.out_wpa1.clone(),
-        out_wpa2: cli.out_wpa2.clone(),
-        out_psk_sha256: cli.out_psk_sha256.clone(),
-        out_ft: cli.out_ft.clone(),
-        out_psk_sha384: cli.out_psk_sha384.clone(),
-        out_ft_psk_sha384: cli.out_ft_psk_sha384.clone(),
+        out_combined: cli.out.clone(),
+        out_wpa1_eapol: cli.out_wpa1_eapol.clone(),
+        out_wpa2_pmkid: cli.out_wpa2_pmkid.clone(),
+        out_wpa2_eapol: cli.out_wpa2_eapol.clone(),
+        out_sha256_pmkid: cli.out_sha256_pmkid.clone(),
+        out_sha256_eapol: cli.out_sha256_eapol.clone(),
+        out_ft_pmkid: cli.out_ft_pmkid.clone(),
+        out_ft_eapol: cli.out_ft_eapol.clone(),
         essid_list: cli.essid_output.clone(),
         probe_essid_list: cli.probe_output.clone(),
         wordlist: cli.wordlist_output.clone(),
@@ -1050,15 +1037,14 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
 
     // Record output paths in stats so the Phase 4 banner can show configured vs not-configured.
     let path_str = |p: &Option<std::path::PathBuf>| p.as_ref().map_or_else(String::new, |p| p.display().to_string());
-    stats.path_22000 = path_str(&cli.out_22000);
-    stats.path_37100 = path_str(&cli.out_37100);
-    stats.path_combined = path_str(&cli.out_combined);
-    stats.path_wpa1 = path_str(&cli.out_wpa1);
-    stats.path_wpa2 = path_str(&cli.out_wpa2);
-    stats.path_psk_sha256 = path_str(&cli.out_psk_sha256);
-    stats.path_ft = path_str(&cli.out_ft);
-    stats.path_psk_sha384 = path_str(&cli.out_psk_sha384);
-    stats.path_ft_psk_sha384 = path_str(&cli.out_ft_psk_sha384);
+    stats.path_combined = path_str(&cli.out);
+    stats.path_wpa1_eapol = path_str(&cli.out_wpa1_eapol);
+    stats.path_wpa2_pmkid = path_str(&cli.out_wpa2_pmkid);
+    stats.path_wpa2_eapol = path_str(&cli.out_wpa2_eapol);
+    stats.path_sha256_pmkid = path_str(&cli.out_sha256_pmkid);
+    stats.path_sha256_eapol = path_str(&cli.out_sha256_eapol);
+    stats.path_ft_pmkid = path_str(&cli.out_ft_pmkid);
+    stats.path_ft_eapol = path_str(&cli.out_ft_eapol);
     stats.essid_list_path = path_str(&cli.essid_output);
     stats.probe_list_path = path_str(&cli.probe_output);
     stats.wordlist_path = path_str(&cli.wordlist_output);
@@ -1236,24 +1222,22 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         // Per-sink line / dropped counts for the Phase 4 banner. The fan-out engine
         // writes the same logical hash to every configured sink; counts here are per
         // sink and do not sum to `hashes_written`.
-        stats.lines_22000 = output_stats.lines(SinkId::Out22000);
-        stats.lines_37100 = output_stats.lines(SinkId::Out37100);
         stats.lines_combined = output_stats.lines(SinkId::OutCombined);
-        stats.lines_wpa1 = output_stats.lines(SinkId::OutWpa1);
-        stats.lines_wpa2 = output_stats.lines(SinkId::OutWpa2);
-        stats.lines_psk_sha256 = output_stats.lines(SinkId::OutPskSha256);
-        stats.lines_ft = output_stats.lines(SinkId::OutFt);
-        stats.lines_psk_sha384 = output_stats.lines(SinkId::OutPskSha384);
-        stats.lines_ft_psk_sha384 = output_stats.lines(SinkId::OutFtPskSha384);
-        stats.dropped_22000 = output_stats.dropped(SinkId::Out22000);
-        stats.dropped_37100 = output_stats.dropped(SinkId::Out37100);
+        stats.lines_wpa1_eapol = output_stats.lines(SinkId::OutWpa1Eapol);
+        stats.lines_wpa2_pmkid = output_stats.lines(SinkId::OutWpa2Pmkid);
+        stats.lines_wpa2_eapol = output_stats.lines(SinkId::OutWpa2Eapol);
+        stats.lines_sha256_pmkid = output_stats.lines(SinkId::OutSha256Pmkid);
+        stats.lines_sha256_eapol = output_stats.lines(SinkId::OutSha256Eapol);
+        stats.lines_ft_pmkid = output_stats.lines(SinkId::OutFtPmkid);
+        stats.lines_ft_eapol = output_stats.lines(SinkId::OutFtEapol);
         stats.dropped_combined = output_stats.dropped(SinkId::OutCombined);
-        stats.dropped_wpa1 = output_stats.dropped(SinkId::OutWpa1);
-        stats.dropped_wpa2 = output_stats.dropped(SinkId::OutWpa2);
-        stats.dropped_psk_sha256 = output_stats.dropped(SinkId::OutPskSha256);
-        stats.dropped_ft = output_stats.dropped(SinkId::OutFt);
-        stats.dropped_psk_sha384 = output_stats.dropped(SinkId::OutPskSha384);
-        stats.dropped_ft_psk_sha384 = output_stats.dropped(SinkId::OutFtPskSha384);
+        stats.dropped_wpa1_eapol = output_stats.dropped(SinkId::OutWpa1Eapol);
+        stats.dropped_wpa2_pmkid = output_stats.dropped(SinkId::OutWpa2Pmkid);
+        stats.dropped_wpa2_eapol = output_stats.dropped(SinkId::OutWpa2Eapol);
+        stats.dropped_sha256_pmkid = output_stats.dropped(SinkId::OutSha256Pmkid);
+        stats.dropped_sha256_eapol = output_stats.dropped(SinkId::OutSha256Eapol);
+        stats.dropped_ft_pmkid = output_stats.dropped(SinkId::OutFtPmkid);
+        stats.dropped_ft_eapol = output_stats.dropped(SinkId::OutFtEapol);
 
         // Per-hash-type breakdown -- one bucket per row of the 11-type table in
         // `ARCHITECTURE.md §2`. The output pipeline classifies each emitted
@@ -1326,7 +1310,7 @@ mod tests {
     /// Requires a positional INPUT and at least one output flag to satisfy
     /// clap's `required` rules.
     fn parse_with_strict(extra_flags: &[&str]) -> Cli {
-        let mut argv: Vec<&str> = vec!["wpawolf", "--22000-out", "out.22000"];
+        let mut argv: Vec<&str> = vec!["wpawolf", "-o", "out.22000"];
         argv.extend_from_slice(extra_flags);
         argv.push("dummy.pcap");
         let mut cli = Cli::try_parse_from(argv).expect("parse must succeed");
@@ -1410,11 +1394,11 @@ mod tests {
         let mut cli = Cli::try_parse_from(["wpawolf", "--prefix", "/tmp/run", "in.pcap"]).expect("parse");
         apply_prefix_defaults(&mut cli);
         let p = |s: &str| Some(std::path::PathBuf::from(s));
-        assert_eq!(cli.out_22000, p("/tmp/run.22000"));
-        assert_eq!(cli.out_37100, p("/tmp/run.37100"));
-        assert_eq!(cli.out_combined, p("/tmp/run.combined"));
-        assert_eq!(cli.out_wpa1, p("/tmp/run.wpa1"));
-        assert_eq!(cli.out_ft_psk_sha384, p("/tmp/run.ft-psk-sha384"));
+        assert_eq!(cli.out, p("/tmp/run.22000"));
+        assert_eq!(cli.out_wpa1_eapol, p("/tmp/run.wpa1-eapol"));
+        assert_eq!(cli.out_wpa2_pmkid, p("/tmp/run.wpa2-pmkid"));
+        assert_eq!(cli.out_wpa2_eapol, p("/tmp/run.wpa2-eapol"));
+        assert_eq!(cli.out_ft_eapol, p("/tmp/run.ft-eapol"));
         assert_eq!(cli.essid_output, p("/tmp/run.essid"));
         assert_eq!(cli.wordlist_scan, p("/tmp/run.wordlist-scan"));
         assert_eq!(cli.log, p("/tmp/run.log"));
@@ -1422,20 +1406,23 @@ mod tests {
 
     #[test]
     fn prefix_does_not_override_explicit_sink() {
-        let mut cli =
-            Cli::try_parse_from(["wpawolf", "--prefix", "/tmp/run", "--22000-out", "/custom/h.22000", "in.pcap"])
-                .expect("parse");
+        let mut cli = Cli::try_parse_from(["wpawolf", "--prefix", "/tmp/run", "-o", "/custom/h.22000", "in.pcap"])
+            .expect("parse");
         apply_prefix_defaults(&mut cli);
-        assert_eq!(cli.out_22000, Some(std::path::PathBuf::from("/custom/h.22000")), "explicit flag wins");
-        assert_eq!(cli.out_37100, Some(std::path::PathBuf::from("/tmp/run.37100")), "unset sink filled by prefix");
+        assert_eq!(cli.out, Some(std::path::PathBuf::from("/custom/h.22000")), "explicit flag wins");
+        assert_eq!(
+            cli.out_wpa2_eapol,
+            Some(std::path::PathBuf::from("/tmp/run.wpa2-eapol")),
+            "unset sink filled by prefix"
+        );
     }
 
     #[test]
     fn prefix_absent_leaves_sinks_unset() {
         let mut cli = Cli::try_parse_from(["wpawolf", "-o", "out.txt", "in.pcap"]).expect("parse");
         apply_prefix_defaults(&mut cli);
-        assert!(cli.out_22000.is_none(), "no --prefix -> sinks stay as the user set them");
-        assert_eq!(cli.out_combined, Some(std::path::PathBuf::from("out.txt")));
+        assert!(cli.out_wpa1_eapol.is_none(), "no --prefix -> sinks stay as the user set them");
+        assert_eq!(cli.out, Some(std::path::PathBuf::from("out.txt")));
     }
 
     // --- /dev/* shareable-output detection ---

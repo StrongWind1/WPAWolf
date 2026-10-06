@@ -195,30 +195,30 @@ fn build_nc_cluster_pcap() -> Vec<u8> {
 }
 
 /// Runs wpawolf on `input_path` with `extra_args` and returns the number of
-/// non-empty lines in the produced `--22000-out` file.
+/// non-empty lines in the produced `-o` file.
 fn run_and_count(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> usize {
     let _ = fs::remove_file(out_path);
-    let mut args: Vec<&str> = vec!["--22000-out", out_path.to_str().unwrap()];
+    let mut args: Vec<&str> = vec!["-o", out_path.to_str().unwrap()];
     args.extend_from_slice(extra_args);
     let input_str = input_path.to_str().unwrap();
     args.push(input_str);
     let status = Command::new(common::binary_path()).args(&args).status().expect("spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero with args {extra_args:?}");
-    fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count()
+    fs::read_to_string(out_path).expect("read output").lines().filter(|l| !l.is_empty()).count()
 }
 
 /// Runs wpawolf on `input_path` and returns `(output_line_count, stdout_text)`.
 /// The stdout text is needed by callers that assert against closing-banner
-/// counters (e.g. NC-dedup stats under `--per-file`).
+/// counters (e.g. NC-dedup stats).
 fn run_capture(input_path: &Path, out_path: &Path, extra_args: &[&str]) -> (usize, String) {
     let _ = fs::remove_file(out_path);
-    let mut args: Vec<&str> = vec!["--22000-out", out_path.to_str().unwrap()];
+    let mut args: Vec<&str> = vec!["-o", out_path.to_str().unwrap()];
     args.extend_from_slice(extra_args);
     let input_str = input_path.to_str().unwrap();
     args.push(input_str);
     let output = Command::new(common::binary_path()).args(&args).output().expect("spawn wpawolf");
     assert!(output.status.success(), "wpawolf exited non-zero with args {extra_args:?}");
-    let lines = fs::read_to_string(out_path).expect("read 22000 output").lines().filter(|l| !l.is_empty()).count();
+    let lines = fs::read_to_string(out_path).expect("read output").lines().filter(|l| !l.is_empty()).count();
     let stdout = String::from_utf8(output.stdout).expect("wpawolf stdout is UTF-8");
     (lines, stdout)
 }

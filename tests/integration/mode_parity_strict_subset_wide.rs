@@ -29,14 +29,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run wpawolf with the given extra flags, capturing 22000 + 37100 output to
-/// the two given files. Returns the union of non-empty lines read back from
-/// both files.
-fn run_and_collect(input: &Path, out22: &Path, out37: &Path, extra: &[&str]) -> Vec<String> {
-    let _ = fs::remove_file(out22);
-    let _ = fs::remove_file(out37);
+/// Run wpawolf with the given extra flags, capturing `-o` output.
+/// Returns the non-empty lines read back.
+fn run_and_collect(input: &Path, out: &Path, extra: &[&str]) -> Vec<String> {
+    let _ = fs::remove_file(out);
     let mut cmd = Command::new(common::binary_path());
-    cmd.args(["--22000-out", out22.to_str().unwrap(), "--37100-out", out37.to_str().unwrap()]);
+    cmd.args(["-o", out.to_str().unwrap()]);
     for f in extra {
         cmd.arg(f);
     }
@@ -47,9 +45,7 @@ fn run_and_collect(input: &Path, out22: &Path, out37: &Path, extra: &[&str]) -> 
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited with non-zero status: {status} (flags: {extra:?})");
-    let mut lines = read_lines(out22);
-    lines.extend(read_lines(out37));
-    lines
+    read_lines(out)
 }
 
 fn read_lines(path: &Path) -> Vec<String> {
@@ -61,13 +57,11 @@ fn assert_strict_subset_of_wide(label: &str, capture_bytes: &[u8], ext: &str) {
     let cap_path: PathBuf = dir.join(format!("{label}_{ext}.{ext}"));
     fs::write(&cap_path, capture_bytes).unwrap();
 
-    let wide_22 = dir.join(format!("{label}_{ext}_wide.22000"));
-    let wide_37 = dir.join(format!("{label}_{ext}_wide.37100"));
-    let strict_22 = dir.join(format!("{label}_{ext}_strict.22000"));
-    let strict_37 = dir.join(format!("{label}_{ext}_strict.37100"));
+    let wide_out = dir.join(format!("{label}_{ext}_wide.22000"));
+    let strict_out = dir.join(format!("{label}_{ext}_strict.22000"));
 
-    let wide_lines = run_and_collect(&cap_path, &wide_22, &wide_37, &[]);
-    let strict_lines = run_and_collect(&cap_path, &strict_22, &strict_37, &["--strict"]);
+    let wide_lines = run_and_collect(&cap_path, &wide_out, &[]);
+    let strict_lines = run_and_collect(&cap_path, &strict_out, &["--strict"]);
 
     // The fixture is non-degenerate: WIDE must produce at least one line, or
     // the subset check below is vacuously true and would hide a real regression.

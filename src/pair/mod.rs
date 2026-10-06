@@ -81,7 +81,7 @@ pub struct PairedHash {
     /// Encoded combo type (bits 0-2) plus flags (bits 4-7).
     /// Format: `combo_type as u8 | FLAG_APLESS? | FLAG_LE? | FLAG_BE? | FLAG_NC?`
     pub message_pair: u8,
-    /// AKM suite type -- determines output file (22000 vs 37100).
+    /// AKM suite type -- determines output prefix (mode 22000 type 01-04).
     pub akm: AkmType,
     /// FT-PSK fields, present only for FT associations. Boxed because >99.9% of
     /// pairs are non-FT; saves 50 bytes per struct instance.

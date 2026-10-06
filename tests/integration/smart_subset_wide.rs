@@ -29,13 +29,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run wpawolf with the given extra flags, capturing 22000 + 37100 output, and
-/// return the union of non-empty output lines.
-fn run_and_collect(input: &Path, out22: &Path, out37: &Path, extra: &[&str]) -> Vec<String> {
-    let _ = fs::remove_file(out22);
-    let _ = fs::remove_file(out37);
+/// Run wpawolf with the given extra flags, capturing `-o` output, and
+/// return the non-empty output lines.
+fn run_and_collect(input: &Path, out: &Path, extra: &[&str]) -> Vec<String> {
+    let _ = fs::remove_file(out);
     let mut cmd = Command::new(common::binary_path());
-    cmd.args(["--22000-out", out22.to_str().unwrap(), "--37100-out", out37.to_str().unwrap()]);
+    cmd.args(["-o", out.to_str().unwrap()]);
     for f in extra {
         cmd.arg(f);
     }
@@ -46,9 +45,7 @@ fn run_and_collect(input: &Path, out22: &Path, out37: &Path, extra: &[&str]) -> 
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero: {status} (flags: {extra:?})");
-    let mut lines = read_lines(out22);
-    lines.extend(read_lines(out37));
-    lines
+    read_lines(out)
 }
 
 fn read_lines(path: &Path) -> Vec<String> {
@@ -65,18 +62,8 @@ fn assert_smart_never_misses(label: &str, capture_bytes: &[u8], ext: &str) {
     let cap_path: PathBuf = dir.join(format!("{label}_{ext}.{ext}"));
     fs::write(&cap_path, capture_bytes).unwrap();
 
-    let wide_lines = run_and_collect(
-        &cap_path,
-        &dir.join(format!("{label}_{ext}_wide.22000")),
-        &dir.join(format!("{label}_{ext}_wide.37100")),
-        &[],
-    );
-    let smart_lines = run_and_collect(
-        &cap_path,
-        &dir.join(format!("{label}_{ext}_smart.22000")),
-        &dir.join(format!("{label}_{ext}_smart.37100")),
-        &["--smart"],
-    );
+    let wide_lines = run_and_collect(&cap_path, &dir.join(format!("{label}_{ext}_wide.22000")), &[]);
+    let smart_lines = run_and_collect(&cap_path, &dir.join(format!("{label}_{ext}_smart.22000")), &["--smart"]);
 
     // Non-degenerate fixture: WIDE must emit something or the checks are vacuous.
     assert!(!wide_lines.is_empty(), "WIDE produced no lines for {label}.{ext}; fixture is degenerate");
