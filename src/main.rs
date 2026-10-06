@@ -1126,6 +1126,8 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
                 debug.top_groups(&summaries, total_groups);
             }
 
+            stats.distinct_groups = message_store.group_count() as u64;
+
             debug.phase_start(4, "Emit");
         }
 
@@ -1216,6 +1218,11 @@ fn run(cli: &Cli) -> wpawolf::types::Result<()> {
         stats.rc_gap_max = output_stats.rc_gap_max;
         stats.rc_drift_enabled = cli.rc_drift.is_some();
         stats.eapol_pairs_useful = output_stats.pairs_written as u64;
+        stats.eapol_exceeds_hashcat_max = output_stats.eapol_exceeds_hashcat_max;
+        stats.max_pairs_per_group = output_stats.max_pairs_per_group;
+        stats.groups_with_pairs = output_stats.groups_with_pairs as u64;
+        stats.groups_without_pairs = output_stats.groups_without_pairs as u64;
+        stats.groups_complete_4way = output_stats.groups_complete_4way;
         stats.essid_unresolved_emissions = output_stats.essid_unresolved_emissions;
         stats.essid_unresolved_aps = output_stats.essid_unresolved_aps;
 

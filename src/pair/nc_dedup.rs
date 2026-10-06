@@ -89,6 +89,8 @@ pub struct NcDedupStats {
     pub smart_ambiguous_kept: u64,
     /// `--smart`: FT MIC-frames retaining a non-APLESS survivor (clause F).
     pub smart_ft_nonapless_kept: u64,
+    /// Groups where all four EAPOL message types (M1+M2+M3+M4) were present.
+    pub complete_4way: u64,
 }
 
 /// Collapses near-identical-nonce siblings within `pairs`.

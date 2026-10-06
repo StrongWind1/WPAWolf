@@ -136,6 +136,7 @@ const fn merge_nc_stats(acc: &mut NcDedupStats, other: NcDedupStats) {
     acc.smart_uncrackable_dropped += other.smart_uncrackable_dropped;
     acc.smart_ambiguous_kept += other.smart_ambiguous_kept;
     acc.smart_ft_nonapless_kept += other.smart_ft_nonapless_kept;
+    acc.complete_4way += other.complete_4way;
     if other.max_cluster_size > acc.max_cluster_size {
         acc.max_cluster_size = other.max_cluster_size;
     }
@@ -288,8 +289,7 @@ where
             let _ = debug.memory_check(&ctx);
         }
         let t0 = Instant::now();
-        let (emitted, nc) = if cost > STREAM_PAIR_COST {
-            // Mega-group: stream one EAPOL frame at a time to bound peak memory.
+        let (emitted, mut nc) = if cost > STREAM_PAIR_COST {
             let mut count = 0usize;
             let nc = pair_one_group_streaming(mac_pair, messages, config, |survivors| {
                 count += survivors.len();
@@ -302,6 +302,9 @@ where
             on_group(pairs);
             (n, nc)
         };
+        if m1 > 0 && m2 > 0 && m3 > 0 && m4 > 0 {
+            nc.complete_4way = 1;
+        }
         let elapsed_us = t0.elapsed().as_micros();
         debug.group_done(mac_pair.ap, mac_pair.sta, emitted, elapsed_us, cost);
         let done = groups_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -355,7 +358,7 @@ where
         let (m1, m2, m3, m4, cost) = group_counts_and_cost(&messages);
         debug.group_start(mac_pair.ap, mac_pair.sta, m1, m2, m3, m4, cost);
         let t0 = Instant::now();
-        let (emitted, nc) = if cost > STREAM_PAIR_COST {
+        let (emitted, mut nc) = if cost > STREAM_PAIR_COST {
             let mut count = 0usize;
             let nc = pair_one_group_streaming(mac_pair, &messages, config, |survivors| {
                 count += survivors.len();
@@ -368,6 +371,9 @@ where
             on_group(pairs);
             (n, nc)
         };
+        if m1 > 0 && m2 > 0 && m3 > 0 && m4 > 0 {
+            nc.complete_4way = 1;
+        }
         let elapsed_us = t0.elapsed().as_micros();
         debug.group_done(mac_pair.ap, mac_pair.sta, emitted, elapsed_us, cost);
         groups_done += 1;

@@ -198,8 +198,21 @@ pub struct OutputStats {
     pub smart_ambiguous_kept: u64,
     /// `--smart` FT MIC-frames retaining a non-APLESS survivor (clause F).
     pub smart_ft_nonapless_kept: u64,
+    /// Groups where all four EAPOL message types (M1+M2+M3+M4) were present.
+    pub groups_complete_4way: u64,
     /// Maximum `rc_gap_magnitude` seen across all written pairs.
     pub rc_gap_max: u64,
+
+    /// EAPOL hash lines emitted where the frame exceeds hashcat's
+    /// `WPA_EAPOL_LEN_MAX` (512 bytes). The line is still written -- this is
+    /// informational so the operator knows how many lines hashcat will reject.
+    pub eapol_exceeds_hashcat_max: u64,
+    /// Largest number of pairs emitted from a single (AP, STA) group.
+    pub max_pairs_per_group: u64,
+    /// Groups that produced at least one crackable EAPOL pair.
+    pub groups_with_pairs: usize,
+    /// Groups that produced zero crackable EAPOL pairs.
+    pub groups_without_pairs: usize,
 
     /// Hash lines written, keyed by `HashType` (the 11-type classification in
     /// `ARCHITECTURE.md §2`). Counted once per logical hash regardless of how many
@@ -962,6 +975,7 @@ impl OutputContext {
                     let group_ssids = pairs.first().map_or_else(Vec::new, |p| {
                         essid_map.ssids_for_emit(&p.ap, essid_filter.collapse_min, essid_filter.collapse_ratio)
                     });
+                    let mut group_pairs_written: u64 = 0;
                     for pair in &pairs {
                         let Some(ht) = HashType::from_akm_and_attack(pair.akm, false) else {
                             if matches!(pair.akm, AkmType::NotPsk) {
@@ -1022,6 +1036,10 @@ impl OutputContext {
                                             st.pairs_be += 1;
                                         }
                                         st.rc_gap_max = st.rc_gap_max.max(pair.rc_gap_magnitude);
+                                        if pair.eapol_frame.len() > 512 {
+                                            st.eapol_exceeds_hashcat_max += 1;
+                                        }
+                                        group_pairs_written += 1;
                                     } else {
                                         st.dedup_dropped_pairs += 1;
                                     }
@@ -1032,6 +1050,12 @@ impl OutputContext {
                                 },
                             }
                         }
+                    }
+                    st.max_pairs_per_group = st.max_pairs_per_group.max(group_pairs_written);
+                    if group_pairs_written > 0 {
+                        st.groups_with_pairs += 1;
+                    } else {
+                        st.groups_without_pairs += 1;
                     }
                 }
 
@@ -1064,6 +1088,7 @@ impl OutputContext {
         es.stats.smart_uncrackable_dropped += nc_stats.smart_uncrackable_dropped;
         es.stats.smart_ambiguous_kept += nc_stats.smart_ambiguous_kept;
         es.stats.smart_ft_nonapless_kept += nc_stats.smart_ft_nonapless_kept;
+        es.stats.groups_complete_4way += nc_stats.complete_4way;
 
         let total_pairs = total_pairs_processed.load(std::sync::atomic::Ordering::Relaxed);
         debug.phase4_pairs_generated(total_pairs);
