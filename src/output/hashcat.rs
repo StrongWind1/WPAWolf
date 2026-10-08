@@ -182,7 +182,7 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         },
         // Client-side sources: M2 RSN IE, STA-sent auth, probe req,
         // FT Action Request/Confirm, Mesh Peering, OSEN.
-        // hcx: PMKID_CLIENT=0x04 for type 01, PMKID_CLIENT_FTPSK=0x20 for FT type 03.
+        // [HASHCAT.md §6.2 Rules P1, P3, P4]
         PmkidSource::M2RsnIe
         | PmkidSource::FtAuthStaToAp
         | PmkidSource::FilsAuthStaToAp
@@ -195,6 +195,9 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         | PmkidSource::OsenIe => {
             if is_ft {
                 0x20
+            } else if entry.akm.is_psk_sha256() {
+                // [HASHCAT.md §6.2 Rule P3] SHA256 bit independent of direction.
+                0x06
             } else {
                 0x04
             }
@@ -578,20 +581,26 @@ mod tests {
     }
 
     #[test]
-    fn format_pmkid_22000_message_pair_unchanged_for_non_ft() {
-        // Regression pin: non-FT entries keep the mode-22000 mp bytes
-        // (PMKID_AP=0x01 for AP-side, PMKID_CLIENT=0x04 for client-side).
+    fn format_pmkid_22000_message_pair_for_non_ft() {
+        // [HASHCAT.md §6.2] WPA2-PSK: AP-side=0x01, client-side=0x04.
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::Wpa2Psk;
         entry.source = PmkidSource::M1KeyData;
         let line = format_pmkid_22000(&entry, b"net");
         let fields: Vec<&str> = line.splitn(10, '*').collect();
-        assert_eq!(fields[8], "01", "AP-side non-FT PMKID must keep PMKID_AP=0x01");
+        assert_eq!(fields[8], "01", "WPA2-PSK AP-side must emit PMKID_AP=0x01");
 
         entry.source = PmkidSource::M2RsnIe;
         let line = format_pmkid_22000(&entry, b"net");
         let fields: Vec<&str> = line.splitn(10, '*').collect();
-        assert_eq!(fields[8], "04", "client-side non-FT PMKID must keep PMKID_CLIENT=0x04");
+        assert_eq!(fields[8], "04", "WPA2-PSK client-side must emit PMKID_CLIENT=0x04");
+
+        // [HASHCAT.md §6.2 Rule P3] PSK-SHA-256: client-side=0x06 (CLIENT + SHA256).
+        entry.akm = AkmType::PskSha256;
+        entry.source = PmkidSource::ProbeRequest;
+        let line = format_pmkid_22000(&entry, b"net");
+        let fields: Vec<&str> = line.splitn(10, '*').collect();
+        assert_eq!(fields[8], "06", "PSK-SHA-256 client-side must emit 0x06 (CLIENT + SHA256)");
     }
 
     // --- WPA*04* ---

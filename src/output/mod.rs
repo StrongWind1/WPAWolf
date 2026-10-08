@@ -145,7 +145,6 @@ pub struct OutputStats {
     pub emit_dropped_notpsk_akm: usize,
     /// FT hashes dropped at emit because the FT context (R0KH-ID) was missing.
     pub emit_dropped_ft_no_context: usize,
-
     /// Per-sink line counts (passed each sink's dedup, written to disk if configured).
     pub lines_per_sink: PerSinkCounts,
     /// Per-sink dedup-suppressed counts.
@@ -811,12 +810,14 @@ impl OutputContext {
         // lacked an R0KH-ID can still emit using the session's R0KH-ID from M2/M3.
         // Built only when an FT PMKID actually needs it, so the common path pays
         // nothing and disk mode avoids an unnecessary spill re-read.
+        // FT-context backfill: any FT PMKID or FT EAPOL pair whose own carrier
+        // frame lacks R0KH-ID can use a session-mate's FtFields (e.g. M2/M3
+        // carry FTE even when M1/M4 do not). Built when any FT material is
+        // present; the scan is a single pass over the message store.
+        let has_ft_material = Self::any_ft_pmkid_missing_context(pmkid_store)
+            || message_store.groups().any(|(_, msgs)| msgs.iter().any(|m| m.akm.is_ft()));
         let ft_backfill: HashMap<MacPair, Box<FtFields>> =
-            if any_sink && Self::any_ft_pmkid_missing_context(pmkid_store) {
-                Self::build_ft_backfill(message_store)
-            } else {
-                HashMap::new()
-            };
+            if any_sink && has_ft_material { Self::build_ft_backfill(message_store) } else { HashMap::new() };
 
         // --- Pipeline 1: PMKIDs (Invariant OUT-1 -- always before EAPOL pairs) ---
         //
@@ -986,21 +987,21 @@ impl OutputContext {
                             continue;
                         };
                         let is_ft = ht.is_ft();
-
                         let ft_ctx: Option<&FtFields> = if is_ft {
                             if let Some(ft) = pair.ft.as_ref().filter(|ft| ft.r0khid_len > 0) {
                                 Some(ft)
                             } else if let Some(ft) = ft_backfill.get(&MacPair::new(pair.ap, pair.sta)) {
-                                // Carrier frame lacked R0KH-ID; reuse the session's (M2/M3).
                                 Some(ft.as_ref())
                             } else {
+                                // FT context missing (typically M4-anchored pair, no FTE).
+                                // The MIC was computed from the FT key hierarchy; a non-FT
+                                // WPA*02* line is structurally uncrackable (§7.4). Drop.
                                 st.emit_dropped_ft_no_context += 1;
                                 continue;
                             }
                         } else {
                             None
                         };
-
                         if group_ssids.is_empty() {
                             *ud.entry(pair.ap).or_insert(0) += 1;
                             st.essid_unresolved_emissions += 1;

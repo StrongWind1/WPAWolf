@@ -88,43 +88,10 @@ fn run_wpawolf_capture_stats(input: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-#[test]
-fn rc_endianness_fixtures_emit_le_be_flags_under_rc_drift() {
-    // The replay-counter-endianness fixtures carry a byte-swapped replay
-    // counter. Under --rc-drift wpawolf resolves the pair via byte-swap and
-    // sets FLAG_LE (0x20) and FLAG_BE (0x40) in the message-pair byte. In the
-    // default WIDE mode the unbounded RC tolerance matches natively, so those
-    // flags are absent -- which is why this assertion runs with --rc-drift.
-    // This pins the last two message-pair flag bits the corpus can produce.
-    let fixtures = [
-        Path::new(CORPUS_ROOT).join("edge/endian_rc_m2_swapped.pcap"),
-        Path::new(CORPUS_ROOT).join("edge/endian_rc_m1_swapped.pcap"),
-    ];
-    let combined =
-        std::env::temp_dir().join(format!("wpawolf-endian-{}-{}.combined", std::process::id(), unique_suffix()));
-    let _ = fs::remove_file(&combined);
-    let mut cmd = Command::new(binary_path());
-    cmd.arg("--rc-drift=8").arg("-o").arg(&combined);
-    for f in &fixtures {
-        assert!(f.exists(), "missing endianness fixture {} -- run wpawolf-fixturegen", f.display());
-        cmd.arg(f);
-    }
-    let status = cmd.status().expect("spawn wpawolf");
-    assert!(status.success(), "wpawolf --rc-drift failed on the endianness fixtures");
-    let content = fs::read_to_string(&combined).unwrap_or_default();
-    // OR the message-pair byte (the final `*`-separated field) of every non-FT
-    // EAPOL line (WPA*02*), then check the LE (0x20) and BE (0x40) bits both
-    // appear across the corpus output. [FLAG_LE / FLAG_BE -- src/pair/mod.rs]
-    let mut flag_bits: u8 = 0;
-    for line in content.lines() {
-        if !line.starts_with("WPA*02*") {
-            continue;
-        }
-        flag_bits |= u8::from_str_radix(line.rsplit('*').next().unwrap_or(""), 16).unwrap_or(0);
-    }
-    assert!(flag_bits & 0x20 != 0, "FLAG_LE (0x20) not set on any endianness EAPOL line under --rc-drift");
-    assert!(flag_bits & 0x40 != 0, "FLAG_BE (0x40) not set on any endianness EAPOL line under --rc-drift");
-}
+// rc_endianness_fixtures_emit_le_be_flags_under_rc_drift: REMOVED.
+// [HASHCAT.md §6 Rules E6-E10] LE/BE flags are no longer emitted. The
+// endianness fixtures still exercise the RC byte-swap pairing path but
+// the output no longer carries endianness flag bits.
 
 #[test]
 fn corpus_root_exists() {

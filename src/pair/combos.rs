@@ -15,7 +15,7 @@ use crate::types::{MacAddr, MsgType};
 
 use super::constraints::{RcRelation, expected_rc_delta, within_rc_for_combo, within_time};
 use super::nc_dedup::{Endianness, cluster_indices, pick_safe_survivor, tail_u32};
-use super::{ComboType, FLAG_APLESS, FLAG_BE, FLAG_LE, FLAG_NC, PairedHash};
+use super::{ComboType, FLAG_APLESS, FLAG_NC, PairedHash};
 
 // --- PairConfig ---
 
@@ -145,11 +145,6 @@ struct GenCtx<'a> {
     ap: MacAddr,
     sta: MacAddr,
     config: &'a PairConfig,
-    /// `true` when any M1 was seen or nonce-counter drift was detected -- drives
-    /// the M3-anchored `FLAG_NC` rule. See `generate`.
-    session_carries_nc: bool,
-    /// `(le, be)` router-endianness flags from `detect_nonce_endianness`.
-    router_endian: (bool, bool),
     ap_bytes: [u8; 6],
     sta_bytes: [u8; 6],
     /// Smart-mode (`--smart`) handshake-instance table for this group. Empty in
@@ -167,27 +162,13 @@ struct GenCtx<'a> {
 /// `dedup_push!` macro plus the N3E2/N3E4 `FLAG_NC` rule in `generate`; the
 /// `streamed_matches_materialized` parity test pins the two against drift.
 fn finalize_and_dedup(
-    mut pair: PairedHash,
+    pair: PairedHash,
     ctx: &GenCtx<'_>,
     seen: &mut std::collections::HashSet<u64>,
 ) -> Option<PairedHash> {
-    // M3-anchored pairs (N3E2 / N3E4) gain FLAG_NC from session state (M1
-    // presence / endianness drift) or a per-pair RC deviation -- the same
-    // three-source rule as `generate`. M1-anchored pairs already carry FLAG_NC
-    // from `try_pair`.
-    if matches!(pair.combo_type, ComboType::N3E2 | ComboType::N3E4)
-        && (ctx.session_carries_nc || pair.rc_gap_magnitude > 0)
-    {
-        pair.message_pair |= FLAG_NC;
-    }
-    if pair.message_pair & FLAG_NC != 0 {
-        if ctx.router_endian.0 {
-            pair.message_pair |= FLAG_LE;
-        }
-        if ctx.router_endian.1 {
-            pair.message_pair |= FLAG_BE;
-        }
-    }
+    // [HASHCAT.md §6 Rule E9] LE/BE flags disabled -- the safe default (try
+    // both byte orders) is used until the mapping between detect_nonce_endianness
+    // byte groups and hashcat's kernel `to` field byte layout is verified.
     let kind: u8 = if pair.akm.is_ft() { 0x04 } else { 0x02 };
     // message_pair gated by --collapse-message-pair (metadata, not identity) -- kept
     // byte-identical to the materialized `dedup_push!` and to
@@ -282,7 +263,6 @@ pub fn generate_streaming(
     let messages_capped =
         cap_list(&mut m1s, cap) + cap_list(&mut m2s, cap) + cap_list(&mut m3s, cap) + cap_list(&mut m4s, cap);
 
-    let router_endian = detect_nonce_endianness(&m1s, &m3s);
     let mut filter_stats = PairFilterStats { messages_capped, ..PairFilterStats::default() };
     // Smart-mode Phase A: partition this group's AP-frames into handshake
     // instances (empty in WIDE mode). Tally instances from multi-instance groups
@@ -291,16 +271,7 @@ pub fn generate_streaming(
     if instance_table.instances.len() > 1 {
         filter_stats.smart_instances_attributed += u64::try_from(instance_table.instances.len()).unwrap_or(u64::MAX);
     }
-    let ctx = GenCtx {
-        ap,
-        sta,
-        config,
-        session_carries_nc: !m1s.is_empty() || router_endian.0 || router_endian.1,
-        router_endian,
-        ap_bytes: ap.0,
-        sta_bytes: sta.0,
-        instance_table,
-    };
+    let ctx = GenCtx { ap, sta, config, ap_bytes: ap.0, sta_bytes: sta.0, instance_table };
 
     // M2-frame chunks: N1E2 (nonce M1) + N3E2 (nonce M3).
     for &eapol_msg in &m2s {
@@ -597,7 +568,7 @@ fn try_pair(
     // expected relationship for this combo type. Uses combo-aware offset so that N3E2/N2E3/N1E4
     // pairs with the standard M3.rc = M2.rc + 1 delta are not spuriously rejected.
     // Unfiltered (rc_drift_enabled=false): all pairs treated as RC-exact. [ARCHITECTURE.md §8 FR-PAIR-4]
-    let rc_rel = if config.rc_drift_enabled {
+    let _rc_rel = if config.rc_drift_enabled {
         match within_rc_for_combo(nonce_msg, eapol_msg, combo, config.rc_drift_tolerance) {
             Some(rel) => rel,
             None => return Err(FilterReason::Rc),
@@ -616,24 +587,17 @@ fn try_pair(
     if apless {
         message_pair |= FLAG_APLESS; // APLESS set for N2E3 and N4E3 combos.
     }
-    match rc_rel {
-        RcRelation::Exact | RcRelation::WithinTolerance => {
-            // NC flag (bit 7) for M1-anchored pairs (N1E2, N1E4): hcxpcapngtool
-            // initialises every M1 with status = ST_NC (0x80) at
-            // [hcxpcapngtool.c:4190] and addhandshake() propagates that status
-            // onto the mpfield, so N1E2 / N1E4 always inherit NC from the M1
-            // they originate from. M3-anchored pairs (N3E2 / N3E4) get
-            // FLAG_NC applied in `generate` using the three-source rule
-            // described above the partition block.
-            let nonce_from_m1 = matches!(nonce_msg.msg_type, MsgType::M1);
-            if !apless && nonce_from_m1 {
-                message_pair |= FLAG_NC;
-            }
-        },
-        RcRelation::ByteSwapped => {
-            // Endianness correction sets LE+BE and NC. [hcxpcapngtool.c:2302-2305]
-            message_pair |= FLAG_LE | FLAG_BE | FLAG_NC;
-        },
+    // [HASHCAT.md §6 Rule E4] NC on every non-APLESS pair unconditionally.
+    // A pcap capture cannot guarantee ANonce-EAPOL session alignment; the
+    // 0.2% overhead (9 nonce iterations vs 4096 PBKDF2 rounds) is negligible
+    // compared to the risk of silent crack failure when NC is omitted.
+    // [HASHCAT.md §6 Rules E6-E10] LE/BE flags are not set until nonce-
+    // counter endianness detection is implemented. RC byte-swap detection
+    // (ByteSwapped) still drives --rc-drift pair acceptance but no longer
+    // sets output flags -- RC endianness and nonce-counter endianness are
+    // independent firmware properties.
+    if !apless {
+        message_pair |= FLAG_NC;
     }
 
     // Compute actual RC gap magnitude regardless of whether the rc_drift filter is enabled.
@@ -719,9 +683,11 @@ pub struct PairFilterStats {
 ///
 /// Returns `(le, be)` where each bool is set on the first positive pairwise match.
 /// Both remain `false` for sessions with fewer than two M1/M3 messages combined
-/// (most short captures). Used by `generate()` and `generate_streaming()` to propagate
-/// the flag onto every paired hash with `FLAG_NC`, matching hcxpcapngtool's
-/// `status = ST_LE + ST_NC` / `ST_BE + ST_NC` encoding.
+/// (most short captures). Retained for future use once the mapping between
+/// these byte groups and hashcat's kernel `to` field byte layout is verified.
+/// Currently `#[cfg(test)]` only -- LE/BE flags are not set in the output.
+/// [HASHCAT.md §6 Rules E6-E9]
+#[cfg(test)]
 fn detect_nonce_endianness(m1s: &[&EapolMessage], m3s: &[&EapolMessage]) -> (bool, bool) {
     let mut le = false;
     let mut be = false;
@@ -734,9 +700,14 @@ fn detect_nonce_endianness(m1s: &[&EapolMessage], m3s: &[&EapolMessage]) -> (boo
             // First 28 bytes must match (the static portion of the AP's RNG seed),
             // last 4 bytes must differ (the counter portion). [hcxpcapngtool.c:3814]
             if a.nonce[..28] == b.nonce[..28] && a.nonce[28..32] != b.nonce[28..32] {
-                if a.nonce[30..32] != b.nonce[30..32] {
+                // hashcat's `to` = {nonce[24]=MSB, nonce[31], nonce[30], nonce[29]=LSB}.
+                // LE path increments nonce[29] (LSB); BE path increments nonce[24] (MSB).
+                // bytes 28-29 differ -> nonce[29] changed -> LE path corrects it.
+                // bytes 30-31 differ -> nonce[30/31] changed -> BE path corrects it
+                // (nonce[31] is at bit 16, BE swap puts it near LSB).
+                if a.nonce[28..30] != b.nonce[28..30] {
                     le = true;
-                } else if a.nonce[28..30] != b.nonce[28..30] {
+                } else if a.nonce[30..32] != b.nonce[30..32] {
                     be = true;
                 }
             }
@@ -813,26 +784,31 @@ mod tests {
     }
 
     #[test]
-    fn endianness_detect_le_on_trailing_byte_diff() {
-        // First 28 bytes identical, bytes 30-31 differ -> LE.
+    fn endianness_detect_be_on_trailing_byte_diff() {
+        // First 28 bytes identical, bytes 30-31 differ -> BE.
+        // hashcat's BE path (swap + increment) corrects nonce[31]/[30]
+        // changes because they sit at bits 16-23 / 8-15 of `to`, and
+        // after swap they're near the LSB where the correction operates.
         let mut n1 = [0u8; 32];
         let mut n2 = [0u8; 32];
         for (i, b) in n1.iter_mut().enumerate().take(28) {
             *b = u8::try_from(i).unwrap_or(0);
         }
         n2[..28].copy_from_slice(&n1[..28]);
-        n2[30] = 0xAA; // bytes 30-31 differ
+        n2[30] = 0xAA;
         n2[31] = 0xBB;
         let a = make_m1_nonce(n1);
         let b = make_m1_nonce(n2);
         let (le, be) = detect_nonce_endianness(&[&a, &b], &[]);
-        assert!(le, "expected LE detection on trailing-byte difference");
-        assert!(!be);
+        assert!(be, "expected BE detection on trailing-byte difference");
+        assert!(!le);
     }
 
     #[test]
-    fn endianness_detect_be_on_mid_byte_diff() {
-        // First 28 bytes identical, bytes 28-29 differ but 30-31 match -> BE.
+    fn endianness_detect_le_on_mid_byte_diff() {
+        // First 28 bytes identical, bytes 28-29 differ but 30-31 match -> LE.
+        // hashcat's LE path (native increment) corrects nonce[29] changes
+        // because nonce[29] is the LSB of `to`.
         let mut n1 = [0u8; 32];
         let mut n2 = [0u8; 32];
         for (i, b) in n1.iter_mut().enumerate().take(28) {
@@ -841,12 +817,11 @@ mod tests {
         n2[..28].copy_from_slice(&n1[..28]);
         n2[28] = 0xAA;
         n2[29] = 0xBB;
-        // bytes 30-31 stay zero on both -> equal
         let a = make_m1_nonce(n1);
         let b = make_m1_nonce(n2);
         let (le, be) = detect_nonce_endianness(&[&a, &b], &[]);
-        assert!(be, "expected BE detection on mid-byte difference with matching tail");
-        assert!(!le);
+        assert!(le, "expected LE detection on mid-byte difference with matching tail");
+        assert!(!be);
     }
 
     #[test]
@@ -865,7 +840,7 @@ mod tests {
 
     #[test]
     fn endianness_detect_from_m3_group() {
-        // LE pattern must also be detected across M3 messages, not just M1s.
+        // BE pattern detected across M3 messages. Bytes 30-31 differ -> BE.
         let mut n1 = [0u8; 32];
         let mut n2 = [0u8; 32];
         for (i, b) in n1.iter_mut().enumerate().take(28) {
@@ -877,15 +852,12 @@ mod tests {
         let a = EapolMessage { msg_type: MsgType::M3, ..make_m1_nonce(n1) };
         let b = EapolMessage { msg_type: MsgType::M3, ..make_m1_nonce(n2) };
         let (le, be) = detect_nonce_endianness(&[], &[&a, &b]);
-        assert!(le && !be);
+        assert!(be && !le);
     }
 
     #[test]
     fn endianness_detect_across_m1_and_m3_groups() {
-        // hcxpcapngtool's loop guard accepts HS_M1 || HS_M3, so an M1 and an M3
-        // with matching 28-byte prefix and different trailing 4 bytes trigger
-        // endianness detection too. wpawolf must mirror that or it silently
-        // misses ST_LE+ST_NC inheritance on AP-counter-incrementing sessions.
+        // M1 and M3 with matching 28-byte prefix and different bytes 30-31 -> BE.
         let mut n_m1 = [0u8; 32];
         let mut n_m3 = [0u8; 32];
         for (i, b) in n_m1.iter_mut().enumerate().take(28) {
@@ -897,8 +869,8 @@ mod tests {
         let m1 = make_m1_nonce(n_m1);
         let m3 = EapolMessage { msg_type: MsgType::M3, ..make_m1_nonce(n_m3) };
         let (le, be) = detect_nonce_endianness(&[&m1], &[&m3]);
-        assert!(le, "expected LE detection when M1 and M3 share prefix but differ in tail");
-        assert!(!be);
+        assert!(be, "expected BE detection when M1 and M3 share prefix but differ in tail");
+        assert!(!le);
     }
 
     fn default_config() -> PairConfig {
@@ -1031,31 +1003,27 @@ mod tests {
     }
 
     #[test]
-    fn generate_n3e2_no_flag_nc_on_standard_handshake_without_m1() {
-        // Mid-capture session: only M2 (rc=1) and M3 (rc=2) captured, standard
-        // RC deviation = 0, no M1, no endianness drift. hcx-default emits *02
-        // (FLAG_NC=0) for these handshakes; wpawolf-WIDE must match to preserve
-        // the line-by-line superset invariant against hcx-default. This test
-        // pins the matching behaviour.
+    fn generate_n3e2_always_carries_flag_nc() {
+        // [HASHCAT.md §6 Rule E4] NC is set on every non-APLESS pair
+        // unconditionally. Even a mid-capture session with only M2+M3
+        // (no M1, no endianness drift, standard RC delta) must carry
+        // FLAG_NC so hashcat iterates nonce corrections.
         let msgs = vec![make_msg(MsgType::M2, 1, 100, 0xB1), make_msg(MsgType::M3, 2, 200, 0xC1)];
         let (pairs, _) = generate(ap(), sta(), &msgs, &default_config());
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert_eq!(n3e2.len(), 1, "expected one N3E2 pair");
-        assert_eq!(
+        assert_ne!(
             n3e2[0].message_pair & FLAG_NC,
             0,
-            "N3E2 must NOT carry FLAG_NC for a standard mid-capture handshake (no M1, no endianness, deviation=0)"
+            "N3E2 must carry FLAG_NC per HASHCAT.md §6 Rule E4 (NC on all non-APLESS)"
         );
     }
 
     #[test]
-    fn generate_n3e2_carries_flag_nc_on_endianness_without_m1() {
-        // Two M3s sharing the first 28 nonce bytes but differing in the trailing
-        // 4 -> wpawolf's endianness detector flags LE drift; hcx mirrors this at
-        // [hcxpcapngtool.c:3814-3822] by setting `status = ST_LE + ST_NC` on the
-        // M3 entries, then propagating ST_NC via addhandshake's inheritance loop.
-        // Even without an M1 captured, the resulting N3E2 anchor must carry
-        // FLAG_NC (and FLAG_LE on top via the dedup_push! overlay).
+    fn generate_n3e2_nonce_drift_without_m1() {
+        // Two M3s with nonce-counter drift (first 28 bytes match, last 4
+        // differ). LE/BE flags are disabled (Rule E9), so only FLAG_NC
+        // is checked. The pair still forms and carries NC per Rule E4.
         let mut n_a = [0u8; 32];
         let mut n_b = [0u8; 32];
         for (i, b) in n_a.iter_mut().enumerate().take(28) {
@@ -1071,12 +1039,7 @@ mod tests {
         let n3e2: Vec<&PairedHash> = pairs.iter().filter(|p| p.combo_type == ComboType::N3E2).collect();
         assert!(!n3e2.is_empty(), "expected at least one N3E2 pair");
         for p in &n3e2 {
-            assert_ne!(p.message_pair & FLAG_NC, 0, "endianness drift on M3 must set FLAG_NC on every N3E2 pair");
-            assert_ne!(
-                p.message_pair & FLAG_LE,
-                0,
-                "endianness drift on M3 must set FLAG_LE via the dedup_push! overlay"
-            );
+            assert_ne!(p.message_pair & FLAG_NC, 0, "N3E2 must carry FLAG_NC per Rule E4");
         }
     }
 

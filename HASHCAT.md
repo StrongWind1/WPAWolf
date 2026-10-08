@@ -47,11 +47,13 @@ Class 1 (WPA1-PSK-EAPOL) is the only odd code without a PMKID partner: WPA1 has 
 
 AKM values reference [IEEE 802.11-2024] Table 9-190 (OUI `00:0F:AC`). KDV values reference §12.7.2 Key Information bits 0-2; PMKID-only rows have no KDV (the field exists only in EAPOL-Key frames). KDV `0` for SHA-384 EAPOL is the spec's "reserved" value; the AKM negotiates SHA-384 out of band rather than via the keyver field, because the 16 B MIC slot the keyver field selects cannot accommodate a 24 B MIC.
 
+**Classes 8-11 (SHA-384):** AKMs 19 and 20 are defined in the spec but not yet implemented by hostapd or wpa_supplicant. No real-world captures with these AKMs have been observed. wpawolf classifies and counts them in the stats banner but does not emit them to any output sink. hashcat mode 22000 cannot express the 24 B MIC (fixed 16 B field) and rejects `keyver=0` at load time. Full SHA-384 support is deferred until these AKMs see production deployment.
+
 ---
 
 ## §3  Mode 22000 Format Reference
 
-Verified against upstream hashcat branch `master`, commit `b3ecf3293`.
+Verified against upstream hashcat branch `master`, commit `bb52c06b9`.
 
 ### Line format
 
@@ -279,99 +281,266 @@ passphrase + SSID
 
 ## §6  Message-Pair Byte
 
-The trailing 1-byte `<mp>` field encodes metadata about how the hash line was constructed. The format is identical across all line prefixes and between wpawolf and hcxpcapngtool. Constants reference `hcxtools/include/hcxpcapngtool.h`.
+The trailing 1-byte `<mp>` field encodes metadata about how the hash line was constructed. EAPOL and PMKID lines use different encodings: the byte is a **control signal** for EAPOL (affects hashcat kernel behavior) and a **source tag** for PMKID (diagnostic only).
 
-### EAPOL lines (`WPA*02*`, `WPA*04*`)
+### §6.1  EAPOL lines (`WPA*02*`, `WPA*04*`)
+
+#### Byte layout
 
 ```
-   bit 7: NC      0x80   nonce-error-correction tolerance was needed
-   bit 6: BE      0x40   replay-counter pair resolved as big-endian
-   bit 5: LE      0x20   replay-counter pair resolved as little-endian
-   bit 4: APLESS  0x10   pair did not require an M1 (set for N2E3, N4E3)
-   bits 3-0:      0x0F   combo discriminant (0..5)
+  7     6     5     4     3    2    1    0
+┌─────┬─────┬─────┬─────┬────┬────┴────┴────┐
+│ NC  │ BE  │ LE  │ APL │ —  │  combo (0-5)  │
+└─────┴─────┴─────┴─────┴────┴───────────────┘
 ```
 
-### N#E# combo notation
+| Bit(s) | Mask   | Name   | hashcat effect                                                   |
+| ------ | ------ | ------ | ---------------------------------------------------------------- |
+| 0-2    | `0x07` | Combo  | Identifies the N#E# pairing (kernel does not read it)            |
+| 3      | `0x08` | —      | Reserved, always 0                                               |
+| 4      | `0x10` | APLESS | Zeroes `nonce_error_corrections` (overrides NC)                  |
+| 5      | `0x20` | LE     | Restricts nonce iteration to LE byte order only                  |
+| 6      | `0x40` | BE     | Restricts nonce iteration to BE byte order only                  |
+| 7      | `0x80` | NC     | Enables nonce-error-correction iteration (default 8 corrections) |
+
+#### Bits 0-2: Combo discriminant
 
 `N{nonce_msg}E{eapol_msg}`: **N**once from message **#**, **E**APOL frame from message **#**.
 
-| Combo    | Nonce source | EAPOL source | Low nibble | RC relationship       | APLESS |
-|----------|--------------|--------------|----------:|-----------------------|--------|
-| **N1E2** | M1 (ANonce)  | M2           | `0x00`    | `RC(M2) == RC(M1)`    | no     |
-| **N1E4** | M1 (ANonce)  | M4           | `0x01`    | `RC(M4) == RC(M1)+1`  | no     |
-| **N3E2** | M3 (ANonce)  | M2           | `0x02`    | `RC(M2) == RC(M3)-1`  | no     |
-| **N2E3** | M2 (SNonce)  | M3           | `0x03`    | `RC(M3) == RC(M2)+1`  | yes    |
-| **N4E3** | M4 (SNonce)  | M3           | `0x04`    | `RC(M3) == RC(M4)`    | yes    |
-| **N3E4** | M3 (ANonce)  | M4           | `0x05`    | `RC(M4) == RC(M3)`    | no     |
+| Value | Combo    | Nonce source | EAPOL source | RC relationship       | APLESS |
+| ----: | -------- | ------------ | ------------ | --------------------- | ------ |
+|     0 | **N1E2** | M1 (ANonce)  | M2           | `RC(M2) == RC(M1)`   | no     |
+|     1 | **N1E4** | M1 (ANonce)  | M4           | `RC(M4) == RC(M1)+1` | no     |
+|     2 | **N3E2** | M3 (ANonce)  | M2           | `RC(M2) == RC(M3)-1` | no     |
+|     3 | **N2E3** | M2 (SNonce)  | M3           | `RC(M3) == RC(M2)+1` | yes    |
+|     4 | **N4E3** | M4 (SNonce)  | M3           | `RC(M3) == RC(M4)`   | yes    |
+|     5 | **N3E4** | M3 (ANonce)  | M4           | `RC(M4) == RC(M3)`   | no     |
 
-Concrete byte values commonly seen:
-```
-0x00   N1E2, no flags             clean capture, challenge pair
-0x02   N3E2, no flags             clean capture, authorized
-0x05   N3E4, no flags             clean capture, authorized
-0x13   N2E3, APLESS               AP-less authorized
-0x14   N4E3, APLESS               AP-less authorized
-0x82   N3E2 with NC               RC drift required nonce correction
-0x22   N3E2 with LE               RC pair resolved as little-endian
-0x42   N3E2 with BE               RC pair resolved as big-endian
-```
+**Rule E1.** Set to the combo type. Immutable. Determined at pairing time.
 
-Hashcat reads the byte and: masks bits 0-3 to identify the combo; inspects bit 4 (APLESS) to zero nonce-error-corrections; inspects bit 7 (NC) to enable nonce-correction kernel iterations. Bits 5 and 6 (LE/BE) are diagnostic only.
+#### Bit 4 (0x10): APLESS
+
+"The nonce in this hash line is the STA's SNonce, not the AP's ANonce." The STA generated the SNonce fresh for this session -- it cannot be stale and nonce iteration is pointless.
+
+hashcat (`module_22000.c:1601-1605`): APLESS is checked **before** NC. When set, `nonce_error_corrections` is zeroed unconditionally, regardless of the NC bit.
+
+**Rule E2.** Set IFF combo is N2E3 or N4E3. Structural property of the combo, never conditional.
+
+**Rule E3.** APLESS overrides NC. Do not set NC when APLESS is set -- it has no effect and is misleading.
+
+#### Bit 7 (0x80): NC (Nonce-error-corrections)
+
+"hashcat should iterate nearby ANonce values when cracking." The kernel sweeps `±NONCE_ERROR_CORRECTIONS/2` (default ±4, 9 total values) around the last 4 bytes of the ANonce (`m22000-pure.cl:534-573`). NC=0 means exact match only (1 value).
+
+The AP maintains a global nonce counter incremented for every M1 sent to any STA. If the captured M1 and M2 are from different handshake attempts -- dropped packets, interleaved STAs, retransmissions -- the ANonce in the hash line is off by a small integer. Without iteration, hashcat tries only the exact captured nonce and silently fails.
+
+**Rule E4.** Set on every non-APLESS pair. A pcap capture cannot guarantee ANonce-EAPOL session alignment. The cost is negligible (9 iterations vs 4096 PBKDF2 rounds = 0.2%). Omitting NC risks silent crack failure -- the worst outcome for a security tool.
+
+**Rule E5.** NC is independent of LE/BE. "How many values to try" is orthogonal to "which byte order to count in."
+
+#### Bits 5-6 (0x20, 0x40): LE / BE (Nonce counter byte order)
+
+An optimization hint. The AP's nonce counter may be stored as LE or BE in firmware. When iterating nearby nonce values, hashcat needs to know which byte of the 4-byte nonce tail to increment (`m22000-pure.cl:542-555`).
+
+hashcat behavior (`module_22000.c:1463-1481`):
+- Neither set: `detected_le=1, detected_be=1`, `bo_loops=2` -- try both byte orders (safe default).
+- LE only: `detected_le=1, detected_be=0`, `bo_loops=1` -- LE only (halves work).
+- BE only: `detected_le=0, detected_be=1`, `bo_loops=1` -- BE only (halves work).
+- Both set: `bo_loops=2` -- equivalent to neither (contradictory, wastes a metadata bit).
+
+**Rule E6.** LE and BE are mutually exclusive. Never set both -- it is semantically contradictory and functionally equivalent to neither.
+
+**Rule E7.** LE/BE require NC. Without NC, `nonce_error_corrections=0`, the kernel runs exactly 1 iteration with correction=0 (the original nonce value). Byte order is irrelevant when there is nothing to iterate.
+
+**Rule E8.** Set LE or BE only when nonce counter byte order is specifically detected. The detection signal is: two ANonces from the same AP where the first 28 bytes match and the last 4 bytes differ by a small integer in one specific byte order. Replay counter byte order is NOT the correct signal -- RC endianness and nonce counter endianness are independent firmware properties.
+
+**Rule E9.** When endianness is unknown, do not set either flag. The safe default (try both) costs 2x the inner loop but guarantees no silent failure. Setting the wrong flag halves the search space and silently misses the crack.
 
 #### 6-to-3 equivalence collapse
 
 Within a single handshake session the 6 combos produce at most 3 cryptographically unique hashes, grouped by the EAPOL frame whose MIC was computed:
 
-| Hash group | Members      | Unique because of   |
-|------------|--------------|---------------------|
-| Hash-A     | N1E2, N3E2   | M2's EAPOL frame    |
-| Hash-B     | N2E3, N4E3   | M3's EAPOL frame    |
-| Hash-C     | N1E4, N3E4   | M4's EAPOL frame    |
+| Hash group | Members    | Unique because of |
+| ---------- | ---------- | ----------------- |
+| Hash-A     | N1E2, N3E2 | M2's EAPOL frame  |
+| Hash-B     | N2E3, N4E3 | M3's EAPOL frame  |
+| Hash-C     | N1E4, N3E4 | M4's EAPOL frame  |
 
-### PMKID lines (`WPA*01*`, `WPA*03*`)
+#### Valid EAPOL mp bytes (current)
 
-PMKID lines repurpose the `<mp>` slot as a status byte recording which side of the wire the PMKID was observed on:
+LE/BE flags are disabled per Rule E9: the mapping between `detect_nonce_endianness` byte groups and hashcat's kernel `to` field byte layout has not been verified. The safe default (neither set, hashcat tries both byte orders) is used. 4 non-APLESS combos x NC + 2 APLESS combos = 6 values:
 
-| Value  | Constant              | Meaning |
-|--------|-----------------------|---------|
-| `0x01` | `PMKID_AP`            | AP-to-STA path (M1 KDE, Beacon, Probe Response) |
-| `0x03` | `PMKID_AP \| PMKID_APPSK256` | AP-side with PSK-SHA256 AKM hint |
-| `0x04` | `PMKID_CLIENT`        | STA-to-AP path (M2 RSN IE, Association Request) |
-| `0x10` | `PMKID_AP_FTPSK`      | FT-PSK AP-side (`WPA*03*` lines) |
-| `0x20` | `PMKID_CLIENT_FTPSK`  | FT-PSK client-side (`WPA*03*` lines) |
+| mp byte | Combo | Flags  |
+| ------- | ----- | ------ |
+| `0x80`  | N1E2  | NC     |
+| `0x81`  | N1E4  | NC     |
+| `0x82`  | N3E2  | NC     |
+| `0x85`  | N3E4  | NC     |
+| `0x13`  | N2E3  | APLESS |
+| `0x14`  | N4E3  | APLESS |
 
-Hashcat's PMKID parser does not use this byte for kernel dispatch; it is diagnostic metadata preserved for round-trip compatibility with hcxpcapngtool.
+#### Invalid EAPOL mp bytes (never emit)
+
+| Pattern                          | Violated rule                              |
+| -------------------------------- | ------------------------------------------ |
+| `0x00`-`0x05` (no NC, no APLESS) | E4: NC required on non-APLESS             |
+| `0x20`-`0x25` (LE without NC)   | E7: LE requires NC                         |
+| `0x40`-`0x45` (BE without NC)   | E7: BE requires NC                         |
+| `0xE0`-`0xE5` (NC+LE+BE)        | E6: LE and BE mutually exclusive           |
+| `0x93`, `0x94` (APLESS+NC)      | E3: NC redundant on APLESS                 |
+| `0x33`, `0x34` (APLESS+LE)      | E3+E7: APLESS overrides NC; LE needs NC    |
+| `0x53`, `0x54` (APLESS+BE)      | E3+E7: same                                |
+| `0xB3`, `0xB4` (APLESS+NC+LE)   | E3: NC redundant on APLESS                 |
+| `0xD3`, `0xD4` (APLESS+NC+BE)   | E3: NC redundant on APLESS                 |
+
+### §6.2  PMKID lines (`WPA*01*`, `WPA*03*`)
+
+PMKID kernels (aux4 for `WPA*01*`, aux5 for `WPA*03*`) have zero references to `nonce_error_corrections`, `detected_le`, or `detected_be`. The byte is not read by any kernel. It is a source tag -- diagnostic metadata recording which side of the wire the PMKID was observed on and which PMKID derivation was used.
+
+#### Byte layout
+
+```
+  7     6     5     4     3     2     1     0
+┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+│  —  │  —  │ FTC │ FTA │  —  │ CLT │ S26 │ AP  │
+└─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+```
+
+| Bit | Mask   | Name      | Meaning                                      |
+| --- | ------ | --------- | -------------------------------------------- |
+| 0   | `0x01` | AP        | AP-association path                          |
+| 1   | `0x02` | SHA256    | PMKID derived via HMAC-SHA-256 (AKM 6)       |
+| 2   | `0x04` | CLIENT    | Client-probing path                          |
+| 3   | `0x08` | —         | Reserved, always 0                           |
+| 4   | `0x10` | FT_AP     | FT-PSK AP-side                               |
+| 5   | `0x20` | FT_CLIENT | FT-PSK client-side                           |
+| 6-7 |        | —         | Reserved, always 0                           |
+
+#### Rules
+
+**Rule P1: Direction.** Every PMKID source is AP-side or client-side. The classification is by who placed the PMKID on the wire or whether the PMKID is part of the AP-association path vs the client-probing path.
+
+**Rule P2: AP and CLIENT are mutually exclusive.** A PMKID comes from one side of the wire. Never set both.
+
+**Rule P3: SHA256 is independent of direction.** Set bit 1 whenever the AKM is PSK-SHA-256 (AKM 6, `00:0F:AC:06`). This signals that the PMKID was derived via `HMAC-SHA-256(PMK, "PMK Name" || AA || SPA)` instead of `HMAC-SHA-1`. hashcat mode 22000 aux4 computes HMAC-SHA-1 unconditionally -- the SHA256 bit warns that aux4 cannot crack the line.
+
+Not set for FT-PSK (AKM 4). FT-PSK's PMKID is `PMK-R1Name` -- a structurally different object derived via the FT-KDF-SHA-256 chain, not `HMAC-SHA-256`. It goes to mode 37100 aux5, not mode 22000 aux4. FT-PSK cannot carry the SHA256 bit.
+
+**Rule P4: FT replaces the base direction flag.** When the AKM is FT-PSK (AKM 4), use FT_AP (bit 4) or FT_CLIENT (bit 5) instead of AP (bit 0) or CLIENT (bit 2). FT PMKIDs use the 12-token `WPA*03*` format with MDID, R0KH-ID, R1KH-ID -- the FT flag marks this structural difference.
+
+**Rule P5: FT and base direction bits are mutually exclusive.** An FT PMKID sets FT_AP or FT_CLIENT. A non-FT PMKID sets AP or CLIENT. Never mix.
+
+#### Valid PMKID mp bytes (exhaustive)
+
+Exactly 6 values exist. The byte has 5 defined flag bits, but SHA256 and FT are determined by the AKM type, not free variables: WPA2-PSK (AKM 2) uses HMAC-SHA-1, so SHA256 is always off and FT is always off. PSK-SHA-256 (AKM 6) uses HMAC-SHA-256, so SHA256 is always on and FT is always off. FT-PSK (AKM 4) uses PMK-R1Name (a structurally different derivation, not HMAC-SHA-256), so SHA256 is always off and FT is always on. The only free variable is direction (AP or CLIENT), giving 3 types x 2 directions = 6.
+
+| mp byte | Bits             | AKM             | Direction   |
+| ------- | ---------------- | --------------- | ----------- |
+| `0x01`  | AP               | WPA2-PSK (2)    | AP-side     |
+| `0x03`  | AP + SHA256      | PSK-SHA-256 (6) | AP-side     |
+| `0x04`  | CLIENT           | WPA2-PSK (2)    | Client-side |
+| `0x06`  | CLIENT + SHA256  | PSK-SHA-256 (6) | Client-side |
+| `0x10`  | FT_AP            | FT-PSK (4)      | AP-side     |
+| `0x20`  | FT_CLIENT        | FT-PSK (4)      | Client-side |
+
+No other values are valid. WPA2-PSK never carries SHA256 (wrong hash function). FT-PSK never carries SHA256 (PMK-R1Name is not an HMAC-SHA-256 PMKID). Non-FT types never carry FT flags. No AKM is both FT and HMAC-SHA-256, so `0x12` and `0x22` cannot exist.
+
+#### S1-S20 source-to-direction mapping
+
+AP-side sources (bit 0 or bit 4): S1 (M1 KDE), S3 (AssocReq RSN IE), S4 (ReassocReq RSN IE), S6 (FT Auth AP->STA), S8 (FILS Auth AP->STA), S10 (PASN Auth AP->STA), S12 (FT Action Response), S16 (Beacon RSN IE), S17 (ProbeResp RSN IE).
+
+Client-side sources (bit 2 or bit 5): S2 (M2 RSN IE), S5 (FT Auth STA->AP), S7 (FILS Auth STA->AP), S9 (PASN Auth STA->AP), S11 (FT Action Request), S13 (FT Action Confirm), S14 (ProbeReq directed), S15 (ProbeReq broadcast), S18 (Mesh Peering Open), S19 (Mesh Peering Confirm), S20 (OSEN IE).
+
+The complete mapping per AKM family:
+
+| S#  | Source              | Dir    | WPA2-PSK (2) | PSK-SHA-256 (6) | FT-PSK (4) |
+| --- | ------------------- | ------ | ------------ | --------------- | ---------- |
+| S1  | M1 KDE              | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S2  | M2 RSN IE            | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S3  | AssocReq RSN IE      | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S4  | ReassocReq RSN IE    | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S5  | FT Auth STA->AP      | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S6  | FT Auth AP->STA      | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S7  | FILS Auth STA->AP    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S8  | FILS Auth AP->STA    | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S9  | PASN Auth STA->AP    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S10 | PASN Auth AP->STA    | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S11 | FT Action Request    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S12 | FT Action Response   | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S13 | FT Action Confirm    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S14 | ProbeReq directed    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S15 | ProbeReq broadcast   | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S16 | Beacon RSN IE        | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S17 | ProbeResp RSN IE     | AP     | `0x01`       | `0x03`          | `0x10`     |
+| S18 | Mesh Peering Open    | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S19 | Mesh Peering Confirm | CLIENT | `0x04`       | `0x06`          | `0x20`     |
+| S20 | OSEN IE              | CLIENT | `0x04`       | `0x06`          | `0x20`     |
 
 ---
 
-## §7  Known Limitations
+## §7  Hashcat Kernel Limitations
 
-### PSK-SHA256-PMKID (class 4)
+Root-cause analysis of every uncrackable hash-line category against hashcat mode 22000, verified on hashcat master commit `bb52c06b9` (CPU backend, `-D 1 -O`). Every uncracked line traces to a specific code path in `module_22000.c` or `m22000-pure.cl`; none is a wpawolf bug.
 
-The mode 22000 PMKID kernel (`m22000_aux4`) computes `HMAC-SHA1(PMK, "PMK Name" || AP || STA)` unconditionally. There is no AKM-dependent branch. This is correct for WPA2-PSK-PMKID (class 2) but **wrong** for PSK-SHA256-PMKID (class 4), which derives the PMKID with `HMAC-SHA256`. A candidate that should match produces a SHA-1 value that never matches the SHA-256 wire value; hashcat reports "Exhausted" with no error.
+### §7.1  PSK-SHA-256 PMKID (class 4)
 
-wpawolf emits PSK-SHA256-PMKID (class 4) as `WPA*01*` lines because the format is valid and will work if hashcat adds a SHA-256 PMKID branch. The workaround today is to attack the corresponding EAPOL (PSK-SHA256-EAPOL, class 5, `WPA*02*` keyver=3), which the AES-CMAC kernel handles correctly.
+**Affected lines.** All `WPA*01*` lines from AKM 6 (PSK-SHA-256). The PMKID is `HMAC-SHA-256(PMK, "PMK Name" || AA || SPA)[0:16]`.
 
-### SHA-384 family (classes 8-11)
-
-SHA-384 EAPOL classes produce a 24 B (192-bit) MIC (`HMAC-SHA384-192`). Mode 22000's hash field is fixed at 32 hex chars (16 bytes); there is no way to express the wider MIC. Additionally, `keyver=0` (the spec's "reserved" value for SHA-384 EAPOL) is rejected by the loader: `if ((keyver != 1) && (keyver != 2) && (keyver != 3)) return PARSER_SALT_VALUE`.
-
-SHA-384 PMKID classes derive the PMKID with `HMAC-SHA384`, which aux4 does not implement.
-
-wpawolf classifies and counts all four SHA-384 classes (8-11) in the stats banner but does not write them to any output sink.
-
-### FT-PSK-EAPOL APLESS (class 7, combos N2E3 / N4E3)
-
-The mode 22000 FT EAPOL kernel (`m22000_aux6`) builds the PTK derivation buffer with a hardcoded nonce layout:
+**Root cause.** The PMKID kernel (`m22000-pure.cl:1097-1163`, function `m22000_aux4`) hardcodes HMAC-SHA-1:
 
 ```c
-memcpy(pke_ptr +  8, auth_packet->wpa_key_nonce, 32);   // assumed SNonce
-memcpy(pke_ptr + 40, wpa->anonce,                32);   // line's <anonce> field
+sha1_hmac_init (&sha1_hmac_ctx, w, 32);                    // line 1133
+sha1_hmac_update_global_swap (&sha1_hmac_ctx, wpa->pmkid_data, 20); // line 1135
+sha1_hmac_final (&sha1_hmac_ctx);                           // line 1137
 ```
 
-For M2-anchored combos (N1E2, N3E2) this is correct: the EAPOL body's `wpa_key_nonce` is the SNonce and the line's `<anonce>` is the ANonce. For APLESS combos (N2E3, N4E3) the roles are swapped: the EAPOL body (M3) contains the ANonce and the line's `<anonce>` holds the SNonce. The kernel has no code path to re-order nonces based on the APLESS bit. Result: APLESS FT-PSK EAPOL lines load cleanly but never match.
+No SHA-256 branch exists. The candidate produces a SHA-1 output that never matches the SHA-256 wire value. hashcat reports "Exhausted" with no error.
 
-wpawolf emits these lines per the hcxtools convention (APLESS bit set on the message-pair byte). M2-anchored FT combos (N1E2, N3E2, N3E4) crack correctly.
+**Workaround.** Attack the corresponding EAPOL (class 5, `WPA*02*` keyver=3) via the AES-128-CMAC kernel (`m22000_aux3`), which handles PSK-SHA-256 correctly.
+
+**wpawolf behavior.** Emits PSK-SHA-256 PMKIDs as `WPA*01*` with the SHA256 bit (`mp=0x03` AP-side, `mp=0x06` client-side per §6.2 Rule P3). The line is format-valid and will work if hashcat adds a SHA-256 PMKID branch.
+
+### §7.2  FT-PSK APLESS (class 7, combos N2E3 / N4E3)
+
+**Affected lines.** `WPA*04*` lines with APLESS bit set (mp low nibble `0x03` or `0x04`, bit 4 set).
+
+**Root cause.** The FT EAPOL kernel builds the FT-PTK derivation buffer with a hardcoded nonce layout (`module_22000.c:1302-1303`):
+
+```c
+memcpy (pke_ptr +  8, auth_packet->wpa_key_nonce, 32);  // assumed SNonce
+memcpy (pke_ptr + 40, wpa->anonce,                32);  // line's <anonce> field
+```
+
+For M2-anchored combos (N1E2, N3E2, N3E4) this is correct: `auth_packet->wpa_key_nonce` is the SNonce (from the STA's M2/M4 EAPOL body) and `wpa->anonce` is the ANonce (from the hash line's nonce field). For APLESS combos (N2E3, N4E3) the roles are swapped: the EAPOL body is M3 (AP-originated, contains the ANonce) and the hash line's nonce field holds the SNonce. The kernel has no code path to reorder nonces based on the APLESS bit. The FT-PTK derivation uses the wrong nonce ordering, producing a wrong PTK. The MIC never matches.
+
+Non-FT APLESS (`WPA*02*` with mp=`0x13`/`0x14`) cracks correctly because the non-FT kernels (aux1/aux2/aux3) sort nonces by `memcmp` (`module_22000.c:1350-1361`), which is order-independent.
+
+**wpawolf behavior.** Emits FT APLESS lines per convention. M2-anchored FT combos (N1E2, N3E2, N3E4) crack correctly.
+
+### §7.3  LE/BE nonce-endianness flags (bits 5-6)
+
+**Affected lines.** Any `WPA*02*` or `WPA*04*` line with `FLAG_LE` (0x20) or `FLAG_BE` (0x40) set.
+
+**Root cause.** The LE/BE correction paths in the mode 22000 kernel (`m22000-pure.cl:540-573`) have two issues:
+
+1. **Label inversion (aux1/aux2).** For keyver=1 (aux1, WPA1) and keyver=2 (aux2, WPA2-PSK), the LE path (no swap) corrects nonce bytes 30-31, and the BE path (swap) corrects bytes 28-29. This is inverted relative to the detection convention: hcxtools sets `FLAG_LE` when bytes 28-29 differ (the LE counter's LSB changed) and `FLAG_BE` when bytes 30-31 differ. The flag steers hashcat to the wrong path, suppressing the path that would find the correction.
+
+2. **Kernel-dependent mapping (aux3).** For keyver=3 (aux3, PSK-SHA-256 / AES-CMAC), the byte-to-path mapping is different from aux1/aux2. A byte-28 drift that cracks at NC=2 via the BE path on aux1/aux2 requires NC=512 on aux3. A byte-31 drift that cracks via the LE path on aux1/aux2 does not crack at all on aux3 even at NC=512.
+
+```
+Empirical results (hashcat v7.1.2-868, CPU backend, verified PSK):
+
+byte shifted | keyver=1,2 LE | keyver=1,2 BE | keyver=3 LE | keyver=3 BE
+-------------|---------------|---------------|-------------|------------
+   28        |  no           | YES (NC=2)    |  no         |  no (NC=8), YES (NC=512)
+   29        |  no           |  no           |  no         |  no
+   30        |  no           |  no           |  no         |  no
+   31        | YES (NC=2)    |  no           |  no         |  no
+```
+
+No single flag assignment works for all three keyver paths. A tool producing hash lines cannot set LE or BE correctly because the correct path depends on the keyver inside the EAPOL body, and the detection (which bytes differ) maps to different correction paths per kernel.
+
+**wpawolf behavior.** LE/BE flags are disabled (Rule E9). Neither flag is set. hashcat tries both paths on every line. See `tools/nonce-endianness-label-inversion.md` for the full analysis with reproduction steps.
 
 ---
 
