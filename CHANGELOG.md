@@ -6,6 +6,10 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 
 ### Unreleased
 
+### v1.4.0 (2026-10-19)
+
+Unified mode 22000 output. All hashcat-crackable hashes (types 1-7) emit through a single mode with four prefixes (`WPA*01*`-`WPA*04*`), matching upstream hashcat where FT support was merged into mode 22000. Message-pair byte encoding is spec-compliant and verified against hashcat's 6 aux kernels across a 150-permutation fixture corpus (370/370 unique digests crack at 100%).
+
 #### Breaking changes
 
 - **`-o` is the primary output flag.** All hashcat-crackable hashes (types 1-7) are written in mode 22000 format (types 01-04). The old `--22000-out` and `--37100-out` flags are removed. Mode 37100 never existed upstream; FT support was merged into mode 22000 (hashcat commit `6847f7793`).
@@ -17,8 +21,18 @@ This file is a current-state summary of `wpawolf` rather than a per-release diar
 #### Changed
 
 - FT-PSK hashes (types 6-7) now route through `-o` with mode 22000 type 03/04 prefixes, matching upstream hashcat where FT support was merged into mode 22000.
+- Message-pair byte encoding: NC flag set unconditionally on all non-APLESS pairs (Rule E4); LE/BE nonce-endianness flags disabled as safe default (Rule E9); PSK-SHA256 client-side PMKID mp byte fixed to 0x06; LE/BE byte-range comparison corrected (was inverted).
+- `SinkId::COUNT` derived from last enum variant discriminant instead of hardcoded magic number.
 - Three hashcat docs (`HASHCAT-CURRENT-FORMATS.md`, `HASHCAT-NEW-FORMATS.md`, `HASHCAT-PROPOSED-CHANGES.md`) consolidated into single `HASHCAT.md`.
 - `ref/hashcat/` updated to upstream hashcat master (includes FT in mode 22000, removes stale `module_37100.c`).
+- New stats counters: `groups_complete_4way`, `eapol_exceeds_hashcat_max`, `max_pairs_per_group`, and per-combo-type generated/written splits.
+
+#### Added
+
+- **150-permutation fixture corpus.** `tools/fixturegen` generates all permutations of (4 EAPOL families x 6 combos x 2 NC x 3 endianness) + (3 PMKID types x 2 directions) with cryptographically correct ground truth. Integration test (`tests/integration/permutation_test.rs`) verifies every permutation against its reference hash.
+- `HASHCAT.md`: single-file spec covering line format, mp byte encoding rules, kernel dispatch, and limitations.
+
+- 976 tests; `make check-all` passes clean.
 
 ### v1.3.0 (2026-09-27)
 
