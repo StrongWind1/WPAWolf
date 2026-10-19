@@ -326,7 +326,7 @@ pub fn extract_rsnxe(tagged_params: &[u8]) -> Option<RsnxeInfo> {
 pub struct AssocAkmFlags {
     /// AKM 2: WPA2-PSK (HMAC-SHA1 PMKID, PRF-SHA1 PTK).
     pub psk: bool,
-    /// AKM 4 or 19 (union). Preserved for routing: FT family uses hashcat mode 37100.
+    /// AKM 4 or 19 (union). Preserved for routing: FT family uses mode 22000 types 03/04.
     /// Prefer the hash-specific flags `ft_psk_sha256` / `ft_psk_sha384` for stats counters.
     pub ft_psk: bool,
     /// AKM 4 only: FT-PSK (SHA-256 PMKR0Name/PMKR1Name chain, AES-CMAC MIC).
@@ -414,7 +414,7 @@ pub fn detect_assoc_akm_flags(tagged_params: &[u8]) -> AssocAkmFlags {
                     1 | 3 => flags.enterprise_sha1 = true,
                     // AKM 2: WPA2-PSK (HMAC-SHA1 PMKID, PRF-SHA1 PTK; hashcat mode 22000).
                     2 => flags.psk = true,
-                    // AKM 4: FT-PSK (SHA-256 chain; hashcat mode 37100).
+                    // AKM 4: FT-PSK (SHA-256 chain; hashcat mode 22000 type 03/04).
                     4 => {
                         flags.ft_psk = true;
                         flags.ft_psk_sha256 = true;
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn parse_rsn_ie_akm_type_19_maps_to_ft_psk_sha384() {
         // FT-PSK-SHA384 (type 19) -> dedicated AkmType::FtPskSha384 variant.
-        // Routing via AkmType::is_ft() keeps it on the 37100 path.
+        // Routing via AkmType::is_ft() keeps it on the FT (type 03/04) path.
         let ie = rsn_ie_with_akms(&[19]);
         let info = parse_rsn_ie(&ie).unwrap();
         assert_eq!(info.akm_types, vec![AkmType::FtPskSha384]);

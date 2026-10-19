@@ -17,7 +17,7 @@ wpawolf ...
 ```
 
 **Output**
-Paste the full output (use `-vvv` for trace-level detail where supported):
+Paste the full output (use `-d` / `--debug` for verbose diagnostic output):
 
 ```
 ...

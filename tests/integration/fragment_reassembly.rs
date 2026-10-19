@@ -72,7 +72,7 @@ fn run_capture(pcap_path: &str) -> String {
     let _ = fs::remove_file(&stdout_path);
     let stdout_file = fs::File::create(&stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", &out_path, "--log", &log_path, pcap_path])
+        .args(["-o", &out_path, "--log", &log_path, pcap_path])
         .stdout(stdout_file)
         .status()
         .unwrap();

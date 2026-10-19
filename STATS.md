@@ -167,6 +167,8 @@ Source: IEEE 802.11-2024 §12.7 (4-way handshake, EAPOL-Key), §12.3.2 (preauth 
 | Line | Field(s) | Source | Why we care | Disposition |
 |---|---|---|---|---|
 | M1 / M2 / M3 / M4 messages + auth-len max | `eapol_m1`, `eapol_m2`, `eapol_m3`, `eapol_m4`, `m1_auth_len_max`, `m2_auth_len_max`, `m3_auth_len_max`, `m4_auth_len_max` | §12.7.6 Table 12-10 | The raw handshake-message inventory; the auth-len-max rows mirror hcxpcapngtool's `body / frame` widths. | skeleton |
+| distinct (AP, STA) groups | `distinct_groups` | §3.3 | Number of unique (AP, STA) pairs in the `MessageStore`. The pairing denominator. | skeleton |
+| groups with complete 4-way handshake | `groups_complete_4way` | §12.7.6 | Groups where M1, M2, M3, and M4 are all present. Capture completeness signal. | informational |
 | NULL / 0xFF / repeating-pattern nonce rejected (+ on-M4 split) | `null_nonce_rejected`, `null_nonce_rejected_on_m4`, `ff_nonce_rejected`, `ff_nonce_rejected_on_m4`, `repeat_nonce_rejected`, `repeat_nonce_rejected_on_m4` | §12.7.6.5 NOTE 9 | Garbage Key Nonce: an EAPOL line built from it cannot crack. The on-M4 split separates the spec-zero expected case from an abnormal nonce on M1/M2/M3. | **dropped** |
 | NULL / 0xFF / repeating-pattern MIC rejected | `null_mic_rejected`, `ff_mic_rejected`, `repeat_mic_rejected` | §12.7.2 | Garbage Key MIC (M2/M3/M4); the line cannot crack. | **dropped** |
 | NULL / 0xFF / repeating-pattern PMKID rejected | `null_pmkid_rejected`, `ff_pmkid_rejected`, `repeat_pmkid_rejected` | §12.7.1.3 | Garbage PMKID; not crackable material. | **dropped** |
@@ -200,7 +202,7 @@ Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTU
 | Line | Field(s) | Source | Why we care | Disposition |
 |---|---|---|---|---|
 | output filters active | `filters_active` | FR-CLI-3 | Echoes the resolved filter state so a WIDE run and a `--strict` run are distinguishable from the banner alone. | informational |
-| per-hash-type found / written (11 rows) | `hash_type_found`, `hash_type_emitted` | §2 | One row per 11-type code. **found** is the sink-independent inventory of what the capture contains; **written** is what reached a configured output file. They differ when a type has no configured accepting sink (e.g. the SHA-384 family with only `--22000-out` shows `14 / 0`). | skeleton |
+| per-hash-type found / written (11 rows) | `hash_type_found`, `hash_type_emitted` | §2 | One row per 11-type code. **found** is the sink-independent inventory of what the capture contains; **written** is what reached a configured output file. They differ when a type has no configured accepting sink (e.g. the SHA-384 family with only `-o` shows `14 / 0`). | skeleton |
 | EAPOL pairs generated (total, pre-dedup) | `eapol_pairs_generated` | §5 | Pairs the engine produced before global dedup (identity 3). | skeleton |
 | EAPOL pairs written (post-dedup) | `eapol_pairs_useful` | §5 | Pairs that survived dedup; the combo children sum to this. | skeleton |
 | per-combo written (N1E2 / N3E2 / N1E4 / N2E3 / N4E3 / N3E4) | `pairs_written_n1e2`, `pairs_written_n3e2`, `pairs_written_n1e4`, `pairs_written_n2e3`, `pairs_written_n4e3`, `pairs_written_n3e4` | §5 | Which N#E# combos produced output (AP-less N2E3/N4E3 included). | informational |
@@ -212,15 +214,18 @@ Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTU
 | instances attributed (--smart) | `smart_instances_attributed` | smart-pairing-design.md §6.2 | `--smart` partitioned multi-instance groups into this many handshake instances (zero in WIDE mode). | informational |
 | candidates dropped (--smart, unique-RC redundant) | `smart_uncrackable_dropped` | smart-pairing-design.md §6.2 / §4.4 | `--smart` pruned cross-instance candidate pairs that are unreachable (by hashcat NC) from a uniquely-RC-linked MIC's instance -- provably uncrackable. Standalone drop, OUTSIDE Reconciliation Identity 3 (like `nc_dedup_collapsed_lines`). Zero in WIDE mode. | **dropped** (standalone, outside Identity 3) |
 | MICs kept, no unique RC link (--smart) | `smart_ambiguous_kept` | smart-pairing-design.md §6.2 / §4.2 | `--smart` kept a MIC-frame against all its candidates because the MIC did not uniquely RC-link to one instance (rc=1-pinned / cross-seed; never-miss keep-all). | informational |
-| FT non-APLESS survivors retained (--smart) | `smart_ft_nonapless_kept` | smart-pairing-design.md §6.2 / §4.4 | `--smart` FT (mode 37100) MIC-frames that retained a non-APLESS survivor after pruning, satisfying clause F. | informational |
+| FT non-APLESS survivors retained (--smart) | `smart_ft_nonapless_kept` | smart-pairing-design.md §6.2 / §4.4 | `--smart` FT (mode 22000 type 03/04) MIC-frames that retained a non-APLESS survivor after pruning, satisfying clause F. | informational |
 | RC gap max | `rc_gap_max`, `rc_drift_enabled` | §5.7 | Largest RC gap among written pairs; suggests an NC threshold. | informational |
+| EAPOL frame > 512 B (exceeds hashcat limit; emitted) | `eapol_exceeds_hashcat_max` | hashcat `WPA_EAPOL_LEN_MAX` | EAPOL hash lines where the frame exceeds hashcat's 512-byte parser limit. Emitted but hashcat will reject them. | informational |
+| max pairs from one (AP, STA) group | `max_pairs_per_group` | §5 | Largest fan-out from a single group. Identifies pathological rotating-ANonce APs. | informational |
+| groups producing hashes / zero hashes | `groups_with_pairs`, `groups_without_pairs` | §5 | How many groups produced at least one crackable pair vs zero. Capture completeness. | informational |
 | PMKIDs written (post-dedup) | `pmkids_written` | §6 | PMKID hashes that survived dedup at least once. | skeleton |
 | dedup dropped (total) + EAPOL/PMKID children | `dedup_dropped`, `dedup_dropped_pairs`, `dedup_dropped_pmkids` | FR-DEDUP | Duplicate hash lines suppressed by global SipHash dedup, split by kind so the pre-dedup totals reconcile. | **dropped** (duplicates) |
-| hashes dropped (unclassified AKM; no 11-type) | `emit_dropped_unclassified_akm` | §2 | Extracted crack material whose AKM maps to none of the 11 types, even after AKM-map inference, and is not a recognised non-PSK suite; cannot be formatted. | **dropped** |
-| hashes dropped (non-PSK AKM; out of scope) | `emit_dropped_notpsk_akm` | §2.3 | A handshake / PMKID whose AKM is a recognised non-PSK suite (`AkmType::NotPsk`: enterprise 802.1X / FT-802.1X / SAE / OWE / FILS / PASN). The PMK is not `PBKDF2(PSK)`, so no crackable mode 22000 / 37100 line exists. | **dropped** |
-| hashes dropped (FT context missing; no R0KH-ID) | `emit_dropped_ft_no_context` | §7 | An FT hash (types 6/7/10/11) with no R0KH-ID, so the `WPA*03*`/`WPA*04*` line cannot be built. | **dropped** |
+| hashes dropped (unclassified AKM; no matching class) | `emit_dropped_unclassified_akm` | §2 | Extracted crack material whose AKM maps to none of the 11 types, even after AKM-map inference, and is not a recognised non-PSK suite; cannot be formatted. | **dropped** |
+| hashes dropped (non-PSK AKM; out of scope) | `emit_dropped_notpsk_akm` | §2.3 | A handshake / PMKID whose AKM is a recognised non-PSK suite (`AkmType::NotPsk`: enterprise 802.1X / FT-802.1X / SAE / OWE / FILS / PASN). The PMK is not `PBKDF2(PSK)`, so no crackable mode 22000 line exists. | **dropped** |
+| hashes dropped (FT context missing; no R0KH-ID) | `emit_dropped_ft_no_context` | §7 | An FT hash (types 6/7/10/11) with no R0KH-ID in any message of the (AP, STA) session, so the `WPA*03*`/`WPA*04*` FT line cannot be built. Captures with at least one M2 or M3 frame (which carry FTE) provide FT context via `ft_backfill` even when the EAPOL source (e.g. M4) has no FTE itself. | **dropped** |
 | per hash sink (path + lines written + dedup dropped) | `path_*` family, `lines_*` family, `dropped_*` family | §2, §7 | Each configured hash sink's file, lines written, and per-sink dedup drops. Unconfigured sinks collapse to a count. | informational / **dropped** (per-sink dedup) |
-| hash sinks not configured | (derived) | n/a | How many of the 9 hash sinks were not requested. | informational |
+| hash sinks not configured | (derived) | n/a | How many of the 8 hash sinks were not requested. | informational |
 | per aux sink (path + entries written) | `essid_list_path`+`entries_essid_list`, `probe_list_path`+`entries_probe_list`, `wordlist_path`+`entries_wordlist`, `wordlist_scan_path`+`entries_wordlist_scan`, `identity_list_path`+`entries_identity_list`, `username_list_path`+`entries_username_list`, `device_info_path`+`entries_device_info` | FR-CLI-2 | Each configured auxiliary sink's file and entry count (parity with the hash sinks' line counts). | informational |
 | auxiliary sinks not configured | (derived) | n/a | How many of the 7 auxiliary sinks were not requested. | informational |
 
@@ -235,6 +240,8 @@ Executive summary an operator reads in five seconds.
 | hashes emitted (total) + EAPOL/PMKID split | `hash_type_emitted` (summed) | §2 | The headline yield written to files, split by attack surface (identity 4). | skeleton |
 | distinct hash types observed | `hash_type_found` (nonzero count) | §2 | How many of the 11 types the capture contains: the inventory, independent of which sinks were configured. | skeleton |
 | hash types found but not written (add -o to capture) | `hash_type_found` vs `hash_type_emitted` | §2 | Types present in the capture that reached no output file; configure `-o` or the per-AKM sink to write them. | **dropped** (operator config) |
+| dedup compression (% of generated pairs removed) | derived: `eapol_pairs_generated`, `eapol_pairs_useful` | §5 | Percentage of generated pairs removed by dedup. Shows capture redundancy at a glance. | informational |
+| ESSID resolution rate (%) | derived: `essid_count`, `essid_unresolved_aps` | §9.4.2.2 | Fraction of APs with a resolved SSID. A low value means many hashes were dropped for missing SSIDs. | informational |
 | wallclock Phase 1-3 / Phase 4 / total | `wallclock_p13_ms`, `wallclock_p4_ms` | n/a | Where the time went (streaming pass vs pairing+emit). | informational |
 | throughput (MiB/s) | `bytes_ingested`, `wallclock_p13_ms` | n/a | Ingest rate against the FR-PERF-1 target. | informational |
 | peak RSS (MiB) | `peak_rss_mib` | n/a | High-water memory (lower bound, sampled at the pressure-check cadence). | informational |
@@ -247,7 +254,7 @@ Executive summary an operator reads in five seconds.
 
 These back the banner indirectly (mirrors, scratch, per-sink arrays) and are listed here so the contract names every field:
 
-- **Per-sink arrays** (rendered by the sink loops above; the `audit-stats` gate exempts these prefixes since they are documented per family, not per member): `lines_22000`/`lines_37100`/`lines_combined`/`lines_wpa1`/`lines_wpa2`/`lines_psk_sha256`/`lines_ft`/`lines_psk_sha384`/`lines_ft_psk_sha384` (`lines_*`); the matching `dropped_*` set; the matching `path_*` set; and the full `reassoc_req_*` per-AKM set (mirror of `assoc_req_*`).
+- **Per-sink arrays** (rendered by the sink loops above; the `audit-stats` gate exempts these prefixes since they are documented per family, not per member): `lines_combined`/`lines_wpa1_eapol`/`lines_wpa2_pmkid`/`lines_wpa2_eapol`/`lines_sha256_pmkid`/`lines_sha256_eapol`/`lines_ft_pmkid`/`lines_ft_eapol` (`lines_*`); the matching `dropped_*` set; the matching `path_*` set; and the full `reassoc_req_*` per-AKM set (mirror of `assoc_req_*`).
 - **Composite field:** `fragment_stats`, the `Stats` field of type `FragmentStats` whose members (`fragments_seen` etc.) are documented in the Phase 2 table above.
 - **Scratch / derived state, not printed directly:** `eapol_last_seen`, the per-(AP,STA) timestamp map used to compute `eapol_time_gap_max_us`.
 

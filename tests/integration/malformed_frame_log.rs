@@ -62,7 +62,7 @@ fn malformed_frame_logged_on_truncated_mac_header() {
     let out_path = "/tmp/wpawolf_t4_malformed.22000";
     let _ = fs::remove_file(out_path);
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--log", log_path, "--22000-out", out_path, pcap_path])
+        .args(["--log", log_path, "-o", out_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero: {status}");

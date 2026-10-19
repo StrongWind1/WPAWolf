@@ -419,10 +419,10 @@ fn type_01_wpa1_psk_eapol() {
     let beacon = build_beacon(SSID, 2 /* ignored */, true, false);
     let mut frames = vec![beacon];
     frames.extend(handshake_4_way_16(1, &[]));
-    let contents = assert_fixture_emits("type_01", frames, "--wpa1-out", "WPA*01*");
-    let line = contents.lines().find(|l| l.starts_with("WPA*01*")).unwrap();
+    let contents = assert_fixture_emits("type_01", frames, "--wpa1-eapol", "WPA*02*");
+    let line = contents.lines().find(|l| l.starts_with("WPA*02*")).unwrap();
     let fields: Vec<&str> = line.split('*').collect();
-    // WPA*01* + MIC + AP + STA + ESSID + NONCE + EAPOL + MP = 9 fields.
+    // WPA*02* + MIC + AP + STA + ESSID + NONCE + EAPOL + MP = 9 fields.
     assert_eq!(fields.len(), 9, "type 1 line must have 9 fields: {line}");
     assert_eq!(fields[2].len(), 32, "type 1 MIC must be 16 B = 32 hex chars");
     assert_eq!(fields[5], hex::encode_essid(SSID));
@@ -436,8 +436,8 @@ fn type_02_wpa2_psk_pmkid() {
     // M1 with PMKID KDE; AKM detected from beacon RSN IE = AKM 2 -> Wpa2Psk.
     let m1 = data_frame_downlink(&eapol_key_16(2, true, false, false, false, NONCE_AP, [0u8; 16], &pmkid_kde(&PMKID)));
     let frames = vec![beacon, m1];
-    let contents = assert_fixture_emits("type_02", frames, "--wpa2-out", "WPA*02*");
-    let line = contents.lines().find(|l| l.starts_with("WPA*02*")).unwrap();
+    let contents = assert_fixture_emits("type_02", frames, "--wpa2-pmkid", "WPA*01*");
+    let line = contents.lines().find(|l| l.starts_with("WPA*01*")).unwrap();
     let fields: Vec<&str> = line.split('*').collect();
     assert!(fields.len() >= 6);
     assert_eq!(fields[2].len(), 32, "PMKID is 16 B = 32 hex chars");
@@ -451,7 +451,7 @@ fn type_03_wpa2_psk_eapol() {
     let beacon = build_beacon(SSID, 2, false, false);
     let mut frames = vec![beacon];
     frames.extend(handshake_4_way_16(2, &rsn_ie_m2(2, None)));
-    let _ = assert_fixture_emits("type_03", frames, "--wpa2-out", "WPA*03*");
+    let _ = assert_fixture_emits("type_03", frames, "--wpa2-eapol", "WPA*02*");
 }
 
 // --- Type 4: PSK-SHA256-PMKID ---
@@ -461,7 +461,7 @@ fn type_04_psk_sha256_pmkid() {
     let beacon = build_beacon(SSID, 6, false, false);
     let m1 = data_frame_downlink(&eapol_key_16(3, true, false, false, false, NONCE_AP, [0u8; 16], &pmkid_kde(&PMKID)));
     let frames = vec![beacon, m1];
-    let _ = assert_fixture_emits("type_04", frames, "--psk-sha256-out", "WPA*04*");
+    let _ = assert_fixture_emits("type_04", frames, "--sha256-pmkid", "WPA*01*");
 }
 
 // --- Type 5: PSK-SHA256-EAPOL ---
@@ -471,7 +471,7 @@ fn type_05_psk_sha256_eapol() {
     let beacon = build_beacon(SSID, 6, false, false);
     let mut frames = vec![beacon];
     frames.extend(handshake_4_way_16(3, &rsn_ie_m2(6, None)));
-    let _ = assert_fixture_emits("type_05", frames, "--psk-sha256-out", "WPA*05*");
+    let _ = assert_fixture_emits("type_05", frames, "--sha256-eapol", "WPA*02*");
 }
 
 // --- Type 6: FT-PSK-PMKID ---
@@ -485,7 +485,7 @@ fn type_06_ft_psk_pmkid() {
     let beacon = build_beacon(SSID, 4, false, true);
     let assoc = build_assoc_req(4);
     let frames = vec![beacon, assoc];
-    let _ = assert_fixture_emits("type_06", frames, "--ft-out", "WPA*06*");
+    let _ = assert_fixture_emits("type_06", frames, "--ft-pmkid", "WPA*03*");
 }
 
 // --- Type 7: FT-PSK-EAPOL ---
@@ -500,72 +500,60 @@ fn type_07_ft_psk_eapol() {
     let m3 = data_frame_downlink(&eapol_key_16(2, true, true, true, true, NONCE_AP, MIC16, &[]));
     let m4 = data_frame_uplink(&eapol_key_16(2, false, false, true, true, NONCE_STA, MIC16, &[]));
     let frames = vec![beacon, m1, m2, m3, m4];
-    let _ = assert_fixture_emits("type_07", frames, "--ft-out", "WPA*07*");
+    let _ = assert_fixture_emits("type_07", frames, "--ft-eapol", "WPA*04*");
 }
 
-// --- Type 8: PSK-SHA384-PMKID ---
+// --- Types 8-11: SHA-384 family (classified but not emitted) ---
+//
+// SHA-384 types are detected and counted in stats but not emitted to any hashcat
+// sink because mode 22000's 16 B MIC field cannot express the 24 B SHA-384 MIC.
 
 #[test]
-fn type_08_psk_sha384_pmkid() {
-    let beacon = build_beacon(SSID, 20, false, false);
-    // M1 with 24-B MIC (SHA-384), KDV=0, plus PMKID KDE.
+fn type_08_09_psk_sha384_not_emitted() {
+    // Type 8: PSK-SHA384-PMKID (AKM 20, PMKID)
+    let beacon_pmkid = build_beacon(SSID, 20, false, false);
     let m1 = data_frame_downlink(&eapol_key_24(0, true, false, false, false, NONCE_AP, [0u8; 24], &pmkid_kde(&PMKID)));
-    let frames = vec![beacon, m1];
-    let _ = assert_fixture_emits("type_08", frames, "--psk-sha384-out", "WPA*08*");
-}
-
-// --- Type 9: PSK-SHA384-EAPOL (the SHA-384 24-B MIC fix regression oracle) ---
-
-#[test]
-fn type_09_psk_sha384_eapol() {
-    let beacon = build_beacon(SSID, 20, false, false);
-    let mut frames = vec![beacon];
-    frames.extend(handshake_4_way_24(&rsn_ie_m2(20, None)));
-    let contents = assert_fixture_emits("type_09", frames, "--psk-sha384-out", "WPA*09*");
-    let line = contents.lines().find(|l| l.starts_with("WPA*09*")).unwrap();
-    let fields: Vec<&str> = line.split('*').collect();
-    // For SHA-384 the MIC field must be 48 hex chars (24 B). This is the headline
-    // regression: pre-fix the parser truncated to 16 B and emitted 32 hex chars.
-    assert_eq!(fields[2].len(), 48, "SHA-384 MIC must be 24 B = 48 hex chars: {line}");
-    // And the EAPOL frame field's MIC window must be all-zero across 24 B (offset
-    // 162..210 in hex) -- not just 32 chars.
-    let eapol_hex = fields[7];
+    let (lines_pmkid, _) = run_combined("type_08_not_emitted", vec![beacon_pmkid, m1]);
     assert!(
-        eapol_hex.len() >= 210,
-        "SHA-384 EAPOL frame must be at least 105 bytes = 210 hex chars: got {} chars",
-        eapol_hex.len()
+        lines_pmkid.lines().all(|l| !l.starts_with("WPA*")),
+        "SHA-384 PMKID (type 8) must not be emitted; got:\n{lines_pmkid}"
     );
-    let mic_window = &eapol_hex[162..210];
-    assert!(mic_window.chars().all(|c| c == '0'), "24-B MIC window in EAPOL field must be zeroed");
+
+    // Type 9: PSK-SHA384-EAPOL (AKM 20, EAPOL)
+    let beacon_eapol = build_beacon(SSID, 20, false, false);
+    let mut frames = vec![beacon_eapol];
+    frames.extend(handshake_4_way_24(&rsn_ie_m2(20, None)));
+    let (lines_eapol, _) = run_combined("type_09_not_emitted", frames);
+    assert!(
+        lines_eapol.lines().all(|l| !l.starts_with("WPA*")),
+        "SHA-384 EAPOL (type 9) must not be emitted; got:\n{lines_eapol}"
+    );
 }
 
-// --- Type 10: FT-PSK-SHA384-PMKID ---
-
 #[test]
-fn type_10_ft_psk_sha384_pmkid() {
-    // Same shape as type 6, with AKM 19 (FT-PSK-SHA384) on the beacon and AssocReq.
-    let beacon = build_beacon(SSID, 19, false, true);
+fn type_10_11_ft_psk_sha384_not_emitted() {
+    // Type 10: FT-PSK-SHA384-PMKID (AKM 19, FT PMKID)
+    let beacon_pmkid = build_beacon(SSID, 19, false, true);
     let assoc = build_assoc_req(19);
-    let frames = vec![beacon, assoc];
-    let _ = assert_fixture_emits("type_10", frames, "--ft-psk-sha384-out", "WPA*10*");
-}
+    let (lines_pmkid, _) = run_combined("type_10_not_emitted", vec![beacon_pmkid, assoc]);
+    assert!(
+        lines_pmkid.lines().all(|l| !l.starts_with("WPA*")),
+        "FT-SHA-384 PMKID (type 10) must not be emitted; got:\n{lines_pmkid}"
+    );
 
-// --- Type 11: FT-PSK-SHA384-EAPOL ---
-
-#[test]
-fn type_11_ft_psk_sha384_eapol() {
-    let beacon = build_beacon(SSID, 19, false, true);
+    // Type 11: FT-PSK-SHA384-EAPOL (AKM 19, FT EAPOL)
+    let beacon_eapol = build_beacon(SSID, 19, false, true);
     let mut m2_kd = rsn_ie_m2(19, None);
     m2_kd.extend_from_slice(&mde_fte());
     let m1 = data_frame_downlink(&eapol_key_24(0, true, false, false, false, NONCE_AP, [0u8; 24], &mde_fte()));
     let m2 = data_frame_uplink(&eapol_key_24(0, false, false, true, false, NONCE_STA, MIC24, &m2_kd));
     let m3 = data_frame_downlink(&eapol_key_24(0, true, true, true, true, NONCE_AP, MIC24, &[]));
     let m4 = data_frame_uplink(&eapol_key_24(0, false, false, true, true, NONCE_STA, MIC24, &[]));
-    let frames = vec![beacon, m1, m2, m3, m4];
-    let contents = assert_fixture_emits("type_11", frames, "--ft-psk-sha384-out", "WPA*11*");
-    let line = contents.lines().find(|l| l.starts_with("WPA*11*")).unwrap();
-    let fields: Vec<&str> = line.split('*').collect();
-    assert_eq!(fields[2].len(), 48, "FT SHA-384 MIC must be 24 B = 48 hex chars: {line}");
+    let (lines_eapol, _) = run_combined("type_11_not_emitted", vec![beacon_eapol, m1, m2, m3, m4]);
+    assert!(
+        lines_eapol.lines().all(|l| !l.starts_with("WPA*")),
+        "FT-SHA-384 EAPOL (type 11) must not be emitted; got:\n{lines_eapol}"
+    );
 }
 
 // --- Non-PSK AKM false-positive regression (docs/akm-classification-falsepositive.md) ---
@@ -669,20 +657,22 @@ fn mixed_mode_psk_plus_8021x_still_emits_psk() {
     let beacon = build_beacon_akms(SSID, &[1, 2]);
     let mut frames = vec![beacon];
     frames.extend(handshake_4_way_16(2, &[]));
-    let _ = assert_fixture_emits("mixed_psk_8021x", frames, "--wpa2-out", "WPA*03*");
+    let _ = assert_fixture_emits("mixed_psk_8021x", frames, "--wpa2-eapol", "WPA*02*");
 }
 
 #[test]
-fn xwjk_shape_kdv3_pmkid_is_type02_not_type04() {
+fn xwjk_shape_kdv3_pmkid_emits_pmkid_line() {
     // [WPA2-PSK (2) + FT-PSK (4)] beacon + a KDV=3 M1 PMKID -- the reproduced XWJK case.
-    // Must emit a WPA2-PSK-PMKID (type 02), never the phantom PSK-SHA256-PMKID (type 04).
+    // Must emit a WPA*01* PMKID line (WPA2-PSK-PMKID, type 2). With mode 22000 prefixes
+    // both WPA2-PSK and PSK-SHA256 PMKIDs share WPA*01*, so we verify the PMKID line
+    // exists and no FT-only lines appear (this is a non-FT PMKID).
     let beacon = build_beacon_akms(SSID, &[2, 4]);
     let m1 = data_frame_downlink(&eapol_key_16(3, true, false, false, false, NONCE_AP, [0u8; 16], &pmkid_kde(&PMKID)));
     let (lines, _banner) = run_combined("xwjk_shape", vec![beacon, m1]);
-    assert!(lines.lines().any(|l| l.starts_with("WPA*02*")), "expected a type-02 PMKID line, got:\n{lines}");
+    assert!(lines.lines().any(|l| l.starts_with("WPA*01*")), "expected a WPA*01* PMKID line, got:\n{lines}");
     assert!(
-        lines.lines().all(|l| !l.starts_with("WPA*04*")),
-        "KDV=3 PMKID on a [2,4] network must not emit phantom type-04, got:\n{lines}"
+        lines.lines().all(|l| !l.starts_with("WPA*03*") && !l.starts_with("WPA*04*")),
+        "KDV=3 PMKID on a [2,4] network must not emit FT lines, got:\n{lines}"
     );
 }
 

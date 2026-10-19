@@ -135,17 +135,7 @@ fn wordlist_scan_subtracts_e_r_w_entries() {
     }
 
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args([
-            "--22000-out",
-            dummy_hash,
-            "-E",
-            essid_path,
-            "-W",
-            wordlist_path,
-            "--wordlist-scan",
-            scan_path,
-            pcap_path,
-        ])
+        .args(["-o", dummy_hash, "-E", essid_path, "-W", wordlist_path, "--wordlist-scan", scan_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf exited non-zero: {status}");
@@ -181,7 +171,7 @@ fn wordlist_scan_works_without_dash_w() {
     fs::write(pcap_path, build_fixture_pcap(ssid, firmware)).expect("write fixture pcap");
 
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", dummy_hash, "--wordlist-scan", scan_path, pcap_path])
+        .args(["-o", dummy_hash, "--wordlist-scan", scan_path, pcap_path])
         .status()
         .expect("failed to spawn wpawolf");
     assert!(status.success(), "wpawolf without -W exited non-zero: {status}");

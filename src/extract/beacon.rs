@@ -95,7 +95,7 @@ pub fn process_beacon_or_probe_resp(
         }
     }
 
-    // Detect AKM from RSN IE: FT-PSK routes output to mode 37100 (-f). [IEEE 802.11-2024] §12.6.1
+    // Detect AKM from RSN IE: FT-PSK routes output to mode 22000 types 03/04. [IEEE 802.11-2024] §12.6.1
     let akm = detect_akm(ies);
     if akm != AkmType::Unknown {
         akm_map.insert(mac_hdr.ap, akm);

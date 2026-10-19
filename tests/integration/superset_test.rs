@@ -119,11 +119,11 @@ fn run_hcxpcapngtool(input: &Path, output: &Path) {
     assert!(status.success(), "hcxpcapngtool exited with non-zero status: {status}");
 }
 
-/// Run wpawolf in wide mode, writing legacy 22000 hash lines to `output`.
+/// Run wpawolf in wide mode, writing mode 22000 hash lines to `output`.
 fn run_wpawolf(input: &Path, output: &Path) {
     let _ = fs::remove_file(output);
     let status = Command::new(common::binary_path())
-        .args(["--22000-out", output.to_str().unwrap()])
+        .args(["-o", output.to_str().unwrap()])
         .arg(input)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -269,18 +269,16 @@ fn superset_11_types_fixtures_by_hash_identity() {
     if !dir.exists() {
         return; // corpus not generated; generated_corpus::corpus_root_exists covers it
     }
+    // Mode 22000 prefixes: 01 = PMKID, 02 = EAPOL, 03 = FT PMKID, 04 = FT EAPOL.
+    // SHA-384 types (8-11) are classified but not emitted (no hashcat kernel).
     let expected: &[(&str, &str)] = &[
-        ("type01_wpa1_eapol.pcap", "WPA*01*"),
-        ("type02_wpa2_pmkid.pcap", "WPA*02*"),
-        ("type03_wpa2_eapol.pcap", "WPA*03*"),
-        ("type04_psksha256_pmkid.pcap", "WPA*04*"),
-        ("type05_psksha256_eapol.pcap", "WPA*05*"),
-        ("type06_ftpsk_pmkid.pcap", "WPA*06*"),
-        ("type07_ftpsk_eapol.pcap", "WPA*07*"),
-        ("type08_psksha384_pmkid.pcap", "WPA*08*"),
-        ("type09_psksha384_eapol.pcap", "WPA*09*"),
-        ("type10_ftpsk_sha384_pmkid.pcap", "WPA*10*"),
-        ("type11_ftpsk_sha384_eapol.pcap", "WPA*11*"),
+        ("type01_wpa1_eapol.pcap", "WPA*02*"),
+        ("type02_wpa2_pmkid.pcap", "WPA*01*"),
+        ("type03_wpa2_eapol.pcap", "WPA*02*"),
+        ("type04_psksha256_pmkid.pcap", "WPA*01*"),
+        ("type05_psksha256_eapol.pcap", "WPA*02*"),
+        ("type06_ftpsk_pmkid.pcap", "WPA*03*"),
+        ("type07_ftpsk_eapol.pcap", "WPA*04*"),
     ];
     let tmp = common::temp_dir("wpawolf_superset_11");
     for (name, prefix) in expected {

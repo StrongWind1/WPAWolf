@@ -36,6 +36,7 @@ pub mod frame;
 pub mod handshake;
 pub mod linklayer;
 pub mod pcap_writer;
+pub mod permutations;
 
 /// Re-export of the wpawolf type surface the generator builds against.
 ///

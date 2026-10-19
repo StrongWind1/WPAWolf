@@ -61,11 +61,8 @@ fn default_run_prints_at_least_one_progress_line() {
     fs::write(pcap, minimal_pcap()).unwrap();
 
     let stdout_file = fs::File::create(stdout_path).unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", out, pcap])
-        .stdout(stdout_file)
-        .status()
-        .unwrap();
+    let status =
+        Command::new(env!("CARGO_BIN_EXE_wpawolf")).args(["-o", out, pcap]).stdout(stdout_file).status().unwrap();
     assert!(status.success(), "wpawolf must exit 0");
 
     let stdout_contents = fs::read_to_string(stdout_path).unwrap();
@@ -99,7 +96,7 @@ fn quiet_flag_suppresses_progress_lines_but_keeps_banner() {
 
     let stdout_file = fs::File::create(stdout_path).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_wpawolf"))
-        .args(["--22000-out", out, "--quiet", pcap])
+        .args(["-o", out, "--quiet", pcap])
         .stdout(stdout_file)
         .status()
         .unwrap();

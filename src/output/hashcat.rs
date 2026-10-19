@@ -1,10 +1,10 @@
-//! Phase 4 -- Emit: hashcat 22000 / 37100 hash-line formatter. See ARCHITECTURE.md §7.
+//! Phase 4 -- Emit: hashcat mode 22000 hash-line formatter. See ARCHITECTURE.md §7.
 //!
-//! Produces the four hashcat hash-line types:
-//! - `WPA*01*...` -- PMKID hash (mode 22000)
-//! - `WPA*02*...` -- EAPOL handshake hash (mode 22000)
-//! - `WPA*03*...` -- FT-PSK PMKID hash (mode 37100)
-//! - `WPA*04*...` -- FT-PSK EAPOL handshake hash (mode 37100)
+//! Produces the four hashcat mode 22000 hash-line types:
+//! - `WPA*01*...` -- PMKID hash
+//! - `WPA*02*...` -- EAPOL handshake hash
+//! - `WPA*03*...` -- FT-PSK PMKID hash
+//! - `WPA*04*...` -- FT-PSK EAPOL handshake hash
 //!
 //! All hex fields are lowercase. The EAPOL frame in the output has the MIC field
 //! (bytes 81-96 from the start of the EAPOL header) zeroed, as required by hashcat.
@@ -39,24 +39,21 @@ pub fn format_eapol_22000(pair: &PairedHash, essid: &[u8]) -> String {
     format_eapol_line(b"WPA*02*", pair, essid)
 }
 
-/// Formats an FT-PSK PMKID entry as a `WPA*03*` hash line (hashcat mode 37100).
+/// Formats an FT-PSK PMKID entry as a `WPA*03*` hash line (hashcat mode 22000 FT).
 ///
 /// Format: `WPA*03*{pmkid}*{mac_ap}*{mac_sta}*{essid}***{mp}*{mdid}*{r0khid}*{r1khid}`
 ///
 /// The `ft` argument must carry the MDID, R0KH-ID, and R1KH-ID extracted from the
 /// EAPOL Key Data or the Association/Reassociation frame FT IEs. hashcat cannot crack
-/// mode 37100 without these fields; the caller must only call this function when all
+/// FT PMKIDs without these fields; the caller must only call this function when all
 /// three are present. See `ARCHITECTURE.md §8` FR-OUT-03.
 /// [hcxpcapngtool:2544-2554]
 #[must_use]
-pub fn format_pmkid_37100(entry: &PmkidEntry, ft: &FtFields, essid: &[u8]) -> String {
+pub fn format_pmkid_ft(entry: &PmkidEntry, ft: &FtFields, essid: &[u8]) -> String {
     format_pmkid_ft_line(b"WPA*03*", entry, ft, essid)
 }
 
-/// Same as `format_pmkid_37100` but with a caller-supplied line prefix.
-///
-/// Used by the new 11-type extended sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
-/// which write `WPA*06*` / `WPA*10*` instead of the legacy `WPA*03*`.
+/// Same as `format_pmkid_ft` but with a caller-supplied line prefix.
 #[must_use]
 pub fn format_pmkid_ft_line(prefix: &[u8], entry: &PmkidEntry, ft: &FtFields, essid: &[u8]) -> String {
     let mp = pmkid_message_pair(entry);
@@ -86,23 +83,19 @@ pub fn format_pmkid_ft_line(prefix: &[u8], entry: &PmkidEntry, ft: &FtFields, es
     String::from_utf8(out).unwrap_or_default()
 }
 
-/// Formats an FT-PSK EAPOL handshake as a `WPA*04*` hash line (hashcat mode 37100).
+/// Formats an FT-PSK EAPOL handshake as a `WPA*04*` hash line (hashcat mode 22000 FT).
 ///
 /// Format: `WPA*04*{mic}*{mac_ap}*{mac_sta}*{essid}*{anonce}*{eapol_zeroed}*{mp}*{mdid}*{r0khid}*{r1khid}`
 ///
 /// Requires FT fields from the EAPOL Key Data FTE subelements (R0KH-ID, R1KH-ID) and
-/// the MDIE (MDID). hashcat cannot crack mode 37100 without these; caller must only
+/// the MDIE (MDID). hashcat cannot crack FT EAPOL without these; caller must only
 /// call this when `ft.r0khid_len > 0`. See `ARCHITECTURE.md §8` FR-OUT-04.
 /// [hcxpcapngtool:2354-2373]
 #[must_use]
-pub fn format_eapol_37100(pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> String {
+pub fn format_eapol_ft(pair: &PairedHash, ft: &FtFields, essid: &[u8]) -> String {
     format_eapol_ft_line(b"WPA*04*", pair, ft, essid)
 }
 
-/// Same as `format_eapol_37100` but with a caller-supplied line prefix.
-///
-/// Used by the new 11-type extended sinks (`--ft-out`, `--ft-psk-sha384-out`, `-o`)
-/// which write `WPA*07*` / `WPA*11*` instead of the legacy `WPA*04*`.
 /// Builds the FT EAPOL line body (everything after the 7-byte prefix) into a `Vec<u8>`.
 ///
 /// Includes MDID, R0KH-ID, and R1KH-ID FT fields after the `message_pair` byte.
@@ -150,15 +143,15 @@ pub fn format_eapol_ft_line(prefix: &[u8], pair: &PairedHash, ft: &FtFields, ess
 /// Maps a `PmkidSource` to the hashcat `message_pair` byte for PMKID lines.
 ///
 /// Values from hcxpcapngtool `hcxpcapngtool.h` lines 386-390:
-///   - Mode 22000 (non-FT): `PMKID_AP = 0x01`, `PMKID_APPSK256 = 0x02`, `PMKID_CLIENT = 0x04`.
-///   - Mode 37100 (FT-PSK): `PMKID_AP_FTPSK = 0x10`, `PMKID_CLIENT_FTPSK = 0x20`.
+///   - Non-FT (type 01): `PMKID_AP = 0x01`, `PMKID_APPSK256 = 0x02`, `PMKID_CLIENT = 0x04`.
+///   - FT-PSK (type 03): `PMKID_AP_FTPSK = 0x10`, `PMKID_CLIENT_FTPSK = 0x20`.
 ///
 /// hcxpcapngtool routes the same PMKID through different `addpmkid` /
 /// `addpmkid_ftpsk` paths depending on the AKM at extract time, so the
 /// status byte that surfaces in the output line is always the right kind
 /// for the line's prefix (`WPA*01*` vs `WPA*03*`). wpawolf reuses one
-/// `PmkidEntry` across both sinks, so this function inspects `entry.akm`
-/// to pick the FT-PSK pair when emitting a `WPA*03*` / mode 37100 line.
+/// `PmkidEntry` across sinks, so this function inspects `entry.akm` to
+/// pick the FT-PSK pair when emitting a `WPA*03*` FT line.
 ///
 /// New sources use the same AP/client convention from the source-map table
 /// in `ARCHITECTURE.md §6`.
@@ -168,7 +161,7 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
     match entry.source {
         // AP-side sources: M1 KDE, assoc frames, AP-sent auth responses,
         // AP-originated mgmt frames (Beacon, ProbeResp), FT Action Response.
-        // hcx: PMKID_AP=0x01 in mode 22000, PMKID_AP_FTPSK=0x10 in mode 37100.
+        // hcx: PMKID_AP=0x01 for type 01, PMKID_AP_FTPSK=0x10 for FT type 03.
         PmkidSource::M1KeyData
         | PmkidSource::AssocRequest
         | PmkidSource::ReassocRequest
@@ -189,7 +182,7 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         },
         // Client-side sources: M2 RSN IE, STA-sent auth, probe req,
         // FT Action Request/Confirm, Mesh Peering, OSEN.
-        // hcx: PMKID_CLIENT=0x04 in mode 22000, PMKID_CLIENT_FTPSK=0x20 in mode 37100.
+        // [HASHCAT.md §6.2 Rules P1, P3, P4]
         PmkidSource::M2RsnIe
         | PmkidSource::FtAuthStaToAp
         | PmkidSource::FilsAuthStaToAp
@@ -202,6 +195,9 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
         | PmkidSource::OsenIe => {
             if is_ft {
                 0x20
+            } else if entry.akm.is_psk_sha256() {
+                // [HASHCAT.md §6.2 Rule P3] SHA256 bit independent of direction.
+                0x06
             } else {
                 0x04
             }
@@ -211,11 +207,10 @@ const fn pmkid_message_pair(entry: &PmkidEntry) -> u8 {
 
 /// Builds a PMKID hash line with the given prefix byte string.
 ///
-/// Shared by `format_pmkid_22000`, `format_pmkid_37100`, and the new 11-type extended
-/// sinks (`--wpa1-out`, `--wpa2-out`, `--psk-sha256-out`, `--psk-sha384-out`, `-o` for
-/// non-FT rows). The prefix selects the hashcat-line type; all other fields are
-/// identical. Uses `encode_hex` to write directly into the output buffer so no
-/// intermediate allocations are needed per field.
+/// Shared by `format_pmkid_22000`, `format_pmkid_ft`, and the per-type sinks. The
+/// prefix selects the hashcat-line type; all other fields are identical. Uses
+/// `encode_hex` to write directly into the output buffer so no intermediate
+/// allocations are needed per field.
 #[must_use]
 pub fn format_pmkid_line(prefix: &[u8], entry: &PmkidEntry, essid: &[u8]) -> String {
     // Format: WPA*01*{pmkid}*{mac_ap}*{mac_sta}*{essid}***{mp:02x}
@@ -242,8 +237,8 @@ pub fn format_pmkid_line(prefix: &[u8], entry: &PmkidEntry, essid: &[u8]) -> Str
 
 /// Builds an EAPOL hash line with the given prefix byte string.
 ///
-/// Shared by `format_eapol_22000`, `format_eapol_37100`, and the new 11-type
-/// extended sinks (non-FT rows). The EAPOL frame is copied and the MIC bytes zeroed
+/// Shared by `format_eapol_22000`, `format_eapol_ft`, and the per-type sinks
+/// (non-FT rows). The EAPOL frame is copied and the MIC bytes zeroed
 /// before hex-encoding; the original `PairedHash` is not modified. `message_pair`
 /// is encoded as exactly two hex characters.
 /// Builds the EAPOL line body (everything after the 7-byte prefix) into a `Vec<u8>`.
@@ -530,23 +525,23 @@ mod tests {
     }
 
     #[test]
-    fn format_pmkid_37100_prefix() {
+    fn format_pmkid_ft_prefix() {
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::FtPsk;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB, 0xCD], [0x55; 6]);
-        let line = format_pmkid_37100(&entry, &ft, b"ssid");
+        let line = format_pmkid_ft(&entry, &ft, b"ssid");
         assert!(line.starts_with("WPA*03*"), "expected WPA*03* prefix: {line}");
     }
 
     #[test]
-    fn format_pmkid_37100_includes_ft_fields() {
+    fn format_pmkid_ft_includes_ft_fields() {
         // Verify that MDID, R0KH-ID, and R1KH-ID appear after the message_pair byte.
         // Format: WPA*03*{pmkid}*{ap}*{sta}*{essid}***{mp}*{mdid}*{r0khid}*{r1khid}
         // [hcxpcapngtool:2551-2554]
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::FtPsk;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB, 0xCD, 0xEF], [0x55; 6]);
-        let line = format_pmkid_37100(&entry, &ft, b"net");
+        let line = format_pmkid_ft(&entry, &ft, b"net");
         // Split: WPA * 03 * pmkid * ap * sta * essid * * * mp * mdid * r0khid * r1khid
         let fields: Vec<&str> = line.splitn(13, '*').collect();
         assert_eq!(fields[1], "03", "prefix type");
@@ -556,23 +551,23 @@ mod tests {
     }
 
     #[test]
-    fn format_pmkid_37100_message_pair_ap_side_is_ftpsk_value() {
+    fn format_pmkid_ft_message_pair_ap_side_is_ftpsk_value() {
         // FT-PSK PMKID sourced from an AP-side frame (M1 KDE in this case) must
-        // emit `PMKID_AP_FTPSK = 0x10`, not the mode-22000 `PMKID_AP = 0x01`.
+        // emit `PMKID_AP_FTPSK = 0x10`, not the non-FT `PMKID_AP = 0x01`.
         // [hcxpcapngtool.h:386-390 + hcxpcapngtool.c:2554]
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::FtPsk;
         entry.source = PmkidSource::M1KeyData;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB], [0x55; 6]);
-        let line = format_pmkid_37100(&entry, &ft, b"net");
+        let line = format_pmkid_ft(&entry, &ft, b"net");
         let fields: Vec<&str> = line.splitn(13, '*').collect();
         assert_eq!(fields[8], "10", "AP-side FT-PSK PMKID must emit PMKID_AP_FTPSK=0x10");
     }
 
     #[test]
-    fn format_pmkid_37100_message_pair_client_side_is_ftpsk_value() {
+    fn format_pmkid_ft_message_pair_client_side_is_ftpsk_value() {
         // FT-PSK PMKID sourced from a client-side frame (M2 RSN IE) must emit
-        // `PMKID_CLIENT_FTPSK = 0x20`, not the mode-22000 `PMKID_CLIENT = 0x04`.
+        // `PMKID_CLIENT_FTPSK = 0x20`, not the non-FT `PMKID_CLIENT = 0x04`.
         // Regression captured from a real FT-PSK session where hcx-default
         // emitted *20 and wpawolf was emitting *04, causing per-capture
         // superset violations.
@@ -580,46 +575,52 @@ mod tests {
         entry.akm = AkmType::FtPsk;
         entry.source = PmkidSource::M2RsnIe;
         let ft = make_ft_fields([0x12, 0x34], &[0xAB], [0x55; 6]);
-        let line = format_pmkid_37100(&entry, &ft, b"net");
+        let line = format_pmkid_ft(&entry, &ft, b"net");
         let fields: Vec<&str> = line.splitn(13, '*').collect();
         assert_eq!(fields[8], "20", "client-side FT-PSK PMKID must emit PMKID_CLIENT_FTPSK=0x20");
     }
 
     #[test]
-    fn format_pmkid_22000_message_pair_unchanged_for_non_ft() {
-        // Regression pin: non-FT entries keep the mode-22000 mp bytes
-        // (PMKID_AP=0x01 for AP-side, PMKID_CLIENT=0x04 for client-side).
+    fn format_pmkid_22000_message_pair_for_non_ft() {
+        // [HASHCAT.md §6.2] WPA2-PSK: AP-side=0x01, client-side=0x04.
         let mut entry = make_pmkid_entry([0x11; 6], [0x22; 6], [0xAA; 16]);
         entry.akm = AkmType::Wpa2Psk;
         entry.source = PmkidSource::M1KeyData;
         let line = format_pmkid_22000(&entry, b"net");
         let fields: Vec<&str> = line.splitn(10, '*').collect();
-        assert_eq!(fields[8], "01", "AP-side non-FT PMKID must keep PMKID_AP=0x01");
+        assert_eq!(fields[8], "01", "WPA2-PSK AP-side must emit PMKID_AP=0x01");
 
         entry.source = PmkidSource::M2RsnIe;
         let line = format_pmkid_22000(&entry, b"net");
         let fields: Vec<&str> = line.splitn(10, '*').collect();
-        assert_eq!(fields[8], "04", "client-side non-FT PMKID must keep PMKID_CLIENT=0x04");
+        assert_eq!(fields[8], "04", "WPA2-PSK client-side must emit PMKID_CLIENT=0x04");
+
+        // [HASHCAT.md §6.2 Rule P3] PSK-SHA-256: client-side=0x06 (CLIENT + SHA256).
+        entry.akm = AkmType::PskSha256;
+        entry.source = PmkidSource::ProbeRequest;
+        let line = format_pmkid_22000(&entry, b"net");
+        let fields: Vec<&str> = line.splitn(10, '*').collect();
+        assert_eq!(fields[8], "06", "PSK-SHA-256 client-side must emit 0x06 (CLIENT + SHA256)");
     }
 
     // --- WPA*04* ---
 
     #[test]
-    fn format_eapol_37100_prefix() {
+    fn format_eapol_ft_prefix() {
         let pair = make_paired_hash([0x11; 6], [0x22; 6], [0x00; 16], [0x00; 32], vec![0u8; 99], 0x00);
         let ft = make_ft_fields([0x12, 0x34], &[0xAB], [0x55; 6]);
-        let line = format_eapol_37100(&pair, &ft, b"ssid");
+        let line = format_eapol_ft(&pair, &ft, b"ssid");
         assert!(line.starts_with("WPA*04*"), "expected WPA*04* prefix: {line}");
     }
 
     #[test]
-    fn format_eapol_37100_includes_ft_fields() {
+    fn format_eapol_ft_includes_ft_fields() {
         // Verify MDID, R0KH-ID, R1KH-ID appended after message_pair.
         // Format: WPA*04*{mic}*{ap}*{sta}*{essid}*{nonce}*{eapol}*{mp}*{mdid}*{r0khid}*{r1khid}
         // [hcxpcapngtool:2368-2371]
         let pair = make_paired_hash([0x11; 6], [0x22; 6], [0xCD; 16], [0xEF; 32], vec![0x77u8; 99], 0x03);
         let ft = make_ft_fields([0x56, 0x78], &[0x01, 0x02, 0x03, 0x04], [0x99; 6]);
-        let line = format_eapol_37100(&pair, &ft, b"ssid");
+        let line = format_eapol_ft(&pair, &ft, b"ssid");
         // WPA * 04 * mic * ap * sta * essid * nonce * eapol * mp * mdid * r0khid * r1khid
         let fields: Vec<&str> = line.splitn(13, '*').collect();
         assert_eq!(fields[1], "04", "prefix type");

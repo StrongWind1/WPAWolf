@@ -129,8 +129,8 @@ impl std::fmt::Display for MsgType {
 /// AKM type bytes are read from the RSN IE AKM Suite List (OUI `00:0F:AC`) per
 /// IEEE 802.11-2024 §9.4.2.24, Table 9-190; the WPA1 vendor IE (OUI `00:50:F2`,
 /// type 1) is treated equivalently for the legacy WPA1-PSK case. The AKM
-/// determines both the PMKID derivation algorithm and the hashcat output mode
-/// (22000 vs 37100).
+/// determines the PMKID derivation algorithm and the hashcat kernel dispatch
+/// (via the `keyver` byte for EAPOL, via the type prefix for FT).
 ///
 /// Each variant maps to one row of the 11-type classification in `ARCHITECTURE.md §2`
 /// via `HashType::from_akm_and_attack`. Splitting `Psk` into `Wpa1` (legacy WPA1
@@ -146,11 +146,11 @@ pub enum AkmType {
     /// Outputs to hashcat mode 22000.
     Wpa2Psk,
     /// AKM suite type 4: FT-PSK / 802.11r Fast Transition over PSK (SHA-256 chain PMKID).
-    /// Outputs to hashcat mode 37100.
+    /// Outputs to hashcat mode 22000 as type 03/04 (FT PMKID/EAPOL).
     FtPsk,
     /// AKM suite type 19: FT-PSK-SHA384 / 802.11r Fast Transition over PSK with SHA-384.
-    /// SHA-384 chain PMKID, HMAC-SHA384-192 MIC. No dedicated hashcat module today;
-    /// routed through 37100 alongside `FtPsk` until a SHA-384 sink is wired up.
+    /// SHA-384 chain PMKID, HMAC-SHA384-192 MIC. No hashcat kernel exists -- the 24 B
+    /// MIC cannot fit mode 22000's 16 B field. Classified and counted only.
     FtPskSha384,
     /// AKM suite type 6: PSK-SHA256 (HMAC-SHA256 PMKID, KDF-SHA256 PTK, AES-CMAC MIC).
     /// Outputs to hashcat mode 22000.
@@ -162,7 +162,7 @@ pub enum AkmType {
     /// A non-PSK AKM was *observed* on the wire: enterprise (802.1X / FT-802.1X /
     /// 802.1X-SHA256 / Suite-B, vendor CCKM), SAE, OWE, FILS, or PASN. These derive the
     /// PMK from an EAP / SAE / public-key exchange, not `PBKDF2(PSK, SSID)`, so no mode
-    /// 22000 / 37100 line built from such a handshake can ever crack.
+    /// 22000 line built from such a handshake can ever crack.
     ///
     /// Deliberately distinct from `Unknown`: `Unknown` means "no AKM evidence at all"
     /// and is still optimistically treated as `Wpa2Psk` (the never-miss-a-hash default),
@@ -182,8 +182,8 @@ impl AkmType {
     /// Returns `true` for FT (802.11r) PSK suites: AKM 4 (`FtPsk`) and AKM 19
     /// (`FtPskSha384`).
     ///
-    /// FT handshakes route to hashcat mode 37100 regardless of the underlying hash
-    /// family; consumers who care only about the FT-vs-non-FT split should call this
+    /// FT handshakes use hashcat mode 22000 types 03/04 (12-token format with FT
+    /// extras); consumers who care only about the FT-vs-non-FT split should call this
     /// method instead of comparing against `FtPsk` directly so that AKM 19 is not
     /// silently dropped from the FT path.
     #[must_use]
@@ -308,16 +308,15 @@ impl HashType {
         )
     }
 
-    /// Returns `true` for FT (802.11r) types (6, 7, 10, 11). Used for hashcat-mode
-    /// 22000-vs-37100 routing.
+    /// Returns `true` for FT (802.11r) types (6, 7, 10, 11). FT types use the 12-token
+    /// mode 22000 format with MDID, R0KH-ID, and R1KH-ID appended.
     #[must_use]
     pub const fn is_ft(self) -> bool {
         matches!(self, Self::FtPskPmkid | Self::FtPskEapol | Self::FtPskSha384Pmkid | Self::FtPskSha384Eapol)
     }
 
-    /// Returns `true` for SHA-384 types (8-11). Lines route through the dedicated
-    /// `--psk-sha384-out` (types 8/9) and `--ft-psk-sha384-out` (types 10/11) sinks;
-    /// cracking awaits a hashcat kernel that supports the 24-byte MIC.
+    /// Returns `true` for SHA-384 types (8-11). Classified and counted in stats but
+    /// not emitted to any hashcat sink -- the 24 B MIC cannot fit mode 22000's 16 B field.
     #[must_use]
     pub const fn is_sha384(self) -> bool {
         matches!(self, Self::PskSha384Pmkid | Self::PskSha384Eapol | Self::FtPskSha384Pmkid | Self::FtPskSha384Eapol)
@@ -350,60 +349,42 @@ impl HashType {
 
     /// Hashcat mode this hash type maps to today, or `None` if no kernel exists yet.
     ///
-    /// Types 1-5 and 8-9 use mode 22000 (legacy 4-byte WPA*NN* prefix scheme); types 6-7
-    /// use mode 37100 (FT extra fields appended). The SHA-384 family (8-11) has no
-    /// hashcat module yet -- type 8/9 still get a best-effort 22000 routing for
-    /// PSK-SHA384 PMKIDs / EAPOL frames so the lines are not lost; types 10/11 (FT
-    /// SHA-384) are detected and counted but cannot be routed without a 24 B MIC sink.
+    /// Types 1-7 all use mode 22000 (types 01-04 in hashcat's prefix scheme: 01 PMKID,
+    /// 02 EAPOL, 03 FT-PMKID, 04 FT-EAPOL). FT support was merged into mode 22000
+    /// upstream (hashcat commit `6847f7793`). The SHA-384 family (8-11) has no hashcat
+    /// kernel -- the 24 B MIC cannot fit the mode 22000 16 B MIC field.
     #[must_use]
     pub const fn hashcat_mode(self) -> Option<u32> {
         match self {
-            Self::Wpa1Eapol | Self::Wpa2PskPmkid | Self::Wpa2PskEapol | Self::PskSha256Pmkid | Self::PskSha256Eapol => {
-                Some(22000)
-            },
-            Self::FtPskPmkid | Self::FtPskEapol => Some(37100),
+            Self::Wpa1Eapol
+            | Self::Wpa2PskPmkid
+            | Self::Wpa2PskEapol
+            | Self::PskSha256Pmkid
+            | Self::PskSha256Eapol
+            | Self::FtPskPmkid
+            | Self::FtPskEapol => Some(22000),
             Self::PskSha384Pmkid | Self::PskSha384Eapol | Self::FtPskSha384Pmkid | Self::FtPskSha384Eapol => None,
         }
     }
 
-    /// Legacy `WPA*NN*` line prefix used when this hash type is written to
-    /// `--22000-out` / `--37100-out`. Returns `(prefix_bytes, is_ft)` so the writer
-    /// knows which legacy file handle to pick.
+    /// Hashcat mode 22000 line prefix for this hash type.
     ///
-    /// The legacy 4-prefix scheme (`WPA*01*` PMKID, `WPA*02*` EAPOL, `WPA*03*` FT-PMKID,
-    /// `WPA*04*` FT-EAPOL) cannot disambiguate AKM/MIC variants -- hashcat reads the
-    /// `keyver` byte from inside the EAPOL frame to decide between WPA2-PSK and
-    /// PSK-SHA256, and SHA-384 lines route through the 16 B MIC slot best-effort.
+    /// Returns `(prefix_bytes, is_ft)`. The 4-prefix scheme maps to hashcat's four
+    /// type codes: `WPA*01*` PMKID, `WPA*02*` EAPOL, `WPA*03*` FT-PMKID, `WPA*04*`
+    /// FT-EAPOL. hashcat reads the `keyver` byte from inside the EAPOL frame to
+    /// dispatch among WPA1 / WPA2-PSK / PSK-SHA256 kernels.
+    ///
+    /// SHA-384 types (8-11) are not emitted to any hashcat sink -- their 24 B MIC
+    /// cannot fit mode 22000's 16 B field -- but the prefix mapping is defined for
+    /// completeness and testing.
     #[must_use]
-    pub const fn legacy_prefix(self) -> (&'static [u8], bool) {
+    pub const fn prefix(self) -> (&'static [u8], bool) {
         match self {
             // keyver=1 inside the body distinguishes WPA1 from WPA2 for hashcat.
-            // SHA-384 PMKID/EAPOL ride through the legacy 16 B MIC slot best-effort
-            // (no dedicated kernel yet); they collapse onto the WPA*01*/WPA*02* arms.
             Self::Wpa1Eapol | Self::Wpa2PskEapol | Self::PskSha256Eapol | Self::PskSha384Eapol => (b"WPA*02*", false),
             Self::Wpa2PskPmkid | Self::PskSha256Pmkid | Self::PskSha384Pmkid => (b"WPA*01*", false),
             Self::FtPskPmkid | Self::FtPskSha384Pmkid => (b"WPA*03*", true),
             Self::FtPskEapol | Self::FtPskSha384Eapol => (b"WPA*04*", true),
-        }
-    }
-
-    /// New 11-type classification line prefix: `b"WPA*<type-code>*"` with the type-code as
-    /// 2-digit decimal. Used by every per-AKM sink (`--wpa1-out`, `--wpa2-out`, ...)
-    /// and the combined `-o` sink. See `ARCHITECTURE.md §2`.
-    #[must_use]
-    pub const fn extended_prefix(self) -> &'static [u8] {
-        match self {
-            Self::Wpa1Eapol => b"WPA*01*",
-            Self::Wpa2PskPmkid => b"WPA*02*",
-            Self::Wpa2PskEapol => b"WPA*03*",
-            Self::PskSha256Pmkid => b"WPA*04*",
-            Self::PskSha256Eapol => b"WPA*05*",
-            Self::FtPskPmkid => b"WPA*06*",
-            Self::FtPskEapol => b"WPA*07*",
-            Self::PskSha384Pmkid => b"WPA*08*",
-            Self::PskSha384Eapol => b"WPA*09*",
-            Self::FtPskSha384Pmkid => b"WPA*10*",
-            Self::FtPskSha384Eapol => b"WPA*11*",
         }
     }
 
@@ -773,7 +754,7 @@ impl Default for MicBytes {
 
 // --- Fast BSS Transition (802.11r) fields ---
 
-/// Fast BSS Transition fields needed for hashcat mode 37100 (FT-PSK) output.
+/// Fast BSS Transition fields needed for hashcat mode 22000 types 03/04 (FT-PSK) output.
 ///
 /// Extracted from the FT IEs in Association/Reassociation frames and from the
 /// EAPOL-Key FTE subelements during the FT 4-way handshake. Per IEEE 802.11-2024
@@ -886,7 +867,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 ///   in-band delimiter. All three are interesting signals that deserve
 ///   surfacing rather than silent loss.
 ///
-/// Hash-oracle outputs (`-o` / `-f` hashcat modes 22000 / 37100) never call
+/// Hash-oracle outputs (`-o` / `-f` hashcat mode 22000) never call
 /// this function -- the ESSID bytes there feed the PMK / PTK derivation and
 /// must be byte-exact with the wire representation, regardless of NUL
 /// padding or prefix markers. See `ARCHITECTURE.md §9`.
@@ -1547,11 +1528,10 @@ mod tests {
 
     #[test]
     fn hash_type_hashcat_mode_routing() {
-        // Types 1-5 -> 22000 (legacy 16 B MIC), 6-7 -> 37100 (FT extras), 8-11 -> none.
+        // Types 1-7 -> 22000 (FT merged upstream), 8-11 -> none (SHA-384, no kernel).
         for ht in HashType::all() {
             let expected = match ht.type_code() {
-                1..=5 => Some(22000),
-                6 | 7 => Some(37100),
+                1..=7 => Some(22000),
                 _ => None,
             };
             assert_eq!(ht.hashcat_mode(), expected, "{}", ht.name());
@@ -1559,10 +1539,10 @@ mod tests {
     }
 
     #[test]
-    fn hash_type_legacy_prefix_pmkid_vs_eapol() {
+    fn hash_type_prefix_pmkid_vs_eapol() {
         // PMKID -> WPA*01* / WPA*03*; EAPOL -> WPA*02* / WPA*04*; FT bool tracks is_ft().
         for ht in HashType::all() {
-            let (prefix, is_ft) = ht.legacy_prefix();
+            let (prefix, is_ft) = ht.prefix();
             assert_eq!(is_ft, ht.is_ft(), "{}", ht.name());
             let expected: &[u8] = match (ht.is_pmkid(), ht.is_ft()) {
                 (true, false) => b"WPA*01*",
@@ -1571,15 +1551,6 @@ mod tests {
                 (false, true) => b"WPA*04*",
             };
             assert_eq!(prefix, expected, "{}", ht.name());
-        }
-    }
-
-    #[test]
-    fn hash_type_extended_prefix_matches_type_code() {
-        // The extended prefix encodes the 1-11 type code as 2-digit decimal.
-        for ht in HashType::all() {
-            let expected = format!("WPA*{:02}*", ht.type_code());
-            assert_eq!(ht.extended_prefix(), expected.as_bytes(), "{}", ht.name());
         }
     }
 

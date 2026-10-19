@@ -84,6 +84,12 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Generate the exhaustive permutation corpus (144 EAPOL + 15 PMKID).
+    Permutations {
+        /// Output directory (created if it does not exist).
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -107,6 +113,7 @@ fn run(cli: &Cli) -> Result<()> {
             emit_filter(out, move |f| fixture_combo_id(f).is_some_and(|c| c == id_lc))
         },
         Command::Manifest { out } => emit_manifest(out),
+        Command::Permutations { out } => emit_permutations(out),
     }
 }
 
@@ -136,6 +143,55 @@ fn emit_manifest(out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     write_manifest(out, &fixtures)?;
     eprintln!("manifest -> {}", out.join("ground_truth/manifest.toml").display());
+    Ok(())
+}
+
+fn emit_permutations(out: &Path) -> Result<()> {
+    let perms = wpawolf_fixturegen::permutations::all()?;
+    fs::create_dir_all(out)?;
+    let fixtures: Vec<Fixture> = perms.iter().map(|p| p.fixture.clone()).collect();
+    for f in &fixtures {
+        let target = out.join(&f.path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_fixture(&target, f)?;
+    }
+    write_permutation_manifest(out, &perms)?;
+    eprintln!("wrote {} permutation fixtures to {}", perms.len(), out.display());
+    Ok(())
+}
+
+fn write_permutation_manifest(out: &Path, perms: &[wpawolf_fixturegen::permutations::Permutation]) -> Result<()> {
+    let dir = out.join("permutations/ground_truth");
+    fs::create_dir_all(&dir)?;
+    let mut text = String::new();
+    text.push_str("# wpawolf-fixturegen permutation manifest. Generated; do not edit.\n\n");
+    for p in perms {
+        text.push_str("[[permutation]]\n");
+        writeln!(text, "path = \"{}\"", p.fixture.path.display()).map_err(io_other)?;
+        writeln!(text, "mp_byte = \"0x{:02x}\"", p.mp_byte).map_err(io_other)?;
+        writeln!(text, "reachable = {}", p.reachable).map_err(io_other)?;
+        writeln!(text, "reference_hash = \"{}\"", escape_toml(&p.reference_hash)).map_err(io_other)?;
+        if !p.cli_flags.is_empty() {
+            let flags: Vec<String> = p.cli_flags.iter().map(|f| format!("\"{f}\"")).collect();
+            writeln!(text, "cli_flags = [{}]", flags.join(", ")).map_err(io_other)?;
+        } else {
+            text.push_str("cli_flags = []\n");
+        }
+        if !p.note.is_empty() {
+            writeln!(text, "note = \"{}\"", escape_toml(&p.note)).map_err(io_other)?;
+        }
+        text.push('\n');
+    }
+    // Also write the reference hash lines as a flat file.
+    let mut hashes = String::new();
+    for p in perms {
+        hashes.push_str(&p.reference_hash);
+        hashes.push('\n');
+    }
+    fs::write(dir.join("manifest.toml"), text)?;
+    fs::write(dir.join("reference_hashes.txt"), hashes)?;
     Ok(())
 }
 
