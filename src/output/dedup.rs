@@ -125,8 +125,8 @@ pub enum SinkId {
 }
 
 impl SinkId {
-    /// Total number of sink kinds. Kept in sync with the `SinkId` enum manually.
-    pub const COUNT: usize = 8;
+    /// Total number of sink kinds. Derived from the last variant's discriminant.
+    pub const COUNT: usize = Self::OutFtEapol as usize + 1;
 
     /// Numeric index used to address the per-sink `HashSet` array in `PerSinkDedup`.
     #[must_use]

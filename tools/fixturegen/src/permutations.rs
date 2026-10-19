@@ -12,9 +12,9 @@
 //!   produce that `mp` byte)
 //!
 //! Dimensions:
-//! - EAPOL: 4 families × 6 combos × 2 NC × 3 endianness = 144
-//! - PMKID: 3 types × 5 mp bytes = 15
-//! - Total: 159
+//! - EAPOL: 4 families x 6 combos x 2 NC x 3 endianness = 144
+//! - PMKID: 3 types x 2 directions = 6
+//! - Total: 150
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -579,7 +579,7 @@ const fn compute_eapol_mp_byte(combo: ComboId, nc: bool, endianness: Endianness)
 ///
 /// LE/BE flags are disabled in wpawolf output (Rule E9) but the endianness
 /// dimension is retained in the permutation matrix for coverage. Reachability
-/// depends only on NC × APLESS — the endianness variant just adds a drift-M1
+/// depends only on NC x APLESS -- the endianness variant just adds a drift-M1
 /// frame to the pcap.
 const fn eapol_reachability(combo: ComboId, nc: bool) -> (bool, &'static str) {
     // [HASHCAT.md §6 Rule E4] NC blanket: all non-APLESS pairs carry NC.
@@ -924,14 +924,14 @@ mod tests {
         let perms = all().expect("permutations::all");
         let reachable = perms.iter().filter(|p| p.reachable).count();
         // EAPOL reachable (NC blanket + nonce endianness detection):
-        //   Non-APLESS: 4 combos × 3 endianness × NC=on × 4 families = 48
+        //   Non-APLESS: 4 combos x 3 endianness x NC=on x 4 families = 48
         //     (FT N1E4 reachable: pcap includes M2 for ft_backfill)
-        //   APLESS: 2 combos × 1 (endianness=None, NC=off) × 4 families = 8
+        //   APLESS: 2 combos x 1 (endianness=None, NC=off) x 4 families = 8
         //   EAPOL total: 48 + 8 = 56
         // PMKID: WPA2(0x01,0x04) + PSK256(0x03,0x06) + FT(0x10,0x20) = 6
         // Grand total: 56 + 6 = 62
-        // Non-APLESS NC=on × 3 endianness: 4 combos × 3 × 4 families = 48
-        // APLESS NC=off × 3 endianness: 2 combos × 3 × 4 families = 24
+        // Non-APLESS NC=on x 3 endianness: 4 combos x 3 x 4 families = 48
+        // APLESS NC=off x 3 endianness: 2 combos x 3 x 4 families = 24
         //   (APLESS LE/BE pcaps add drift-M1 but the APLESS pair still emits)
         // PMKID: 6
         assert_eq!(reachable, 78, "expected 72 reachable EAPOL + 6 reachable PMKID = 78");

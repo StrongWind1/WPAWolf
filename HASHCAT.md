@@ -53,7 +53,7 @@ AKM values reference [IEEE 802.11-2024] Table 9-190 (OUI `00:0F:AC`). KDV values
 
 ## §3  Mode 22000 Format Reference
 
-Verified against upstream hashcat branch `master`, commit `bb52c06b9`.
+Verified against upstream hashcat branch `master`, commit `5ec006d30` (v7.1.2-947).
 
 ### Line format
 
@@ -424,7 +424,7 @@ PMKID kernels (aux4 for `WPA*01*`, aux5 for `WPA*03*`) have zero references to `
 
 **Rule P3: SHA256 is independent of direction.** Set bit 1 whenever the AKM is PSK-SHA-256 (AKM 6, `00:0F:AC:06`). This signals that the PMKID was derived via `HMAC-SHA-256(PMK, "PMK Name" || AA || SPA)` instead of `HMAC-SHA-1`. hashcat mode 22000 aux4 computes HMAC-SHA-1 unconditionally -- the SHA256 bit warns that aux4 cannot crack the line.
 
-Not set for FT-PSK (AKM 4). FT-PSK's PMKID is `PMK-R1Name` -- a structurally different object derived via the FT-KDF-SHA-256 chain, not `HMAC-SHA-256`. It goes to mode 37100 aux5, not mode 22000 aux4. FT-PSK cannot carry the SHA256 bit.
+Not set for FT-PSK (AKM 4). FT-PSK's PMKID is `PMK-R1Name` -- a structurally different object derived via the FT-KDF-SHA-256 chain, not `HMAC-SHA-256`. It routes to mode 22000 aux5 (via `WPA*03*`), not aux4. FT-PSK cannot carry the SHA256 bit.
 
 **Rule P4: FT replaces the base direction flag.** When the AKM is FT-PSK (AKM 4), use FT_AP (bit 4) or FT_CLIENT (bit 5) instead of AP (bit 0) or CLIENT (bit 2). FT PMKIDs use the 12-token `WPA*03*` format with MDID, R0KH-ID, R1KH-ID -- the FT flag marks this structural difference.
 
@@ -480,7 +480,7 @@ The complete mapping per AKM family:
 
 ## §7  Hashcat Kernel Limitations
 
-Root-cause analysis of every uncrackable hash-line category against hashcat mode 22000, verified on hashcat master commit `bb52c06b9` (CPU backend, `-D 1 -O`). Every uncracked line traces to a specific code path in `module_22000.c` or `m22000-pure.cl`; none is a wpawolf bug.
+Root-cause analysis of every uncrackable hash-line category against hashcat mode 22000, verified on hashcat master commit `5ec006d30` (v7.1.2-947, CPU backend, `-D 1 -O`). Every uncracked line traces to a specific code path in `module_22000.c` or `m22000-pure.cl`; none is a wpawolf bug.
 
 ### §7.1  PSK-SHA-256 PMKID (class 4)
 

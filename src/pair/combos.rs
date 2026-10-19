@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::store::messages::EapolMessage;
 use crate::types::{MacAddr, MsgType};
 
-use super::constraints::{RcRelation, expected_rc_delta, within_rc_for_combo, within_time};
+use super::constraints::{expected_rc_delta, within_rc_for_combo, within_time};
 use super::nc_dedup::{Endianness, cluster_indices, pick_safe_survivor, tail_u32};
 use super::{ComboType, FLAG_APLESS, FLAG_NC, PairedHash};
 
@@ -568,14 +568,10 @@ fn try_pair(
     // expected relationship for this combo type. Uses combo-aware offset so that N3E2/N2E3/N1E4
     // pairs with the standard M3.rc = M2.rc + 1 delta are not spuriously rejected.
     // Unfiltered (rc_drift_enabled=false): all pairs treated as RC-exact. [ARCHITECTURE.md §8 FR-PAIR-4]
-    let _rc_rel = if config.rc_drift_enabled {
-        match within_rc_for_combo(nonce_msg, eapol_msg, combo, config.rc_drift_tolerance) {
-            Some(rel) => rel,
-            None => return Err(FilterReason::Rc),
-        }
-    } else {
-        RcRelation::Exact // unfiltered: no RC constraint, treat all pairs as exact
-    };
+    if config.rc_drift_enabled && within_rc_for_combo(nonce_msg, eapol_msg, combo, config.rc_drift_tolerance).is_none()
+    {
+        return Err(FilterReason::Rc);
+    }
 
     // AP-less combos (N2E3, N4E3) always carry the APLESS flag (`0x10`).
     // [hcxtools legacy alias `ST_APLESS`]
