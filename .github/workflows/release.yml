@@ -250,7 +250,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${BIN}.exe dist/${BIN}-${{ matrix.artifact }}
+          cp "target/${{ matrix.target }}/release/${BIN}.exe" "dist/${BIN}-${{ matrix.artifact }}"
           ls -lh dist/
 
       - name: Upload artifact to the workflow run
@@ -312,7 +312,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${BIN} dist/${BIN}-macos-${{ matrix.arch }}
+          cp "target/${{ matrix.target }}/release/${BIN}" "dist/${BIN}-macos-${{ matrix.arch }}"
           ls -lh dist/
 
       - name: Upload artifact to the workflow run
@@ -357,10 +357,10 @@ jobs:
         run: |
           set -euo pipefail
           lipo -create \
-            -output dist/${BIN}-macos-universal \
-            dist/${BIN}-macos-arm64 \
-            dist/${BIN}-macos-x86_64
-          lipo -info dist/${BIN}-macos-universal
+            -output "dist/${BIN}-macos-universal" \
+            "dist/${BIN}-macos-arm64" \
+            "dist/${BIN}-macos-x86_64"
+          lipo -info "dist/${BIN}-macos-universal"
 
       - name: Generate SHA256SUMS
         # sha256 hashes for every artifact except SHA256SUMS itself. `sort`
@@ -369,7 +369,10 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          shasum -a 256 -b $(ls | grep -v '^SHA256SUMS' | sort) > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name '*.tmp' -printf '%f\n' \
+            | sort \
+            | while IFS= read -r f; do shasum -a 256 -b "$f"; done > SHA256SUMS.tmp
+          mv SHA256SUMS.tmp SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign (pinned binary direct from Sigstore)
