@@ -10,7 +10,6 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = []
 maximum-db-staleness = "P1D"
-git-fetch-with-cli = true
 unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "deny"
