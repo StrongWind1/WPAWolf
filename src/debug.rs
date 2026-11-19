@@ -376,7 +376,7 @@ impl GroupSummary {
 
 /// Returns `(total_kb, available_kb)` using `sysinfo`. Cross-platform.
 fn ram_info() -> Option<(u64, u64)> {
-    let mut sys = sysinfo::System::new();
+    let mut sys = sysinfo::System::new().ok()?;
     let refresh = sysinfo::MemoryRefreshKind::nothing().with_ram();
     sys.refresh_memory_specifics(refresh);
     let total_bytes = sys.total_memory();

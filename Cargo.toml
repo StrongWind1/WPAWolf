@@ -134,7 +134,7 @@ rayon = "1"
 # Cross-platform process RSS + total RAM queries. Replaces Linux-only
 # /proc/self/status and /proc/meminfo parsing with System::process(pid).memory()
 # and System::total_memory(). Works on Linux, macOS, and Windows.
-sysinfo = "0.39"
+sysinfo = "0.40"
 
 # --- Lint policy ---
 [profile.dev]

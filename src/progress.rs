@@ -136,7 +136,7 @@ impl ProgressReporter {
 #[must_use]
 pub fn current_rss_bytes() -> u64 {
     let Ok(pid) = sysinfo::get_current_pid() else { return 0 };
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else { return 0 };
     let refresh = sysinfo::ProcessRefreshKind::nothing().with_memory();
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), false, refresh);
     sys.process(pid).map_or(0, sysinfo::Process::memory)
@@ -149,10 +149,11 @@ pub fn current_rss_mib() -> Option<u64> {
     if bytes > 0 { Some(bytes / (1024 * 1024)) } else { None }
 }
 
-/// Returns the total physical RAM in bytes. Cross-platform via `sysinfo`.
+/// Returns the total physical RAM in bytes, or 0 when the platform probe
+/// fails. Cross-platform via `sysinfo`.
 #[must_use]
 pub fn total_ram_bytes() -> u64 {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else { return 0 };
     sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
     sys.total_memory()
 }
@@ -171,11 +172,13 @@ pub struct RssSampler {
 }
 
 impl RssSampler {
-    /// Creates a sampler, or `None` when the current PID cannot be determined.
+    /// Creates a sampler, or `None` when the current PID cannot be determined
+    /// or the platform probe cannot be initialised.
     #[must_use]
     pub fn new() -> Option<Self> {
         let pid = sysinfo::get_current_pid().ok()?;
-        Some(Self { sys: sysinfo::System::new(), pid })
+        let sys = sysinfo::System::new().ok()?;
+        Some(Self { sys, pid })
     }
 
     /// Samples the current process RSS in bytes, reusing the held `System`.
