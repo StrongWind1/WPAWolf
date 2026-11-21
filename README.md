@@ -1,51 +1,30 @@
 <h1 align="center">WPAWolf</h1>
 
-<p align="center">
-  <strong>Pull every WPA / WPA2 / WPA3 PSK-family handshake and PMKID out of a pcap and hand it to hashcat.</strong>
-</p>
+<p align="center"><strong>Pull every WPA / WPA2 / WPA3 PSK-family handshake and PMKID out of a pcap and hand it to hashcat.</strong></p>
 
 <p align="center">
   <a href="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml"><img src="https://github.com/StrongWind1/WPAWolf/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/wpawolf"><img src="https://img.shields.io/crates/v/wpawolf.svg" alt="crates.io"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/msrv-1.95-informational" alt="MSRV 1.95"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="https://strongwind.dev/WiFi_Cracking/"><img src="https://img.shields.io/badge/docs-mkdocs-blue.svg" alt="Docs"></a>
 </p>
 
 <p align="center">
-  <a href="#example">Example</a> &bull;
   <a href="#installation">Installation</a> &bull;
+  <a href="#quick-start">Quick start</a> &bull;
   <a href="#cli-reference">CLI reference</a> &bull;
-  <a href="#further-reading">Further reading</a>
+  <a href="#how-wpawolf-compares-to-hcxpcapngtool">vs hcxpcapngtool</a>
 </p>
 
 ---
 
-## Features
-
-- **Pure safe Rust** - `#![forbid(unsafe_code)]`, five runtime crates (`flate2` + `crc32fast` + `clap` + `rayon` + `sysinfo`)
-- **Parallel pairing** - rayon work-stealing across CPU cores with streaming per-group fan-out
-- **Wide defaults** - emits every valid handshake; you filter at the end
-- **Cross-file pairing** - M1 in file A pairs with M2 in file B
-- **20 PMKID extraction sites** - every spec-defined location wired and counted
-- **Deep frame walking** - A-MSDU subframes, out-of-order MSDU fragment reassembly, CRC-32 FCS validation with tiered recovery of corrupt link-layer headers
-- **Garbage-pattern rejection** - nonces / MICs / PMKIDs checked against five pattern classes
-- **Disk-backed fallback** - heavy stores spill to disk at 80 % RAM so corpus-scale runs finish instead of OOMing
-- **Fast** - >=200 MB/s on NVMe; Phase 1 I/O-bound, Phase 4 CPU-parallel
-- **976 tests**; `make check-all` zero-warning under strict clippy
-
----
+WPAWolf reads pcap, pcapng, and gzip captures and writes every PSK-family EAPOL handshake and PMKID it finds (WPA1 and WPA2 PSK, PSK-SHA256, and FT-PSK) as hashcat mode 22000 lines. It is a ground-up Rust rewrite of hcxtools' `hcxpcapngtool` with the opposite default: hcxpcapngtool filters hard at extraction time, WPAWolf emits everything and leaves the filtering to you. It works offline on capture files you already have and never captures traffic, injects frames, or touches a radio.
 
 ## Example
 
-```sh
-wpawolf -o hashes.22000 capture.pcap
-hashcat -m 22000 hashes.22000 wordlist.txt
-```
-
-Sample output (stats banner, truncated):
-
-```
+```console
+$ wpawolf -o hashes.22000 capture.pcap
+...
 === Phase 4: Emit ===================================================
 output filters active.......................................: none (WIDE mode)
 EAPOL pairs generated (total, pre-dedup)....................: 105
@@ -60,9 +39,18 @@ wallclock total (s).........................................: 0.4
 disk-backed fallback engaged................................: no
 ```
 
-At least one output flag is required; `wpawolf` exits without doing any work if no output is configured.
+The stats banner is truncated here; [STATS.md](STATS.md) documents every line of it.
 
----
+## Features
+
+- **Pure safe Rust**: `#![forbid(unsafe_code)]` and five runtime crates (`flate2`, `crc32fast`, `clap`, `rayon`, `sysinfo`).
+- **Wide defaults**: emits every valid handshake; you filter at the end.
+- **Cross-file pairing**: M1 in file A pairs with M2 in file B.
+- **20 PMKID extraction sites**: every spec-defined location wired and counted.
+- **Deep frame walking**: A-MSDU subframes, out-of-order MSDU fragment reassembly, and CRC-32 FCS validation with tiered recovery of corrupt link-layer headers.
+- **Garbage-pattern rejection**: nonces, MICs, and PMKIDs checked against five pattern classes.
+- **Parallel and fast**: 200 MB/s or more on NVMe; Phase 1 is I/O-bound, and Phase 4 pairs across CPU cores with rayon work-stealing and streaming per-group fan-out.
+- **Disk-backed fallback**: heavy stores spill to disk at 80% RAM, so corpus-scale runs finish instead of running out of memory.
 
 ## Installation
 
@@ -74,7 +62,7 @@ cargo install wpawolf
 
 ### Prebuilt binaries
 
-Download from [GitHub Releases](https://github.com/StrongWind1/WPAWolf/releases). Static musl binaries for Linux x86_64 and arm64, macOS universal (arm64 + x86_64), and Windows (MSVC + GNU).
+Download from [GitHub Releases](https://github.com/StrongWind1/WPAWolf/releases): static musl binaries for Linux x86_64 and arm64, macOS universal (arm64 + x86_64), and Windows (MSVC + GNU).
 
 ### From source
 
@@ -84,41 +72,118 @@ cd WPAWolf
 make release      # optimised native build -> target/release/wpawolf
 ```
 
-Requires a stable Rust toolchain (see `rust-toolchain.toml`).
+Requires a stable Rust toolchain (pinned in `rust-toolchain.toml`).
 
----
-
-## Examples
+## Quick start
 
 ```sh
-# All crackable hashes in mode 22000 format.
+# All crackable hashes in mode 22000 format
 wpawolf -o hashes.22000 *.pcap
 
-# Per-type split for triage.
+# Per-type split for triage
 wpawolf --wpa2-eapol wpa2.22000 --ft-eapol ft.22000 capture.pcapng.gz
 
-# Maximum extraction: all hash sinks + all auxiliaries.
+# Maximum extraction: all hash sinks plus all auxiliary outputs
 wpawolf -o all.22000 \
         -E essids.txt -R probes.txt -W wordlist.txt \
         -I identities.txt -U usernames.txt -D devices.txt \
         --log run.log captures/*
 
-# hcxpcapngtool-shape output via the bundled shortcut.
+# hcxpcapngtool-shape output (can drop crackable hashes, see the filters below)
 wpawolf -o hashes.22000 --strict captures/
 
-# Custom tight filters: 3 s session window, RC drift 4, single-threaded.
+# Custom tight filters: 3 s session window, RC drift 4, single-threaded
 wpawolf -o hashes.22000 --eapoltimeout 3 --rc-drift 4 \
         --dedup-hash-combos --threads 1 capture.pcap
+
+# Crack the result
+hashcat -m 22000 hashes.22000 wordlist.txt
 ```
 
----
+At least one hash or auxiliary output flag is required; without one, `wpawolf` exits without doing any work.
+
+## CLI reference
+
+<details>
+<summary><strong>Full flag reference</strong> (click to expand)</summary>
+
+`wpawolf [OPTIONS] <INPUT>...` takes capture files or directories (walked recursively; files are picked by magic bytes, never by extension). It reads pcap (ten libpcap magic byte sequences, including the IXIA lcap variants), pcapng, and gzip, over raw 802.11, radiotap, PPI, Prism, AVS, and Linux cooked (SLL / SLL2) link layers. EAPOL messages from every input file are collected before pairing runs. The full flag contract is in [ARCHITECTURE.md](ARCHITECTURE.md) §8.8.
+
+### Hash outputs
+
+| Flag | Writes |
+| --- | --- |
+| `-o`, `--out FILE` | every crackable hash, types 1-7 (`WPA*01*` to `WPA*04*`) |
+| `--wpa1-eapol FILE` | type 1, WPA1 EAPOL (`WPA*02*`) |
+| `--wpa2-pmkid FILE` | type 2, WPA2-PSK PMKID (`WPA*01*`) |
+| `--wpa2-eapol FILE` | type 3, WPA2-PSK EAPOL (`WPA*02*`) |
+| `--sha256-pmkid FILE` | type 4, PSK-SHA256 PMKID (`WPA*01*`) |
+| `--sha256-eapol FILE` | type 5, PSK-SHA256 EAPOL (`WPA*02*`) |
+| `--ft-pmkid FILE` | type 6, FT-PSK PMKID (`WPA*03*`) |
+| `--ft-eapol FILE` | type 7, FT-PSK EAPOL (`WPA*04*`) |
+| `--prefix PREFIX` | default path `PREFIX.<suffix>` for every hash and auxiliary sink left unset (`PREFIX.22000`, `PREFIX.essid`, and so on), as in hcxpcapngtool |
+
+Every hash sink writes mode 22000 lines. SHA-384 types (8-11) are counted in the stats but not emitted: their 24 B MIC does not fit mode 22000's 16 B field. Some emitted lines do not crack in current hashcat (PSK-SHA256 PMKIDs, FT-PSK APLESS combos); [HASHCAT.md](HASHCAT.md) covers the class mapping, per-class cracker math, and these kernel limitations.
+
+Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout -E /dev/stdout capture.pcap` streams the hashes and the ESSID list to stdout. Two sinks on the same real file are rejected.
+
+### Auxiliary outputs
+
+| Flag | Writes |
+| --- | --- |
+| `-E`, `--essid-output FILE` | unique ESSIDs from AP-side management frames (autohex) |
+| `-R`, `--probe-output FILE` | unique ESSIDs from Probe Request frames (autohex) |
+| `-W`, `--wordlist-output FILE` | combined wordlist: `-E`, `-R`, WPS, EAP, country, and vendor strings |
+| `-I`, `--identity-output FILE` | EAP identity strings (autohex) |
+| `-U`, `--username-output FILE` | EAP peer-identity strings (autohex) |
+| `-D`, `--device-output FILE` | WPS device info (tab-separated, sorted by manufacturer) |
+| `--wordlist-scan FILE` | printable-ASCII runs of 8 B or more from IE bodies, separate from `-W` |
+| `-l`, `--log FILE` | structured processing log |
+
+### Output reduction (never drops a crackable hash)
+
+One distinct MIC (or PMKID) is one crackable handshake. Reduction options fold redundant lines per MIC and always keep every MIC; `--smart` is the recommended one.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--smart` | off | handshake-instance attribution: about one line per MIC instead of the full ANonce x MIC cross-product, pruning only provably uncrackable cells; implies `--dedup-hash-combos` and `--nc-dedup` |
+| `--dedup-hash-combos` | off | 6 N#E# combos to 3 unique per session |
+| `--nc-dedup` | off | fold +/-N/2 near-identical-nonce siblings into one survivor tagged FLAG_NC |
+| `--nc-tolerance N` | 8 | cluster span for `--nc-dedup` |
+| `--collapse-message-pair` | off | drop the message-pair byte from the dedup identity, folding combos that differ only in that byte |
+
+### Output filters (can drop crackable hashes)
+
+Filters drop pairs or messages by a threshold, and a dropped MIC is an uncrackable handshake. The MIC loss below was measured on a large multi-vendor corpus with the cap forced off; every reduction option above lost zero.
+
+| Flag | Default | Effect and MIC loss |
+| --- | --- | --- |
+| `-s`, `--strict` | off | bundle of `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair`; **dropped thousands of crackable MICs**, prefer `--smart` |
+| `--eapoltimeout [N]` | unlimited | discard pairs more than N seconds apart (bare: 600); **tighter windows drop crackable MICs** |
+| `--rc-drift [N]` | off | discard pairs with a replay-counter delta above N (bare: 8); **`=0` drops the most crackable MICs, and even `=8` drops some** |
+| `--max-eapol-per-type N` | 0 (off) | pair only the first N messages of each type per (AP, STA) to bound rotating-ANonce fan-out; **with N > 0 it can drop the M1 carrying a MIC's true ANonce**, and an end-of-run alarm fires |
+
+### Other options
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--essid-collapse-min N` | 3 | minimum distinct SSIDs per AP before SSID-variant collapse fires |
+| `--essid-collapse-ratio N` | 10 | top/runner-up SSID-count ratio that triggers collapse |
+| `-t`, `--threads N` | CPU count | Phase 4 worker count; `--threads=1` for reproducible output |
+| `-q`, `--quiet` | off | suppress the progress lines (printed every 5 s or every 2M packets) |
+| `--mem-stats` | off | per-store footprint table after the closing banner |
+| `-d`, `--debug` | off | timestamped phase, file, and group diagnostics |
+
+Every run prints the Phase 1-5 stats banner; [STATS.md](STATS.md) catalogues each line (backing field, spec source, why it exists, and whether it drops packets).
+
+</details>
 
 ## How WPAWolf compares to hcxpcapngtool
 
-Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default policy: `hcxpcapngtool` filters hard at extraction time; WPAWolf emits everything and leaves filtering to you.
+Both tools cover the same AKM scope (PSK and FT-PSK). They differ in default policy:
 
 | Behaviour | `hcxpcapngtool` (default) | `wpawolf` (default) |
-|---|---|---|
+| --- | --- | --- |
 | EAPOL session window | 5 seconds | unlimited; `--eapoltimeout` opts in |
 | EAPOL frame size ceiling | 512 bytes at parse | no size gate |
 | Per-(AP, STA) message buffer | one shared 64-entry circular buffer | `HashMap<(AP, STA), Vec<Message>>`, no eviction |
@@ -126,133 +191,31 @@ Both tools cover the same AKM scope (PSK and FT-PSK). The difference is default 
 | Pairing strategy | stream-pairs as frames arrive | reads everything, then pairs |
 | State across input files | reset between files | carried across files |
 
----
+Collect-then-pair, the missing size gate, and first-class relay frames are critical invariants 2 to 4 in [ARCHITECTURE.md](ARCHITECTURE.md) §4.
 
-## CLI reference
+## Development
 
-<details>
-<summary><strong>Full flag reference</strong> (click to expand)</summary>
+Conventional commit messages (`feat:`, `fix:`, `docs:`); run `make check` before every commit. Parity against the hcxtools oracle is required for any extraction change. 976 tests; `make check-all` is zero-warning under strict clippy.
 
-`wpawolf` accepts pcap, pcapng, and gzip captures (ten libpcap magic byte sequences including IXIA lcap variants) over raw 802.11, radiotap, PPI, Prism, AVS, and Linux cooked (SLL / SLL2) link layers. Positional arguments can be files or directories (walked recursively, magic-byte inclusion, extensions never consulted). Cross-file pairing is always on: all EAPOL messages are collected across every input file before pairing runs.
-
-### Hash output files
-
-| Flag | Categories | Cracks in hashcat today? |
-|---|---|---|
-| `-o FILE` / `--out FILE` | all crackable hashes, types 1-7 (`WPA*01*`-`WPA*04*`) | yes - mode 22000 |
-| `--wpa1-eapol FILE` | type 1 (`WPA*02*`) | yes - mode 22000 |
-| `--wpa2-pmkid FILE` | type 2 (`WPA*01*`) | yes - mode 22000 |
-| `--wpa2-eapol FILE` | type 3 (`WPA*02*`) | yes - mode 22000 |
-| `--sha256-pmkid FILE` | type 4 (`WPA*01*`) | yes - mode 22000 |
-| `--sha256-eapol FILE` | type 5 (`WPA*02*`) | yes - mode 22000 |
-| `--ft-pmkid FILE` | type 6 (`WPA*03*`) | yes - mode 22000 |
-| `--ft-eapol FILE` | type 7 (`WPA*04*`) | yes - mode 22000 |
-
-All hash sinks emit hashcat mode 22000 format. SHA-384 types (8-11) are classified and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field. See [`HASHCAT.md`](HASHCAT.md) for the class mapping, per-class cracker math, and known limitations.
-
-### Auxiliary outputs
-
-| Flag | Description |
-|---|---|
-| `-E` `--essid-output FILE` | unique ESSIDs from AP-side management frames (autohex) |
-| `-R` `--probe-output FILE` | unique ESSIDs from Probe Request frames (autohex) |
-| `-W` `--wordlist-output FILE` | combined wordlist: superset of -E + -R + WPS + EAP + country + vendor |
-| `-I` `--identity-output FILE` | EAP identity strings (autohex) |
-| `-U` `--username-output FILE` | EAP peer-identity strings (autohex) |
-| `-D` `--device-output FILE` | WPS device info (tab-separated, sorted by manufacturer) |
-| `--wordlist-scan FILE` | printable-ASCII runs (>=8 B) from IE bodies; standalone from -W |
-| `--log FILE` | structured processing log |
-
-### `--prefix` and shared `/dev/*` sinks
-
-`--prefix PREFIX` sets a default path for every hash and auxiliary sink at once: each sink left unset writes to `PREFIX` plus its own suffix (`PREFIX.22000`, `PREFIX.wpa1-eapol`, `PREFIX.wpa2-pmkid`, `PREFIX.wpa2-eapol`, `PREFIX.sha256-pmkid`, `PREFIX.sha256-eapol`, `PREFIX.ft-pmkid`, `PREFIX.ft-eapol`, `PREFIX.essid`, `PREFIX.probe`, `PREFIX.wordlist`, `PREFIX.identity`, `PREFIX.username`, `PREFIX.device`, `PREFIX.wordlist-scan`, `PREFIX.log`). An explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool's `--prefix`.
-
-Any output may be a `/dev/*` target (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`), and several sinks may share one: `wpawolf -o /dev/stdout -E /dev/stdout capture.pcap` streams the hashes and the ESSID list to stdout. Real files must still be unique -- only `/dev/*` targets are exempt from the duplicate-path check.
-
-### Output options
-
-Output options split into two kinds, and the difference is the only thing that matters for recall. **Reduction** options *fold* redundant lines per MIC and never drop a crackable hash (`--smart` is the recommended one). **Filter** options drop *pairs or messages* by a threshold and can drop a crackable hash entirely, making that handshake uncrackable. The MIC is the key: one distinct MIC (or PMKID) is one crackable handshake, so "does this flag keep every MIC?" is the question. Reduction options always answer yes; filters do not.
-
-#### Reduction (never-miss -- keeps every crackable hash)
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--smart` | off | **recommended.** Handshake-instance attribution: emit ~one line per MIC instead of the full ANonce x MIC cross-product; prune only provably-uncrackable cross-instance cells. Implies `--dedup-hash-combos` + `--nc-dedup`. |
-| `--dedup-hash-combos` | off | 6 N#E# combos -> 3 unique per session |
-| `--nc-dedup` | off | fold +/-N/2 near-identical-nonce siblings into one survivor tagged FLAG_NC |
-| `--nc-tolerance N` | 8 | cluster span for `--nc-dedup` |
-| `--collapse-message-pair` | off | drop the message-pair metadata byte from the dedup identity (folds N#E# combos that differ only in that byte) |
-
-#### Filters -- (!) CAUTION: these can drop crackable hashes (MICs)
-
-MIC loss below was measured on a large multi-vendor corpus with the cap forced off (so every difference is the filter itself, not the cap); every reduction option above lost zero.
-
-| Flag | Default | Meaning -- **(!) MIC-loss behaviour** |
-|---|---|---|
-| `--strict` | off | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair`; bundles the MIC-droppers below -- **dropped thousands of crackable MICs**. Prefer `--smart`. |
-| `--eapoltimeout [N]` | unlimited | discard pairs more than N seconds apart; bare = 600 s -- **tighter windows drop crackable MICs** |
-| `--rc-drift [N]` | off | discard pairs with replay-counter delta > N; bare = 8 -- **exact (`=0`) drops the most crackable MICs; even the default (`=8`) drops some** |
-| `--max-eapol-per-type N` | 0 (off) | cap pairing to the first N messages of each type per (AP, STA); bounds rotating-ANonce fan-out -- **when N > 0 can drop the M1 with a MIC's true ANonce; a loud end-of-run alarm fires** |
-
-#### ESSID variant collapse
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--essid-collapse-min N` | 3 | min distinct SSIDs per AP before SSID-variant collapse fires |
-| `--essid-collapse-ratio N` | 10 | top/runner-up SSID-count ratio to trigger collapse |
-
-### Runtime options
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--threads N` | CPU count | Phase 4 worker count; `--threads=1` for reproducible output |
-| `--quiet` | off | suppress progress lines |
-| `--mem-stats` | off | per-store footprint table after closing banner |
-| `--debug` | off | timestamped phase/file/group diagnostic lines |
-
-Progress lines print to stdout every 5 s or every 2M packets; `--quiet` silences them. RSS is reported cross-platform via `sysinfo`. Every run prints a Phase 1-5 stats summary unconditionally. Garbage-pattern nonces / MICs / PMKIDs are rejected at extract time; missing SSIDs drop at emit time. Every line of that summary (its backing field, spec source, why it exists, and whether it drops packets) is catalogued in [`STATS.md`](STATS.md).
-
-</details>
-
----
-
-## Contributing
-
-Conventional commit messages (`feat:`, `fix:`, `docs:`); run `make check` before every commit. Parity against the hcxtools oracle is required for any extraction change.
-
----
-
-## Further reading
-
-| Document | Covers |
-|---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, FR-* contracts |
-| [STATS.md](STATS.md) | the stats-banner contract: every line's field, spec source, reason, and drop behaviour |
-| [CHANGELOG.md](CHANGELOG.md) | per-release summary of what shipped |
-| [HASHCAT.md](HASHCAT.md) | mode 22000 format reference, 11-class mapping, per-class cracker math, known limitations |
-
----
+- [ARCHITECTURE.md](ARCHITECTURE.md): 5-phase pipeline, critical invariants, EAPOL pairing, PMKID extraction, FR-* contracts
+- [HASHCAT.md](HASHCAT.md): mode 22000 format reference, 11-class mapping, per-class cracker math, known limitations
+- [STATS.md](STATS.md): the stats-banner contract, with every line's field, spec source, reason, and drop behaviour
+- [CHANGELOG.md](CHANGELOG.md): per-release summary of what shipped
 
 ## Credits
 
-WPAWolf is a ground-up rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool`. The reference C implementation and its two custom variants informed every design decision in this project.
-
----
+WPAWolf is a ground-up rewrite of [ZerBea/hcxtools](https://github.com/ZerBea/hcxtools)' `hcxpcapngtool`. The reference C implementation and its two custom variants informed every design decision in this project. The mode 22000 output is checked against upstream [hashcat](https://github.com/hashcat/hashcat).
 
 ## Related tools
 
-Other projects in this collection:
+- [**WEPWolf**](https://github.com/StrongWind1/WEPWolf): Offline, passive WEP key recovery from 802.11 captures
+- [**WiFi_Cracking**](https://github.com/StrongWind1/WiFi_Cracking): IEEE 802.11 security reference: WPA/WPA2/WPA3 PSK, EAP, and WEP, from protocol internals to cracking
 
-- [WiFi_Cracking](https://github.com/StrongWind1/WiFi_Cracking) - IEEE 802.11 security reference and attack guide
-- [NFSWolf](https://github.com/StrongWind1/NFSWolf) - native NFS security toolkit
-
----
+All tools: [strongwind.dev](https://strongwind.dev)
 
 ## Disclaimer
 
-WPAWolf operates on pcap files you already have on disk. It does not capture traffic, inject frames, or touch a radio. It is intended for authorized security research only; running it on captures you do not own or lack written authorization to analyze is illegal in most jurisdictions. The authors are not responsible for any misuse or damage caused by this tool.
-
----
+WPAWolf is for authorized security testing, research, and education. Use it only against systems and data you own or have written permission to test. You are responsible for how you use it.
 
 ## License
 
