@@ -54,4 +54,14 @@ if [[ ${#crlf_files[@]} -gt 0 ]]; then
   exit 1
 fi
 
+echo "==> pre-commit: running markdownlint on staged markdown..."
+mapfile -t md_files < <(git diff --cached --name-only --diff-filter=ACM -- '*.md')
+if [[ ${#md_files[@]} -gt 0 ]]; then
+  if ! command -v markdownlint-cli2 > /dev/null 2>&1; then
+    echo "ERROR: markdownlint-cli2 not found; install it with: npm install -g markdownlint-cli2"
+    exit 1
+  fi
+  markdownlint-cli2 --no-globs "${md_files[@]}"
+fi
+
 echo "==> pre-commit: all checks passed."
