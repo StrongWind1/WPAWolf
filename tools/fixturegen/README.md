@@ -98,27 +98,27 @@ The PSK is shared across every fixture (`hashcat!`, 8 chars). Verified
 end-to-end against hashcat v7.1.2 (CPU backend, `-D 1 -O`). Per hash
 type, walking the canonical 75-fixture corpus:
 
-| AKM family       | Type | Hashcat result (v7.1.2) | Why                                                                  |
-| ---------------- | ---: | :---------------------: | -------------------------------------------------------------------- |
-| WPA1-PSK         |    1 | cracks                  | KDV=1, HMAC-MD5 MIC; mode 22000 `m22000_aux1` kernel                 |
-| WPA2-PSK         |    2 | cracks                  | HMAC-SHA-1-128 PMKID; mode 22000 `m22000_aux4` kernel                |
-| WPA2-PSK         |    3 | cracks                  | KDV=2, HMAC-SHA-1-128 MIC; mode 22000 `m22000_aux2` kernel            |
-| PSK-SHA-256      |    4 | **does not crack**      | Hashcat 22000 PMKID kernel computes HMAC-SHA-1 only; line carries HMAC-SHA-256-128 PMKID. Lines remain on `--psk-sha256-out` / `-o`. |
-| PSK-SHA-256      |    5 | cracks                  | KDV=3, AES-128-CMAC MIC; `m22000_aux3` branches on the trailing flag byte |
-| FT-PSK (SHA-256) |    6 | cracks                  | PMK-R1Name; mode 37100 `m37100_aux1` kernel                          |
-| FT-PSK (SHA-256) |    7 | partial                 | M2-anchored combos (N1E2 / N3E2 / N3E4) crack; APLESS combos N2E3 / N4E3 (`*13*` / `*14*`) **do not**; hashcat 37100 hardcodes M2-only nonce ordering in `module_37100.c:702`. See `HASHCAT-CURRENT-FORMATS.md` §8.1. Documented, not fixed; lines remain on `--ft-out` / `-o`. |
-| PSK-SHA-384      |    8 | n/a                     | `legacy_sink_for` skips writing to `--22000-out`; no kernel exists for HMAC-SHA-384 PMKID. Lines on `--psk-sha384-out` / `-o`. |
-| PSK-SHA-384      |    9 | n/a                     | `legacy_sink_for` skips: 24 B HMAC-SHA-384-192 MIC at KDV=0; loader rejects keyver=0. Lines on `--psk-sha384-out` / `-o`. |
-| FT-PSK-SHA-384   |   10 | n/a                     | `legacy_sink_for` skips: needs FT-KDF-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
-| FT-PSK-SHA-384   |   11 | n/a                     | `legacy_sink_for` skips: 24 B MIC + FT-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`. |
+| AKM family       | Type | Hashcat result (v7.1.2) | Why                                                                                                                                                                                                                                                                             |
+| ---------------- | ---: | :---------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WPA1-PSK         | 1    | cracks                  | KDV=1, HMAC-MD5 MIC; mode 22000 `m22000_aux1` kernel                                                                                                                                                                                                                            |
+| WPA2-PSK         | 2    | cracks                  | HMAC-SHA-1-128 PMKID; mode 22000 `m22000_aux4` kernel                                                                                                                                                                                                                           |
+| WPA2-PSK         | 3    | cracks                  | KDV=2, HMAC-SHA-1-128 MIC; mode 22000 `m22000_aux2` kernel                                                                                                                                                                                                                      |
+| PSK-SHA-256      | 4    | **does not crack**      | Hashcat 22000 PMKID kernel computes HMAC-SHA-1 only; line carries HMAC-SHA-256-128 PMKID. Lines remain on `--psk-sha256-out` / `-o`.                                                                                                                                            |
+| PSK-SHA-256      | 5    | cracks                  | KDV=3, AES-128-CMAC MIC; `m22000_aux3` branches on the trailing flag byte                                                                                                                                                                                                       |
+| FT-PSK (SHA-256) | 6    | cracks                  | PMK-R1Name; mode 37100 `m37100_aux1` kernel                                                                                                                                                                                                                                     |
+| FT-PSK (SHA-256) | 7    | partial                 | M2-anchored combos (N1E2 / N3E2 / N3E4) crack; APLESS combos N2E3 / N4E3 (`*13*` / `*14*`) **do not**; hashcat 37100 hardcodes M2-only nonce ordering in `module_37100.c:702`. See `HASHCAT-CURRENT-FORMATS.md` §8.1. Documented, not fixed; lines remain on `--ft-out` / `-o`. |
+| PSK-SHA-384      | 8    | n/a                     | `legacy_sink_for` skips writing to `--22000-out`; no kernel exists for HMAC-SHA-384 PMKID. Lines on `--psk-sha384-out` / `-o`.                                                                                                                                                  |
+| PSK-SHA-384      | 9    | n/a                     | `legacy_sink_for` skips: 24 B HMAC-SHA-384-192 MIC at KDV=0; loader rejects keyver=0. Lines on `--psk-sha384-out` / `-o`.                                                                                                                                                       |
+| FT-PSK-SHA-384   | 10   | n/a                     | `legacy_sink_for` skips: needs FT-KDF-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`.                                                                                                                                                                                     |
+| FT-PSK-SHA-384   | 11   | n/a                     | `legacy_sink_for` skips: 24 B MIC + FT-SHA-384 chain. Lines on `--ft-psk-sha384-out` / `-o`.                                                                                                                                                                                    |
 
 End-to-end corpus walk numbers (PSK = `hashcat!`):
 
-| Sink              | Lines wpawolf wrote | Cracked (unique) | Uncracked (unique) | Failure cause                                      |
-| ----------------- | ------------------: | ---------------: | -----------------: | -------------------------------------------------- |
-| `--22000-out`     |                 108 |               73 |                  5 | Type 4 PSK-SHA-256 PMKID (kernel limitation)       |
-| `--37100-out`     |                  15 |                9 |                  2 | Type 7 APLESS combos N2E3 / N4E3 (kernel limitation) |
-| `-o` combined     |                 147 |        n/a: per-AKM sink, not fed to hashcat                       |
+| Sink          | Lines wpawolf wrote | Cracked (unique)                      | Uncracked (unique) | Failure cause                                        |
+| ------------- | ------------------: | ------------------------------------: | -----------------: | ---------------------------------------------------- |
+| `--22000-out` | 108                 | 73                                    | 5                  | Type 4 PSK-SHA-256 PMKID (kernel limitation)         |
+| `--37100-out` | 15                  | 9                                     | 2                  | Type 7 APLESS combos N2E3 / N4E3 (kernel limitation) |
+| `-o` combined | 147                 | n/a: per-AKM sink, not fed to hashcat |                    |                                                      |
 
 Net: of 123 lines routed into hashcat-compatible sinks, **117 cracked**
 (95.1 %). The 7 that did not are all attributable to documented
@@ -135,14 +135,14 @@ receive them.
 The trailing `*<mp>*` byte on every `WPA*02*` / `WPA*04*` line encodes
 which two 4-way handshake messages were paired. Six combos exist:
 
-| Combo  | Nonce source       | EAPOL source | Wire byte (low nibble) | Hashcat 22000 (type 3, KDV=2) | Hashcat 37100 (type 7, FT-PSK SHA-256) |
-| ------ | ------------------ | ------------ | :--------------------: | :---------------------------: | :------------------------------------: |
-| N1E2   | M1 ANonce          | M2           | `0x00`                 | cracks                        | cracks (often as `*80*` with NC)       |
-| N1E4   | M1 ANonce          | M4           | `0x01`                 | cracks                        | cracks                                 |
-| N3E2   | M3 ANonce          | M2           | `0x02`                 | cracks                        | cracks                                 |
-| N2E3   | M2 SNonce          | M3 (APLESS)  | `0x13`                 | cracks                        | **does not crack** (kernel hardcodes M2-only layout) |
-| N4E3   | M4 SNonce          | M3 (APLESS)  | `0x14`                 | cracks                        | **does not crack** (same root cause)   |
-| N3E4   | M3 ANonce          | M4           | `0x05`                 | cracks                        | cracks                                 |
+| Combo | Nonce source | EAPOL source | Wire byte (low nibble) | Hashcat 22000 (type 3, KDV=2) | Hashcat 37100 (type 7, FT-PSK SHA-256)               |
+| ----- | ------------ | ------------ | :--------------------: | :---------------------------: | :--------------------------------------------------: |
+| N1E2  | M1 ANonce    | M2           | `0x00`                 | cracks                        | cracks (often as `*80*` with NC)                     |
+| N1E4  | M1 ANonce    | M4           | `0x01`                 | cracks                        | cracks                                               |
+| N3E2  | M3 ANonce    | M2           | `0x02`                 | cracks                        | cracks                                               |
+| N2E3  | M2 SNonce    | M3 (APLESS)  | `0x13`                 | cracks                        | **does not crack** (kernel hardcodes M2-only layout) |
+| N4E3  | M4 SNonce    | M3 (APLESS)  | `0x14`                 | cracks                        | **does not crack** (same root cause)                 |
+| N3E4  | M3 ANonce    | M4           | `0x05`                 | cracks                        | cracks                                               |
 
 `hcxpcapngtool`'s legacy `M#E#` notation maps directly: `N1E2` =
 `M12E2`, `N1E4` = `M14E4`, `N3E2` = `M32E2`, `N2E3` = `M32E3`, `N4E3` =
@@ -154,12 +154,12 @@ The canonical 75-fixture corpus emits 147 hash lines on the combined `-o`
 sink. Of those, 24 lines fall under the SHA-384 family and are not crackable
 by any current hashcat kernel:
 
-| Prefix     | Hash type                  | Lines | Source fixtures                                                                 |
-| ---------- | -------------------------- | ----: | ------------------------------------------------------------------------------- |
-| `WPA*08*`  | PSK-SHA-384 PMKID          |     2 | `11_types/type08_psksha384_pmkid.pcap`, `11_types/type09_psksha384_eapol.pcap`  |
-| `WPA*09*`  | PSK-SHA-384 EAPOL          |    12 | same two fixtures (one M1-PMKID + four N#E# combos × two fixtures)              |
-| `WPA*10*`  | FT-PSK-SHA-384 PMK-R1Name  |     2 | `11_types/type10_ftpsk_sha384_pmkid.pcap`, `11_types/type11_ftpsk_sha384_eapol.pcap` |
-| `WPA*11*`  | FT-PSK-SHA-384 EAPOL       |     8 | same two fixtures (one M1-PMK-R1Name + three N#E# combos × two fixtures)        |
+| Prefix    | Hash type                 | Lines | Source fixtures                                                                      |
+| --------- | ------------------------- | ----: | ------------------------------------------------------------------------------------ |
+| `WPA*08*` | PSK-SHA-384 PMKID         | 2     | `11_types/type08_psksha384_pmkid.pcap`, `11_types/type09_psksha384_eapol.pcap`       |
+| `WPA*09*` | PSK-SHA-384 EAPOL         | 12    | same two fixtures (one M1-PMKID + four N#E# combos × two fixtures)                   |
+| `WPA*10*` | FT-PSK-SHA-384 PMK-R1Name | 2     | `11_types/type10_ftpsk_sha384_pmkid.pcap`, `11_types/type11_ftpsk_sha384_eapol.pcap` |
+| `WPA*11*` | FT-PSK-SHA-384 EAPOL      | 8     | same two fixtures (one M1-PMK-R1Name + three N#E# combos × two fixtures)             |
 
 These lines are still emitted to the combined `-o` sink and to the dedicated
 per-AKM sinks (`--psk-sha384-out` / `--ft-psk-sha384-out`) so downstream

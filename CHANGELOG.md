@@ -231,12 +231,12 @@ A pure-Rust WPA/WPA2/WPA3-FT-PSK handshake extractor for hashcat. Reads pcap, pc
 Five explicit phases, each owned by a discrete module:
 
 | Phase | Module | Role |
-|---|---|---|
-| 1 Ingest  | `src/input/`      | pcap / pcapng / gzip readers |
-| 2 Decode  | `src/link/` + `src/ieee80211/` | radiotap/PPI/Prism/AVS/SLL strip, CRC-32 FCS resolve, tiered recovery; 802.11 frame, IE, RSN, EAPOL, EAP, FT parsing |
+| --- | --- | --- |
+| 1 Ingest | `src/input/` | pcap / pcapng / gzip readers |
+| 2 Decode | `src/link/` + `src/ieee80211/` | radiotap/PPI/Prism/AVS/SLL strip, CRC-32 FCS resolve, tiered recovery; 802.11 frame, IE, RSN, EAPOL, EAP, FT parsing |
 | 3 Extract | `src/extract/` + `src/store/` | per-subtype handlers populate AP / STA / EAPOL / PMKID / ESSID / aux stores |
-| 4 Emit    | `src/pair/` + `src/output/`   | N#E# pairing, hashcat mode 22000 line formatting, dedup, wordlists |
-| 5 Report  | `src/stats.rs`   | operator-facing summary printed unconditionally on stdout |
+| 4 Emit | `src/pair/` + `src/output/` | N#E# pairing, hashcat mode 22000 line formatting, dedup, wordlists |
+| 5 Report | `src/stats.rs` | operator-facing summary printed unconditionally on stdout |
 
 Pipeline modules carry a `//!` doc-comment naming their phase and the relevant ARCHITECTURE.md section.
 
@@ -244,19 +244,19 @@ Pipeline modules carry a `//!` doc-comment naming their phase and the relevant A
 
 The 11-type classification classifies every PSK-crackable hash by a unique type code 1-11. Current emission status:
 
-| # | Name                    | AKM | hashcat mode | wpawolf emits |
-|---|-------------------------|-----|--------------|---------------|
-|  1 | WPA1-PSK-EAPOL          | vendor IE `00:50:F2:01` | 22000 | yes |
-|  2 | WPA2-PSK-PMKID          | 2   | 22000 | yes |
-|  3 | WPA2-PSK-EAPOL          | 2   | 22000 | yes |
-|  4 | PSK-SHA256-PMKID        | 6   | 22000 | yes |
-|  5 | PSK-SHA256-EAPOL        | 6   | 22000 | yes |
-|  6 | FT-PSK-PMKID            | 4   | 22000 | yes |
-|  7 | FT-PSK-EAPOL            | 4   | 22000 | yes |
-|  8 | PSK-SHA384-PMKID        | 20  | n/a   | classified, not routed |
-|  9 | PSK-SHA384-EAPOL        | 20  | n/a   | classified, not routed |
-| 10 | FT-PSK-SHA384-PMKID     | 19  | n/a   | classified, not routed |
-| 11 | FT-PSK-SHA384-EAPOL     | 19  | n/a   | classified, not routed |
+| # | Name | AKM | hashcat mode | wpawolf emits |
+| --- | ------------------------- | ----- | -------------- | --------------- |
+| 1 | WPA1-PSK-EAPOL | vendor IE `00:50:F2:01` | 22000 | yes |
+| 2 | WPA2-PSK-PMKID | 2 | 22000 | yes |
+| 3 | WPA2-PSK-EAPOL | 2 | 22000 | yes |
+| 4 | PSK-SHA256-PMKID | 6 | 22000 | yes |
+| 5 | PSK-SHA256-EAPOL | 6 | 22000 | yes |
+| 6 | FT-PSK-PMKID | 4 | 22000 | yes |
+| 7 | FT-PSK-EAPOL | 4 | 22000 | yes |
+| 8 | PSK-SHA384-PMKID | 20 | n/a | classified, not routed |
+| 9 | PSK-SHA384-EAPOL | 20 | n/a | classified, not routed |
+| 10 | FT-PSK-SHA384-PMKID | 19 | n/a | classified, not routed |
+| 11 | FT-PSK-SHA384-EAPOL | 19 | n/a | classified, not routed |
 
 The SHA-384 family (types 8/9/10/11) is detected and counted in stats but not emitted -- the 24 B MIC cannot fit mode 22000's 16 B field. See [`HASHCAT.md`](HASHCAT.md) for details.
 
@@ -279,7 +279,7 @@ Garbage-pattern nonces, MICs, and PMKIDs (`null`, `ff`, `repeat_1`, `repeat_2`, 
 Hash sinks. Every sink is optional; absent flag = file not written. The same logical hash fans out to every configured sink with per-sink dedup. `-o` is the primary combined sink (all crackable types 1-7, mode 22000 format). Per-type sinks (`--wpa1-eapol`, `--wpa2-pmkid`, `--wpa2-eapol`, `--sha256-pmkid`, `--sha256-eapol`, `--ft-pmkid`, `--ft-eapol`) each emit a single wpawolf type in mode 22000 format.
 
 | Flag | Purpose |
-|---|---|
+| --- | --- |
 | `-o` / `--out` | all crackable hashes (types 1-7, mode 22000 format) |
 | `--wpa1-eapol` | type 1 (`WPA*02*`) |
 | `--wpa2-pmkid` | type 2 (`WPA*01*`) |
@@ -292,7 +292,7 @@ Hash sinks. Every sink is optional; absent flag = file not written. The same log
 Auxiliary outputs and runtime knobs.
 
 | Flag | Purpose |
-|---|---|
+| --- | --- |
 | `-E` | unique ESSIDs from AP management frames |
 | `-R` | unique ESSIDs from Probe Requests |
 | `-W` | combined wordlist (ESSIDs + WPS + EAP + country + vendor names) |
@@ -301,18 +301,18 @@ Auxiliary outputs and runtime knobs.
 | `-D` | WPS device info |
 | `--log` | structured malformed-frame / skipped-packet log |
 | `--eapoltimeout [N]` | output filter: session window in seconds (omit = unlimited) |
-| `--rc-drift [N]`     | output filter: replay-counter drift tolerance (default 8) |
+| `--rc-drift [N]` | output filter: replay-counter drift tolerance (default 8) |
 | `--dedup-hash-combos` | output filter: collapse 6 N#E# combos to 3 unique per session |
-| `--nc-dedup`          | output filter: collapse near-identical-nonce siblings into one FLAG_NC survivor |
-| `--nc-tolerance N`    | NC-dedup cluster span tolerance (default 8, matches hashcat `NONCE_ERROR_CORRECTIONS`) |
+| `--nc-dedup` | output filter: collapse near-identical-nonce siblings into one FLAG_NC survivor |
+| `--nc-tolerance N` | NC-dedup cluster span tolerance (default 8, matches hashcat `NONCE_ERROR_CORRECTIONS`) |
 | `--max-eapol-per-type N` | output filter: per-type pairing cap per (AP, STA) (default 0 = off/unlimited) |
 | `--collapse-message-pair` | output filter: exclude `message_pair` byte from dedup identity |
-| `--smart`             | output filter: handshake-instance attribution (implies `--dedup-hash-combos --nc-dedup`) |
-| `--strict`            | shortcut: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` |
-| `--threads N`         | pairing thread count (default = CPU count) |
-| `--debug`             | timestamped Phase 1-4 diagnostic output to stdout |
-| `--quiet`             | suppress progress lines; closing banner still prints |
-| `--mem-stats`         | print per-store byte-count table after closing banner |
+| `--smart` | output filter: handshake-instance attribution (implies `--dedup-hash-combos --nc-dedup`) |
+| `--strict` | shortcut: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` |
+| `--threads N` | pairing thread count (default = CPU count) |
+| `--debug` | timestamped Phase 1-4 diagnostic output to stdout |
+| `--quiet` | suppress progress lines; closing banner still prints |
+| `--mem-stats` | print per-store byte-count table after closing banner |
 | `--essid-collapse-min N` | ESSID fan-out threshold (default 3) |
 | `--essid-collapse-ratio N` | ESSID dominance ratio (default 10) |
 | `--wordlist-scan FILE` | IE-body printable-ASCII runs not already in `-E`/`-R`/`-W` (delta output) |
@@ -323,7 +323,7 @@ The defaults emit all 6 N#E# combos per session and apply no time or replay-coun
 
 Five banner sections in pipeline order:
 
-```
+```text
 === Phase 1: Ingest ===     file metadata, bytes/packets, integrity counters
 === Phase 2: Decode ===     frame-type split, encryption mix, recovery tiers,
                             FCS accounting, fragments, bands, KDV mix

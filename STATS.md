@@ -14,7 +14,7 @@ These are the sums an operator can check against the banner. They hold by constr
 
 1. **Packet accounting (Phase 1 + 2).** Every packet that `next_packet` yielded reaches exactly one terminal disposition:
 
-   ```
+   ```text
    total_packets =   packets_unknown_linktype        (dropped: no IDB)
                    + link_errors                       (dropped: link strip failed all recovery tiers)
                    + ctrl_frames                        (control frames: not body-parsed)
@@ -47,7 +47,7 @@ These are the sums an operator can check against the banner. They hold by constr
 Every row carries exactly one disposition, signalled in its label suffix and tabulated in the **Disposition** column below:
 
 | Class | Meaning | Drops a packet/hash? |
-|---|---|---|
+| --- | --- | --- |
 | **skeleton** | Always-printed structural total. | no |
 | **informational** | Something observed; no data impact and not even an anomaly. | no |
 | **diagnostic** | An anomaly worth noting; the frame was still processed. | no |
@@ -61,7 +61,7 @@ Every row carries exactly one disposition, signalled in its label suffix and tab
 File-container reading and packet integrity. Source specs: pcapng = draft-ietf-opsawg-pcapng-05; pcap magic / DLT = libpcap `sf-pcap.c` / `dlt.h`.
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | input files processed / file name | `input_file_count`, `last_file` | pcapng §4 / pcap header | How many captures were actually opened; single-file runs keep the hcxpcapngtool one-line layout. | skeleton |
 | file formats / endians / network types seen | `file_formats_seen`, `endians_seen`, `dlt_descs_seen` | pcap/pcapng headers | Spot one odd file (wrong format/endian/DLT) in a large directory walk. | informational |
 | first / last packet (epoch s), duration | `timestamp_first_us`, `timestamp_last_us` | pcapng §4.3 EPB / pcap record ts | Capture span; a near-zero duration on a big file flags a clock problem. | informational |
@@ -84,7 +84,7 @@ File-container reading and packet integrity. Source specs: pcapng = draft-ietf-o
 Link-layer strip, FCS resolution, tiered recovery, 802.11 frame-type split, RF context, EAPOL wire mix. Source specs: radiotap.org; IEEE 802.11-2024 §9.2.4 (Frame Control), §9.2.4.7 (FCS), §9.3.2.2.2 (A-MSDU), §9.2.4.4 (fragmentation), §12.7.2 (EAPOL-Key).
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | management / data / control frames | `mgmt_frames`, `data_frames`, `ctrl_frames` | §9.2.4.1.3 Table 9-1 | The frame-type skeleton; mgmt+data feed extraction, control is terminal. | skeleton |
 | extension frames (802.11 amendments) | `extension_frames` | Table 9-1 type 3 | Type-3 (DMG/S1G) frames; counted and not body-parsed. | informational |
 | packets unaccounted (BUG; report this) | derived (`total_packets - packets_accounted()`) | identity 1 | Self-check: a packet was dropped without a counter. Always 0; a nonzero value is a silent-drop regression. | **dropped** (BUG) |
@@ -125,7 +125,7 @@ Store population. The management subtype tree, the ESSID block, plaintext surfac
 Source: IEEE 802.11-2024 §9.4.1 (mgmt body fields), Table 9-1 (subtypes), §9.4.2 (IEs). Each is a per-subtype total or a sub-field of one; together with `mgmt_reserved_subtype` they reconcile to `mgmt_frames` (identity 2).
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | BEACON (total) | `beacon_frames` | §9.3.3.3 | AP presence; SSID/AKM/PMKID source. | informational |
 | SSID wildcard / zeroed / oversized | `beacon_ssid_wildcard`, `beacon_ssid_zeroed`, `beacon_ssid_oversized` | §9.4.2.2 | Hidden/blanked/malformed SSIDs; oversized SSID is rejected, the beacon kept. | informational / **dropped** (oversized SSID only) |
 | RSNXE SAE-H2E / SAE-PK / Secure LTF / Protected TWT | `rsnxe_sae_h2e`, `rsnxe_sae_pk`, `rsnxe_secure_ltf`, `rsnxe_protected_twt` | §9.4.2.241 | WPA3 / 11az / 11ax capability bits; capture-feature signal. | informational |
@@ -152,7 +152,7 @@ Source: IEEE 802.11-2024 §9.4.1 (mgmt body fields), Table 9-1 (subtypes), §9.4
 Source: §9.4.2 (IEs), vendor specs (WPS, OWE, CCX, P2P), RFC 3748 (EAP identity). A regression that drops one of these is an `extraction_coverage.rs` failure.
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | ESSID (unique APs seen) | `essid_count` | §9.4.2.2 | How many distinct APs have a known SSID (needed for PMK derivation). | skeleton |
 | ESSID changes (per-AP maximum) | `essid_changes_max` | §9.4.2.2 | Largest per-AP SSID-variant count; a high value usually means RF-rotted duplicate beacons. | informational |
 | hash lines dropped (no SSID resolved) / distinct APs affected | `essid_unresolved_emissions`, `essid_unresolved_aps` | FR-ESSID-3 | Hashes dropped at emit because the AP's SSID was never seen: uncrackable. Each AP also gets an `[essid_not_found_summary]` log line. | **dropped** |
@@ -165,7 +165,7 @@ Source: §9.4.2 (IEs), vendor specs (WPS, OWE, CCX, P2P), RFC 3748 (EAP identity
 Source: IEEE 802.11-2024 §12.7 (4-way handshake, EAPOL-Key), §12.3.2 (preauth EtherType), §9.2.4.8.3 (Mesh Control); RFC 3748 §4.2 (EAP outcome).
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | M1 / M2 / M3 / M4 messages + auth-len max | `eapol_m1`, `eapol_m2`, `eapol_m3`, `eapol_m4`, `m1_auth_len_max`, `m2_auth_len_max`, `m3_auth_len_max`, `m4_auth_len_max` | §12.7.6 Table 12-10 | The raw handshake-message inventory; the auth-len-max rows mirror hcxpcapngtool's `body / frame` widths. | skeleton |
 | distinct (AP, STA) groups | `distinct_groups` | §3.3 | Number of unique (AP, STA) pairs in the `MessageStore`. The pairing denominator. | skeleton |
 | groups with complete 4-way handshake | `groups_complete_4way` | §12.7.6 | Groups where M1, M2, M3, and M4 are all present. Capture completeness signal. | informational |
@@ -188,7 +188,7 @@ Source: IEEE 802.11-2024 §12.7 (4-way handshake, EAPOL-Key), §12.3.2 (preauth 
 Source: IEEE 802.11-2024 §12.7.1.3 (PMKID), §12.7.2 (M1/M2 KDE), §9.6.7 (FT Action), Wi-Fi Passpoint (OSEN). `pmkids_found` is the insertion total (post-garbage, post-insert-dedup, pre-global-dedup); the children split it by extraction site and by AKM family.
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | PMKID store insertions (total, pre-dedup) | `pmkids_found` | §12.7.1.3 | The PMKID material inventory before global dedup. | skeleton |
 | per-source S1-S20 | `pmkid_m1`, `pmkid_m2`, `pmkid_assoc_req`, `pmkid_reassoc_req`, `pmkid_ft_auth`, `pmkid_fils_auth`, `pmkid_pasn_auth`, `pmkid_ft_action`, `pmkid_probe_req`, `pmkid_beacon`, `pmkid_probe_resp`, `pmkid_mesh`, `pmkid_osen` | §12.7.2, §9.6.7, OSEN | Which of the 20 spec-defined locations each PMKID came from: the "never miss a PMKID" coverage map. | informational |
 | by AKM family (non-FT / FT) | `pmkid_wpa2_psk`, `pmkid_ft_psk` | §12.7.1.3 | Same total split by AKM family (non-FT = PSK/SHA256/SHA384; FT = FT-PSK/FT-PSK-SHA384). | informational |
@@ -200,7 +200,7 @@ Source: IEEE 802.11-2024 §12.7.1.3 (PMKID), §12.7.2 (M1/M2 KDE), §9.6.7 (FT A
 Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTURE.md §2 (11-type table), §5 (combos), §7 (line format), §8 (FR-PAIR / FR-OUT).
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | output filters active | `filters_active` | FR-CLI-3 | Echoes the resolved filter state so a WIDE run and a `--strict` run are distinguishable from the banner alone. | informational |
 | per-hash-type found / written (11 rows) | `hash_type_found`, `hash_type_emitted` | §2 | One row per 11-type code. **found** is the sink-independent inventory of what the capture contains; **written** is what reached a configured output file. They differ when a type has no configured accepting sink (e.g. the SHA-384 family with only `-o` shows `14 / 0`). | skeleton |
 | EAPOL pairs generated (total, pre-dedup) | `eapol_pairs_generated` | §5 | Pairs the engine produced before global dedup (identity 3). | skeleton |
@@ -236,7 +236,7 @@ Pairing, classification, dedup, and the per-sink output rows. Source: ARCHITECTU
 Executive summary an operator reads in five seconds.
 
 | Line | Field(s) | Source | Why we care | Disposition |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | hashes emitted (total) + EAPOL/PMKID split | `hash_type_emitted` (summed) | §2 | The headline yield written to files, split by attack surface (identity 4). | skeleton |
 | distinct hash types observed | `hash_type_found` (nonzero count) | §2 | How many of the 11 types the capture contains: the inventory, independent of which sinks were configured. | skeleton |
 | hash types found but not written (add -o to capture) | `hash_type_found` vs `hash_type_emitted` | §2 | Types present in the capture that reached no output file; configure `-o` or the per-AKM sink to write them. | **dropped** (operator config) |

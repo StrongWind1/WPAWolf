@@ -19,7 +19,7 @@ wpawolf ...
 **Output**
 Paste the full output (use `-d` / `--debug` for verbose diagnostic output):
 
-```
+```text
 ...
 ```
 
@@ -27,6 +27,8 @@ Paste the full output (use `-d` / `--debug` for verbose diagnostic output):
 What you expected to happen.
 
 **Environment**
+Your setup:
+
 - OS: [e.g. Kali 2025.1, Ubuntu 24.04, macOS 14]
 - WPAWolf version: [`wpawolf --version`]
 - Install method: [e.g. release binary, cargo install, built from source]

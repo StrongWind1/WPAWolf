@@ -15,11 +15,11 @@ File-only tool: no capture, no injection, no cracking. Authorised use only.
 ### Tool-landscape niche
 
 | Tool | Lang | pcap/pcapng/gzip | WPA2-PSK | PMKID | FT-PSK | mode 22000 | Dedup |
-|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | **wpawolf** | Rust | yes / yes / yes | yes | yes | yes (no 512 B parse gate) | yes (types 01-04) | global SipHash set |
 | **hcxpcapngtool** | C | yes / yes / yes | yes | yes | yes (parse cap 512 B; legacy hccap/hccapx output paths drop > 255 B) | yes | full dedup at write time (equivalent to wpawolf) |
-| `wpapcap2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
-| `wlan2john` | C (JtR) | pcap only | yes | no | no | no | no | none |
+| `wpapcap2john` | C (JtR) | pcap only | yes | no | no | no | none |
+| `wlan2john` | C (JtR) | pcap only | yes | no | no | no | none |
 
 Capture-side tools (hcxdumptool, airodump-ng, Kismet) and cracker-side tools (hashcat, JtR) live on the other side of the file boundary wpawolf sits on. They are out of scope.
 
@@ -29,7 +29,7 @@ Capture-side tools (hcxdumptool, airodump-ng, Kismet) and cracker-side tools (ha
 
 wpawolf classifies every PSK-crackable hash by a unique type code 1-11. The type code is self-contained: it determines the PMKID hash primitive, the PTK KDF, the KCK length, the MIC algorithm, and the MIC field width. Two encoding rules cover the whole table:
 
-```
+```text
 EVEN code  =  PMKID attack    (no full handshake needed)
 ODD  code  =  EAPOL attack    (needs nonce + MIC frame)
 
@@ -45,19 +45,19 @@ Ascending code  =  ascending hash complexity
 
 The eleven canonical names (used verbatim in stats, source code, and output line text):
 
-| # | Name                       | AKM (selector)   | KDV |
-|---|----------------------------|------------------|-----|
-| 1 | WPA1-PSK-EAPOL             | WPA1 vendor IE   | 1   |
-| 2 | WPA2-PSK-PMKID             | 2 (`00:0F:AC:02`) | n/a |
-| 3 | WPA2-PSK-EAPOL             | 2                | 2   |
-| 4 | PSK-SHA256-PMKID           | 6 (`00:0F:AC:06`) | n/a |
-| 5 | PSK-SHA256-EAPOL           | 6                | 3   |
-| 6 | FT-PSK-PMKID               | 4 (`00:0F:AC:04`) | n/a |
-| 7 | FT-PSK-EAPOL               | 4                | 3   |
-| 8 | PSK-SHA384-PMKID           | 20 (`00:0F:AC:14`) | n/a |
-| 9 | PSK-SHA384-EAPOL           | 20               | 0   |
-| 10 | FT-PSK-SHA384-PMKID       | 19 (`00:0F:AC:13`) | n/a |
-| 11 | FT-PSK-SHA384-EAPOL       | 19               | 0   |
+| #   | Name                | AKM (selector)     | KDV |
+| --- | ------------------- | ------------------ | --- |
+| 1   | WPA1-PSK-EAPOL      | WPA1 vendor IE     | 1   |
+| 2   | WPA2-PSK-PMKID      | 2 (`00:0F:AC:02`)  | n/a |
+| 3   | WPA2-PSK-EAPOL      | 2                  | 2   |
+| 4   | PSK-SHA256-PMKID    | 6 (`00:0F:AC:06`)  | n/a |
+| 5   | PSK-SHA256-EAPOL    | 6                  | 3   |
+| 6   | FT-PSK-PMKID        | 4 (`00:0F:AC:04`)  | n/a |
+| 7   | FT-PSK-EAPOL        | 4                  | 3   |
+| 8   | PSK-SHA384-PMKID    | 20 (`00:0F:AC:14`) | n/a |
+| 9   | PSK-SHA384-EAPOL    | 20                 | 0   |
+| 10  | FT-PSK-SHA384-PMKID | 19 (`00:0F:AC:13`) | n/a |
+| 11  | FT-PSK-SHA384-EAPOL | 19                 | 0   |
 
 **See [`HASHCAT.md`](HASHCAT.md) for the deep dive:** the mode 22000 format reference (4 type prefixes, 6 aux kernels), the encoding rules, per-type cracker math (PBKDF2 -> PMK -> PMKID / PTK / MIC paths), the definitive wpawolf-to-hashcat type mapping, the message-pair byte specification, and known limitations (PSK-SHA256 PMKID miscrack, SHA-384 inexpressible).
 
@@ -67,19 +67,19 @@ For how `wpawolf` writes lines and which CLI flags route hashes to which sink, s
 
 The deep per-type detail (PBKDF2 shared foundation, per-type post-PMK computation, hash-line format with field widths, the complete message-pair byte specification including PMKID-line semantics, and the type-mapping table showing which hashcat kernel cracks each type) lives in [`HASHCAT.md`](HASHCAT.md). The operator-facing CLI / output-sink reference lives in [`README.md`](README.md). This document focuses on `wpawolf`'s architecture decisions only.
 
-| Looking for...                                       | Read this                                    |
-|------------------------------------------------------|----------------------------------------------|
-| Mode 22000 format + type mapping + cracker math      | [`HASHCAT.md`](HASHCAT.md) §3-§5 |
-| Message-pair byte spec (EAPOL + PMKID)               | [`HASHCAT.md`](HASHCAT.md) §6 |
-| Known limitations (PSK-SHA256 PMKID, SHA-384)        | [`HASHCAT.md`](HASHCAT.md) §7 |
-| `wpawolf` CLI flags, output sinks, examples          | [`README.md`](README.md) |
-| Current state and quality bar                        | [`CHANGELOG.md`](CHANGELOG.md) |
+| Looking for...                                  | Read this                        |
+| ----------------------------------------------- | -------------------------------- |
+| Mode 22000 format + type mapping + cracker math | [`HASHCAT.md`](HASHCAT.md) §3-§5 |
+| Message-pair byte spec (EAPOL + PMKID)          | [`HASHCAT.md`](HASHCAT.md) §6    |
+| Known limitations (PSK-SHA256 PMKID, SHA-384)   | [`HASHCAT.md`](HASHCAT.md) §7    |
+| `wpawolf` CLI flags, output sinks, examples     | [`README.md`](README.md)         |
+| Current state and quality bar                   | [`CHANGELOG.md`](CHANGELOG.md)   |
 
 The 11 types differ in exactly four dimensions after the PMK step: **PMKID hash primitive**, **PTK KDF**, **KCK size**, and **MIC algorithm + size**. FT variants (types 6, 7, 10, 11) also add an intermediate PMK-R0 -> PMK-R1 hierarchy step before the PTK, which requires MDID, R0KH-ID, and R1KH-ID in the hash line. See `HASHCAT.md` §5 for the algebra.
 
 ### §2.3  Type-routing decision tree
 
-```
+```text
 EAPOL (odd codes): KDV first, FTIE second, AKM IE only as refiner
   Tier 1: KDV byte (key_info bits 0..2)
     KDV=1 ─────────────────────────────────────────────────► Type 1    [closed]
@@ -105,7 +105,7 @@ PMKID (even codes): no KDV; AKM IE only, scoped strongest first
 
 wpawolf is a batch pipeline. The five phases run strictly in order; each phase reads from the previous phase's outputs and writes its own.
 
-```
+```text
 +-----------+    +----------+    +----------+    +--------+    +---------+
 |  Ingest   | -> |  Decode  | -> | Extract  | -> |  Emit  | -> | Report  |
 |           |    |          |    |          |    |        |    |         |
@@ -118,18 +118,18 @@ wpawolf is a batch pipeline. The five phases run strictly in order; each phase r
 ```
 
 | Phase | Crate path | Input | Output | Bound |
-|-------|------------|-------|--------|-------|
-| §3.1 Ingest  | `src/input/`              | file paths | `Packet { timestamp_us, interface_id, data }` records | I/O |
-| §3.2 Decode  | `src/link/` + `src/ieee80211/` | raw packets | parsed 802.11 frames + IEs + EAPOL | CPU |
+| ------- | ------------ | ------- | -------- | ------- |
+| §3.1 Ingest | `src/input/` | file paths | `Packet { timestamp_us, interface_id, data }` records | I/O |
+| §3.2 Decode | `src/link/` + `src/ieee80211/` | raw packets | parsed 802.11 frames + IEs + EAPOL | CPU |
 | §3.3 Extract | `src/extract/` + `src/store/` | parsed frames | populated stores keyed by `MacPair` | CPU |
-| §3.4 Emit    | `src/pair/` + `src/output/`   | populated stores | hashcat lines + auxiliary files | CPU + I/O |
-| §3.5 Report  | `src/stats.rs`             | counters from all earlier phases | summary on stdout | I/O |
+| §3.4 Emit | `src/pair/` + `src/output/` | populated stores | hashcat lines + auxiliary files | CPU + I/O |
+| §3.5 Report | `src/stats.rs` | counters from all earlier phases | summary on stdout | I/O |
 
 Phase 1 dominates wall time on warm caches at NVMe speeds (~50-500x phase 2). Phase 4 is parallelised via rayon work-stealing (`--threads N`, default = CPU count; `--threads=1` for reproducible output). Pairs are streamed per-group through a Mutex-serialized fan-out callback so peak memory is bounded to one group's pairs at a time. Every shared structure is `Send + Sync` (see §4 invariant 9).
 
 ### Module DAG
 
-```
+```text
 main --> input --> link --> ieee80211 --> extract --> store --> pair --> output
            |                    |                      |                    |
            +--------------------+----------------------+-------------------> types
@@ -197,7 +197,7 @@ Phase 3 enforces the §4 invariant 7 rejection rules and emits `[invalid_nonce]`
 Every spec-defined path that can carry an EAPOL-Key M1 / M2 / M3 / M4 frame, plus the closely-related PMKID-bearing action frames. This table is the canonical answer for "does wpawolf catch EAPOL hidden in encapsulation X?" and is regression-tested by `tests/integration/eapol_transport_vectors.rs`.
 
 | # | Vector | Spec | Coverage | Notes |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | LLC/SNAP `EtherType` `0x888E` Data frame | §9.3, §12.7 | done: `extract::data` | Standard BSS uplink/downlink; ~95 % of all real EAPOL traffic. |
 | 2 | A-MSDU subframe carrying EAPOL | §9.7.2 | done: `ieee80211::amsdu` | Iterates every subframe; outer (AP, STA) is authoritative. |
 | 3 | MSDU fragmentation (multi-fragment EAPOL) | §9.2.4.4 | done: `store::fragments` | Reassembly key `(SA, RA, SeqNum)`; bounded `MAX_ENTRIES = 1_000_000` with oldest-first eviction. WDS fragmentation is out of scope for v1 (single-MPDU WDS works). |
@@ -220,13 +220,13 @@ Items 1-5, 9, 10 are all live transport vectors with end-to-end coverage. Items 
 - `combos.rs` generates the 6 N#E# combos (FR-PAIR-2):
 
   | Combo | Needs | External Nonce | EAPOL From | mp bits 0-2 |
-  |-------|-------|----------------|------------|-------------|
-  | N1E2  | M1+M2 | ANonce from M1 | M2 | 0x00 |
-  | N1E4  | M1+M4 | ANonce from M1 | M4 | 0x01 |
-  | N3E2  | M3+M2 | ANonce from M3 | M2 | 0x02 |
-  | N2E3  | M2+M3 | SNonce from M2 | M3 | 0x03 |
-  | N4E3  | M4+M3 | SNonce from M4 | M3 | 0x04 |
-  | N3E4  | M3+M4 | ANonce from M3 | M4 | 0x05 |
+  | ----- | ----- | -------------- | ---------- | ----------- |
+  | N1E2  | M1+M2 | ANonce from M1 | M2         | 0x00        |
+  | N1E4  | M1+M4 | ANonce from M1 | M4         | 0x01        |
+  | N3E2  | M3+M2 | ANonce from M3 | M2         | 0x02        |
+  | N2E3  | M2+M3 | SNonce from M2 | M3         | 0x03        |
+  | N4E3  | M4+M3 | SNonce from M4 | M3         | 0x04        |
+  | N3E4  | M3+M4 | ANonce from M3 | M4         | 0x05        |
 
 - `constraints.rs` applies the optional output filters:
   - `--eapoltimeout[=N]` enforces a session time window in seconds.
@@ -256,7 +256,7 @@ Timestamp-derived rows (first / last packet, duration, session time gap max) are
 
 The summary is organised as five banner sections, one per pipeline phase, so an operator can immediately see which phase a parse failure occurred in:
 
-```
+```text
 === Phase 1: Ingest ===      packets, endianness, malformed blocks, FCS framing
 === Phase 2: Decode ===      per-DLT counts, radiotap/PPI/Prism mismatches
 === Phase 3: Extract ===     mgmt subtypes, EAPOL M1/M2/M3/M4, PMKIDs by source
@@ -300,13 +300,13 @@ The dedup filter is `HashSet<u64>` of SipHash-1-3 fingerprints over the signific
 
 For PMKID lines the fingerprint is:
 
-```
+```text
 SipHash-1-3( line_kind_byte || PMKID || MAC_AP || MAC_STA || ESSID )
 ```
 
 For EAPOL lines:
 
-```
+```text
 SipHash-1-3( line_kind_byte || MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID [|| MESSAGE_PAIR] )
 ```
 
@@ -327,7 +327,7 @@ Invalid sentinel values and short-period repeating patterns are rejected at pars
 The detector (`types::garbage_pattern_kind`) classifies a byte run into one of five mutually-exclusive kinds, in priority order:
 
 | Kind | Pattern | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `null` | every byte is `0x00` | Fires at any length |
 | `ff` | every byte is `0xFF` | Fires at any length; NOR-flash erase value |
 | `repeat_1` | every byte equals the first byte (other than `0x00` / `0xFF`) | Length `>= 4` so short fields are never flagged |
@@ -337,7 +337,7 @@ The detector (`types::garbage_pattern_kind`) classifies a byte run into one of f
 Per-field rejection matrix:
 
 | Field | Rejected kinds | Spec-valid exception |
-|-------|----------------|----------------------|
+| ------- | ---------------- | ---------------------- |
 | Nonce M1, M2, M3, M4 | every kind | n/a |
 | MIC on frame with `Key MIC Present` set (M2/M3/M4) | every kind | n/a |
 | MIC on M1 (`Key MIC Present` cleared) | not checked | M1 MIC is legitimately zero |
@@ -349,7 +349,7 @@ M4 NULL nonce is spec-valid on the wire per [IEEE 802.11-2024] §12.7.6.5 NOTE 9
 
 Each rejection / warning increments a dedicated counter:
 
-```
+```text
 stats.null_nonce_rejected   stats.ff_nonce_rejected   stats.repeat_nonce_rejected
 stats.null_mic_rejected     stats.ff_mic_rejected     stats.repeat_mic_rejected
 stats.null_pmkid_rejected   stats.ff_pmkid_rejected   stats.repeat_pmkid_rejected
@@ -402,7 +402,7 @@ The 4-way handshake derives the PTK without transmitting it. Both sides start fr
 
 ### §5.2  The four messages
 
-```
+```text
 AP                                           Client
 |                                               |
 |------- M1: ANonce --------------------------->|
@@ -433,7 +433,7 @@ AP                                           Client
 
 Per `[IEEE 802.11-2024]` §12.7.2 Figure 12-35. Offsets are from the start of the EAPOL-Key body (after the 4-byte EAPOL header):
 
-```
+```text
 Offset  0: Descriptor Type     (1 B): 0x02 = RSN, 0xFE = WPA (legacy)
 Offset  1: Key Information     (2 B, BE): bit-packed control word
 Offset  3: Key Length          (2 B)
@@ -451,7 +451,7 @@ For output formatting (FR-OUT-8) the parser stores the EAPOL-Key frame verbatim 
 
 Key Information bit layout per §12.7.2 Figure 12-36:
 
-```
+```text
 Bits 0-2:  Key Descriptor Version (KDV)
 Bit  3:    Key Type (1 = Pairwise)
 Bit  6:    Install
@@ -464,7 +464,7 @@ Bit 12:    Encrypted Key Data (1 in M3)
 M1/M2/M3/M4 identification per `[IEEE 802.11-2024]` Table 12-10:
 
 | Message | Key Ack | Key MIC | Install | Secure | Nonce |
-|---------|---------|---------|---------|--------|-------|
+| --------- | --------- | --------- | --------- | -------- | ------- |
 | M1 | 1 | 0 | 0 | 0 (initial) or 1 (rekey) | non-zero (ANonce) |
 | M2 | 0 | 1 | 0 | 0 (initial) or 1 (rekey) | non-zero (SNonce) |
 | M3 | 1 | 1 | 1 | 1 | non-zero (ANonce, repeat of M1) |
@@ -475,7 +475,7 @@ M1/M2/M3/M4 identification per `[IEEE 802.11-2024]` Table 12-10:
 Per `[IEEE 802.11-2024]` §12.7.2 Table 12-11:
 
 | KDV | MIC algorithm | MIC size | When used |
-|-----|---------------|----------|-----------|
+| ----- | --------------- | ---------- | ----------- |
 | **1** | HMAC-MD5-128 | 16 B | WPA1-PSK (TKIP cipher, `00-50-F2:01`) |
 | **2** | HMAC-SHA-1-128 | 16 B | WPA2-PSK (AKM 2) with any pairwise cipher |
 | **3** | AES-128-CMAC | 16 B | AKMs 3, 4, 5, 6, required by 802.11w / PMF AKMs |
@@ -484,7 +484,7 @@ Per `[IEEE 802.11-2024]` §12.7.2 Table 12-11:
 When KDV = 0, the MIC algorithm is implicit from the negotiated AKM:
 
 | AKM | MIC when KDV=0 |
-|-----|----------------|
+| ----- | ---------------- |
 | 8, 9 (SAE) | AES-128-CMAC, 16 B |
 | 11 (Suite B-128) | HMAC-SHA-256, 16 B |
 | 12, 13 (Suite B-192 / CNSA) | HMAC-SHA-384, **24 B** |
@@ -504,7 +504,7 @@ Per `[IEEE 802.11-2024]` §12.7.1.3 the cracker runs PBKDF2 once, then derives P
 wpawolf creates hash lines by combining one nonce source with one EAPOL/MIC source. There are six valid combinations; the spec and hcxtools call these N#E# combos (Nonce from message #, EAPOL from message #).
 
 | Combo | Nonce from | EAPOL/MIC from | Hash-line NONCE field | mp bits 0-2 |
-|-------|------------|----------------|----------------------|-------------|
+| ------- | ------------ | ---------------- | ---------------------- | ------------- |
 | **N1E2** | M1 | M2 | ANonce | 0x00 |
 | **N1E4** | M1 | M4 | ANonce | 0x01 |
 | **N3E2** | M3 | M2 | ANonce | 0x02 |
@@ -525,7 +525,7 @@ Bits 0-2: combo type (see §5.6).
 Bits 3-7 diagnostic flags:
 
 | Bit | Hex | Meaning |
-|-----|-----|---------|
+| ----- | ----- | --------- |
 | 4 | `0x10` | AP-less attack: pair did not consume an M1 (set for N2E3 / N4E3 combos) |
 | 5 | `0x20` | LE flag: replay counter relationship detected as little-endian |
 | 6 | `0x40` | BE flag: replay counter relationship detected as big-endian |
@@ -534,7 +534,7 @@ Bits 3-7 diagnostic flags:
 Examples:
 
 | Hex | Meaning |
-|-----|---------|
+| ----- | --------- |
 | `00` | N1E2, no flags (clean capture) |
 | `02` | N3E2, no flags |
 | `82` | N3E2, NC flag set (nonce error correction applied) |
@@ -551,7 +551,7 @@ Examples:
 Within a single handshake session (where M1 and M3 carry the same ANonce, M2 and M4 carry the same SNonce), the 6 combos produce at most 3 unique crackable hashes:
 
 | Class | Members | Unique because of |
-|-------|---------|-------------------|
+| ------- | --------- | ------------------- |
 | Hash-A | N1E2, N3E2 | M2's EAPOL frame |
 | Hash-B | N2E3, N4E3 | M3's EAPOL frame |
 | Hash-C | N1E4, N3E4 | M4's EAPOL frame |
@@ -581,7 +581,7 @@ Three optional output filters narrow which combos make it to disk. All three are
 
 **`--rc-drift[=N]`** activates replay-counter consistency verification. Expected RC relationship per combo:
 
-```
+```text
 N1E2:           RC(M2) == RC(M1)
 N3E2:           RC(M2) == RC(M3) - 1
 N1E4:           RC(M4) == RC(M1) + 1
@@ -600,7 +600,7 @@ LE/BE nonce-endianness detection always runs even when `--rc-drift` is off; the 
 
 For FT-PSK (AKM 4 / AKM 19) the FT-PTK derivation pins both nonces and the BSSID into the KDF input:
 
-```
+```text
 FT-PTK = KDF-Hash(PMK-R1, "FT-PTK", SNonce || ANonce || BSSID || SPA)
 ```
 
@@ -668,7 +668,7 @@ This is additive, not a rewrite, and the distinction is load-bearing. A true mul
 WDS classification runs in **Phase 1.5** (`src/extract/wds.rs`) after the `essid_map` is fully populated, then walks every deferred frame through a three-tier resolution ladder. Tier 3 always succeeds for syntactically valid EAPOL frames, so resolution does **not** depend on `essid_map` being populated; a capture with no Beacon / Probe Response still recovers every valid WDS handshake.
 
 | Tier | Mechanism | Counter | Coverage |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1b | `essid_map` AP lookup on `addr_ta` or `addr_ra` | `eapol_tier1b_essid` | Best path; requires Beacon / Probe Response |
 | 2 | ACK-flag-based AP discovery (any in-capture frame with Key ACK = 1 reveals its TA as the AP) | `eapol_tier2_ack_discovery` | Works without `essid_map` when at least one M1 / M3 is present |
 | 3 | Flag-based fallback via `eapol::parse(.., None)` | `eapol_tier3_flag_fallback` | Always-on last resort; mirrors hcxpcapngtool's tree |
@@ -689,7 +689,7 @@ PMKSA caching (`[IEEE 802.11-2024]` §12.6.8) lets a station that has previously
 
 The canonical formula (WPA2-PSK, AKM 2):
 
-```
+```text
 PMK   = PBKDF2-HMAC-SHA1(passphrase, SSID, 4096 iterations, 32 bytes)
 PMKID = Truncate-128( HMAC-SHA1( PMK, "PMK Name" || AP_MAC || STA_MAC ) )
 ```
@@ -699,7 +699,7 @@ PMKID = Truncate-128( HMAC-SHA1( PMK, "PMK Name" || AP_MAC || STA_MAC ) )
 Per `[IEEE 802.11-2024]` §12.7.1.3 the HMAC primitive varies by AKM:
 
 | AKM | Selector | Name | PMKID formula | PMK source | Crackable? |
-|-----|----------|------|---------------|------------|------------|
+| ----- | ---------- | ------ | --------------- | ------------ | ------------ |
 | WPA1 | `00-50-F2:01` | WPA-PSK (TKIP) | none: WPA1 has no PMKID | PBKDF2-SHA1 | n/a |
 | **2** | `00-0F-AC:2` | **WPA2-PSK** | `Truncate-128(HMAC-SHA1(PMK, "PMK Name" \|\| AA \|\| SPA))` | PBKDF2-SHA1 | yes: hashcat 22000 |
 | 4 | `00-0F-AC:4` | FT-PSK-SHA256 | Two-step FT chain (see §6.3) | PBKDF2-SHA1 -> FT KDF | yes: hashcat 22000 type 03/04 |
@@ -725,7 +725,7 @@ wpawolf extracts PMKIDs from every AKM (§4 invariant 7 covers the NULL/0xFF rej
 
 Fast BSS Transition (`[IEEE 802.11-2024]` §13.4, AKM 4 / 19) does not use a flat PMKID. Instead it uses a hierarchy:
 
-```
+```text
 PMK-R0  =  KDF-SHA256(PMK, "FT-R0",
                       SPA || SSID || MDID || R0KH-ID-len || R0KH-ID || S0KH-ID)
 
@@ -752,7 +752,7 @@ All three must appear in the hash line for hashcat mode 22000 type 03 to walk th
 After extraction, the PMKID is routed based on the AKM detected from the Beacon / ProbeResponse RSN IE for the AP's BSSID, with the per-`(AP, STA)` observed AKM (from the M2 RSN IE in Key Data) winning over the AP-wide default. If no Beacon was captured for the AP (AKM is Unknown), wpawolf defaults to WPA*01* (type 01) output; the PMKID is not discarded just because the AKM is unknown.
 
 | Detected AKM | Output sinks | hash type code | Notes |
-|--------------|--------------|----------------|-------|
+| -------------- | -------------- | ---------------- | ------- |
 | AKM 2 (PSK) | `-o`, `--wpa2-pmkid` | type 02, `WPA*01*` | Primary target |
 | AKM 6 (PSK-SHA256) | `-o`, `--sha256-pmkid` | type 04, `WPA*01*` | hashcat aux4 runs SHA1 only; emits but does not crack |
 | AKM 4 (FT-PSK) with FT fields | `-o`, `--ft-pmkid` | type 06, `WPA*03*` | Requires MDID + R0KH-ID + R1KH-ID |
@@ -798,7 +798,7 @@ Per-location notes follow. Each maps to a `PmkidSource` enum variant. The summar
 ### §6.6  Complete location summary
 
 | ID | Frame type | Subtype | Direction | Container | Crackable | mp byte | tshark display filter |
-|----|------------|---------|-----------|-----------|-----------|---------|----------------------|
+| ---- | ------------ | --------- | ----------- | ----------- | ----------- | --------- | ---------------------- |
 | S1 | EAPOL-Key M1 | Data | AP->STA | KDE `{DD 14 00:0F:AC 04}` | yes (PSK) | 0x01 | `wlan_rsna_eapol.keydes.key_info.key_ack == 1 && wlan_rsna_eapol.keydes.key_info.key_mic == 0 && wlan.rsn.ie.pmkid` |
 | S2 | EAPOL-Key M2 | Data | STA->AP | RSN IE in Key Data | yes (PSK / FT-PSK) | 0x04 | `wlan_rsna_eapol.keydes.key_info.key_ack == 0 && wlan_rsna_eapol.keydes.key_info.key_mic == 1 && wlan_rsna_eapol.keydes.key_info.install == 0 && wlan.rsn.pmkid.count > 0` |
 | S3 | Association Request | Mgmt 0x00 | STA->AP | RSN IE tagged params | yes (PSK) | 0x01 | `wlan.fc.type_subtype == 0x00 && wlan.rsn.pmkid.count > 0` |
@@ -845,7 +845,7 @@ If hashcat ever ships a FILS / SAE / OSEN kernel that takes a PSK or similar PSK
 Unlike EAPOL lines where the message_pair byte encodes the combo type, for PMKID lines it records where the PMKID came from:
 
 | Value | Meaning | wpawolf sources |
-|-------|---------|-----------------|
+| ------- | --------- | ----------------- |
 | `0x01` | PMKID from AP side, non-FT | M1 KDE, AssocReq, ReassocReq, Beacon, ProbeResp, FT Auth seq=2, FT Action Response, FILS Auth seq=2, PASN Auth seq=2 |
 | `0x04` | PMKID from client side, non-FT | M2, FT Auth seq=1, FT Action Request, FT Action Confirm, ProbeReq, FILS Auth seq=1, PASN Auth seq=1, Mesh Peering Open/Confirm, OSEN |
 | `0x10` | PMKID from AP side, FT-PSK | same sources as `0x01` when `akm.is_ft()` |
@@ -895,19 +895,19 @@ The detailed hash-line formats (per-prefix layout, field widths, MIC zeroing, MA
 
 ### Hashcat compatibility matrix
 
-| Type | Hash family            | Output prefix       | Per-AKM sink           | hashcat support today |
+| Type | Hash family | Output prefix | Per-AKM sink | hashcat support today |
 | ---- | ---------------------- | ------------------- | ----------------------- | --------------------- |
-| 1    | WPA1-PSK EAPOL         | `WPA*02*` | `-o`, `--wpa1-eapol` | mode 22000 aux1, KDV=1 (HMAC-MD5 MIC) |
-| 2    | WPA2-PSK PMKID         | `WPA*01*` | `-o`, `--wpa2-pmkid` | mode 22000 aux4 (HMAC-SHA1 PMKID) |
-| 3    | WPA2-PSK EAPOL         | `WPA*02*` | `-o`, `--wpa2-eapol` | mode 22000 aux2, KDV=2 (HMAC-SHA1-128 MIC) |
-| 4    | PSK-SHA-256 PMKID      | `WPA*01*` | `-o`, `--sha256-pmkid` | mode 22000 aux4 runs HMAC-SHA1 only; emits but does not crack |
-| 5    | PSK-SHA-256 EAPOL      | `WPA*02*` | `-o`, `--sha256-eapol` | mode 22000 aux3, KDV=3 (AES-128-CMAC MIC); cracks |
-| 6    | FT-PSK PMKID           | `WPA*03*` | `-o`, `--ft-pmkid` | mode 22000 aux5 (SHA-256 FT chain) |
-| 7    | FT-PSK EAPOL           | `WPA*04*` | `-o`, `--ft-eapol` | mode 22000 aux6 (SHA-256 FT chain, AES-CMAC) |
-| 8    | PSK-SHA-384 PMKID      | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
-| 9    | PSK-SHA-384 EAPOL      | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
-| 10   | FT-PSK-SHA-384 PMKID   | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
-| 11   | FT-PSK-SHA-384 EAPOL   | — | *(not emitted)* | no kernel; 24 B MIC + SHA-384 FT chain |
+| 1 | WPA1-PSK EAPOL | `WPA*02*` | `-o`, `--wpa1-eapol` | mode 22000 aux1, KDV=1 (HMAC-MD5 MIC) |
+| 2 | WPA2-PSK PMKID | `WPA*01*` | `-o`, `--wpa2-pmkid` | mode 22000 aux4 (HMAC-SHA1 PMKID) |
+| 3 | WPA2-PSK EAPOL | `WPA*02*` | `-o`, `--wpa2-eapol` | mode 22000 aux2, KDV=2 (HMAC-SHA1-128 MIC) |
+| 4 | PSK-SHA-256 PMKID | `WPA*01*` | `-o`, `--sha256-pmkid` | mode 22000 aux4 runs HMAC-SHA1 only; emits but does not crack |
+| 5 | PSK-SHA-256 EAPOL | `WPA*02*` | `-o`, `--sha256-eapol` | mode 22000 aux3, KDV=3 (AES-128-CMAC MIC); cracks |
+| 6 | FT-PSK PMKID | `WPA*03*` | `-o`, `--ft-pmkid` | mode 22000 aux5 (SHA-256 FT chain) |
+| 7 | FT-PSK EAPOL | `WPA*04*` | `-o`, `--ft-eapol` | mode 22000 aux6 (SHA-256 FT chain, AES-CMAC) |
+| 8 | PSK-SHA-384 PMKID | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 9 | PSK-SHA-384 EAPOL | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 10 | FT-PSK-SHA-384 PMKID | — | *(not emitted)* | no kernel; 24 B MIC inexpressible |
+| 11 | FT-PSK-SHA-384 EAPOL | — | *(not emitted)* | no kernel; 24 B MIC + SHA-384 FT chain |
 
 The combined `-o` sink receives every emitted hash (types 1-7). Update both `per_type_sink_for` in `src/output/mod.rs` and this table together when hashcat ships a new kernel.
 
@@ -917,12 +917,14 @@ The combined `-o` sink receives every emitted hash (types 1-7). Update both `per
 
 Every FR-* identifier in this section is cited by source code. Do not rename, drop, or merge them. Group changes are allowed; renumbering is not. The text is summarised; the source-of-truth wire-level details live in the spec citations attached to each requirement.
 
-### §8.1  Input: FR-IN-* and FR-LL-*
+### §8.1  Input: FR-IN-*and FR-LL-*
 
 #### FR-IN-1
+
 Accept one or more file paths or directory paths as positional arguments. Files are processed sequentially in input order; directories are walked recursively (sorted, magic-byte-driven inclusion, symlinks not followed). Per-file ingest runs single-threaded; the parallelism budget is spent on Phase 4 pairing (FR-THREAD-2).
 
 #### FR-IN-2
+
 Auto-detect file format by magic bytes:
 
 - `0x0A0D0D0A` -> pcapng Section Header Block (palindromic, `"\n\r\r\n"`)
@@ -934,12 +936,15 @@ Auto-detect file format by magic bytes:
 - Unknown -> error with hex dump of first 4 bytes
 
 #### FR-IN-3
+
 For pcapng, handle byte-order magic (`0x1A2B3C4D` vs `0x4D3C2B1A`) per-section. Swap all multi-byte fields when big-endian. Each section delimited by SHBs can have different endianness. [draft-ietf-opsawg-pcapng §3.6.1, §4.1]
 
 #### FR-IN-4
+
 Support multiple Interface Description Blocks with different link types and timestamp resolutions within a single pcapng file. Interface IDs are assigned sequentially starting at 0 within each section, in IDB appearance order. Parse `if_tsresol` option (code 9, 1 byte): MSB=0 -> resolution is 10^(-value) seconds; MSB=1 -> resolution is 2^(-(value & 0x7F)) seconds. Default: 10^-6. [draft-ietf-opsawg-pcapng §4.2]
 
 #### FR-IN-5
+
 Parse pcapng blocks by Block Type:
 
 - `0x0A0D0D0A` SHB: re-init section state
@@ -954,61 +959,78 @@ Parse pcapng blocks by Block Type:
 Every block ends with a repeated Block Total Length. BTL is always multiple of 4. Packet data within EPB padded to 4-byte boundary. [draft-ietf-opsawg-pcapng §3.1, §4.1-4.8]
 
 #### FR-IN-6
+
 For pcapng EPB timestamps, combine Timestamp High and Low into 64-bit: `ts_u64 = (ts_high << 32) | ts_low`. Convert to microseconds using the interface's `if_tsresol`. Apply `if_tsoffset` (option code 14, i64 seconds) if present. [draft-ietf-opsawg-pcapng §4.3]
 
 #### FR-IN-7
+
 Classic pcap 24-byte global header: magic (4), version_major (2), version_minor (2), thiszone (4, ignore), sigfigs (4, ignore), snaplen (4), linktype (4). Current version: 2.4. linktype lower 16 bits are the link type; bit 26 is FCS-length-present flag; bits 28-31 are FCS length in 16-bit words. [libpcap `pcap/pcap.h`, `sf-pcap.c`]
 
 #### FR-IN-8
+
 Classic pcap packet record header (16 bytes): tv_sec (u32), tv_usec (u32), caplen (u32), len (u32). Both tv_sec and tv_usec are unsigned 32-bit regardless of platform. For nanosecond magic, tv_usec contains nanoseconds. For Kuznetzov magic, packet headers are 24 bytes (16 standard + 4 index + 2 protocol + 1 pkt_type + 1 padding). [libpcap `sf-pcap.c:151-174`]
 
 #### FR-IN-9
+
 Read input in a streaming fashion. Never buffer more than one pcapng block (or one pcap packet record) in memory at a time. I/O buffer size: configurable, default 64 KiB.
 
 #### FR-IN-10
+
 Handle truncated captures gracefully. On EOF mid-record (pcap) or mid-block (pcapng), log the byte offset and stop processing the file. Do not panic, do not drop stored handshakes from earlier in the same file. Multi-file runs continue with the next file.
 
 #### FR-IN-11
+
 Handle multi-member gzip streams. `flate2::read::GzDecoder` reads through concatenated gzip members until the final EOF. No special casing needed; `cat a.pcap.gz b.pcap.gz > merged.pcap.gz` works.
 
 #### FR-IN-12
+
 For pcapng, the `if_tsoffset` option (code 14, i64 seconds) is added to the EPB timestamp BEFORE converting to microseconds. Captures rolled over midnight on non-UTC systems rely on this; forgetting it shifts every handshake timestamp by whatever the offset is.
 
 ### §8.2  Link-layer: FR-LL-*
 
 #### FR-LL-1
+
 Parse Radiotap headers (DLT 127). Fields little-endian. Fixed 8-byte header: `it_version` (u8, must be 0), `it_pad` (u8), `it_len` (u16 LE, total header length including this 8-byte part), `it_present` (u32 LE, bitmask). Bit 31 of `it_present` set -> additional u32 present words follow until one with bit 31 clear. Skip to IEEE 802.11 frame at offset `it_len`. Bit 1 of first `it_present` set -> Flags field present; if `flags & 0x10`, the frame has a 4-byte FCS appended (subtract 4 from frame length). All radiotap fields require natural alignment relative to byte 0 (u16 -> 2, u32 -> 4, u64 -> 8). [radiotap.org spec]
 
 #### FR-LL-2
+
 Parse PPI headers (DLT 192). Fields little-endian. Fixed 8-byte header: `pph_version` (u8), `pph_flags` (u8), `pph_len` (u16 LE, total header length), `pph_dlt` (u32 LE, must be DLT_IEEE802_11 = 105). Skip to payload at offset `pph_len`. [hcxtools `ieee80211.h:225-233`, libpcap `dlt.h:818`]
 
 #### FR-LL-3
+
 Parse Prism headers (DLT 119). Host byte order (LE in practice). Header: `msgcode` (u32), `msglen` (u32, total header length), `devname` (16 bytes), then 10 x 12-byte Prism items. Typical 144 bytes. Use `msglen` (not hardcoded 144) to find the 802.11 frame offset. AVS- within-Prism detection: read first 4 bytes as BE u32, mask `& 0xFFFFF000`, compare to `0x80211000`; if match, treat as AVS per FR-LL-4. [libpcap `gencode.c:3441-3505`, hcxtools `ieee80211.h:176-203`]
 
 #### FR-LL-4
+
 Parse AVS / WLAN-NG headers (DLT 163, or detected within DLT 119). Fields **big-endian** per spec. Header: `version` (u32 BE, upper 20 bits = `0x80211`), `len` (u32 BE, total header length), then mactime (u64), hosttime (u64), phytype (u32), channel (u32), datarate (u32), antenna (u32), priority (u32), ssi_type (u32), ssi_signal (i32), ssi_noise (i32), preamble (u32), encoding (u32). Minimum 64 bytes. Use `len` for frame offset. hcxtools treats AVS as LE; documented bug not replicated. [libpcap `gencode.c:3479`, hcxtools `ieee80211.h:205-223`]
 
 #### FR-LL-5
+
 Handle raw IEEE 802.11 (DLT 105). No link-layer header. Frame starts at offset 0.
 
 #### FR-LL-6
+
 Reject unsupported link types with a warning. Do not abort the file; skip packets from that interface.
 
 #### FR-LL-7
+
 Parse Linux cooked capture headers (DLT 113 SLL, 16-byte header; DLT 276 SLL2, 20-byte header). Fields big-endian per libpcap. The ARPHRD hardware type (`sll_hatype` at offset 2 for SLL, `sll2_hatype` at offset 8 for SLL2) selects the inner payload format: 801 (`ARPHRD_IEEE80211`) -> raw 802.11 at the end of the cooked header; 802 (`ARPHRD_IEEE80211_PRISM`) -> Prism header per FR-LL-3 (including AVS-within-Prism detection); 803 (`ARPHRD_IEEE80211_RADIOTAP`) -> radiotap header per FR-LL-1. Any other ARPHRD value carries no 802.11 frame and is skipped. PPI and standalone AVS have no ARPHRD value and cannot appear inside SLL. [libpcap `pcap-linktype(7)` LINKTYPE_LINUX_SLL / LINKTYPE_LINUX_SLL2; Linux `if_arp.h` ARPHRD constants]
 
 #### FR-LL-8
+
 Validate FCS presence by CRC-32 on every frame, every DLT. The 802.11 FCS is standard CRC-32 (ISO 3309 / IEEE 802.3); `crc32(data || fcs)` always equals the residue constant `0x2144DF1C`, so one pass over the stripped payload proves whether a trailing FCS is present. `link::fcs::resolve` combines the CRC verdict with the link-layer header's FCS flag (radiotap Flags bit `0x10`) and the BADFCS flag (radiotap Flags bit `0x40`, `IEEE80211_RADIOTAP_F_BADFCS`) into five outcomes, each with its own §9.2 counter: header and CRC agree (strip), CRC detected an unannounced FCS (strip; the header was wrong), BADFCS flagged (strip; frame was received corrupt on the air), CRC mismatch with no flag (strip; trust the header), neither (no strip). This replaces the earlier radiotap-flag-only tail-strip: frames whose header never announced an FCS previously fed 4 trailing checksum bytes to the IE walker as body data.
 
 #### FR-LL-9
+
 Attempt tiered recovery before dropping a frame whose link-layer strip failed (`src/link/recover.rs`). Tier 2 (`recovered_tier2`): when radiotap `it_len` is corrupt, recompute the expected header length from the `it_present` bitmask field sizes and natural alignment; bail to Tier 3 when the variable-size TLV (bit 28) or vendor-namespace (bit 30) bits are set. Tier 3 (`recovered_tier3`): scan byte offsets 0-144 (the largest known link-layer header, Prism) for the CRC-32 residue match that proves where the 802.11 frame plus FCS starts; minimum 14-byte slice (10-byte minimal control frame + 4-byte FCS) to reject null/FF-padding false positives. DLT-0 recovery (`recovered_dlt0`): for a packet whose interface reports DLT 0 (LINKTYPE_NULL / unspecified), attempt the radiotap `it_present` layout when byte 0 reads as radiotap version 0, then raw 802.11 at offset 0 gated on a plausible Frame Control (protocol-version bits B0-B1 == 0, `[IEEE 802.11-2024]` §9.2.4.1.1); a mis-guess yields no hashes because the downstream `EtherType 0x888E` / EAPOL and garbage-pattern gates reject non-handshake bytes. Only frames failing all tiers increment `link_errors` and route to the `plcp_error` log category.
 
 ### §8.3  802.11 frame parsing: FR-80211-*
 
 #### FR-80211-1
+
 Parse the 802.11 MAC header. Frame Control field (2 B, LE) bit layout per `[IEEE 802.11-2024]` §9.2.4.1, Figure 9-3:
 
-```
+```text
 B0-B1:  Protocol Version (must be 0)
 B2-B3:  Type (0=Mgmt, 1=Ctrl, 2=Data)
 B4-B7:  Subtype
@@ -1024,7 +1046,7 @@ B15:    +HTC/Order
 
 MAC header byte offsets (3-address frame):
 
-```
+```text
 Offset  0: Frame Control       (2 B)
 Offset  2: Duration/ID         (2 B)
 Offset  4: Address 1           (6 B)
@@ -1037,16 +1059,17 @@ Offset 24/30: [QoS Control]    (2 B, only for QoS Data subtypes)
 
 Address mapping per `[IEEE 802.11-2024]` §9.3.2.1.2 Table 9-60:
 
-| To DS | From DS | AP MAC | STA MAC |
-|-------|---------|--------|---------|
-| 0 | 0 | BSSID (addr3) | SA (addr2) |
-| 0 | 1 | BSSID (addr2) | DA (addr1) |
-| 1 | 0 | BSSID (addr1) | SA (addr2) |
-| 1 | 1 | TA (addr2)    | RA (addr1) |
+| To DS | From DS | AP MAC        | STA MAC    |
+| ----- | ------- | ------------- | ---------- |
+| 0     | 0       | BSSID (addr3) | SA (addr2) |
+| 0     | 1       | BSSID (addr2) | DA (addr1) |
+| 1     | 0       | BSSID (addr1) | SA (addr2) |
+| 1     | 1       | TA (addr2)    | RA (addr1) |
 
 Always process relay/WDS frames (To DS=1, From DS=1). No filtering (§4 invariant 4).
 
 #### FR-80211-2
+
 Management frames (type 0). Subtypes per §9.2.4.1.3 Table 9-1:
 
 - **Beacon (subtype 8)**: Parse SSID (Element ID 0, max 32 B per §9.4.2.2), RSN IE (Element ID 48 per §9.4.2.24), RSNXE (Element ID 244 per §9.4.2.241) for SAE-H2E / SAE-PK / OCI bits. Vendor IEs (Element ID 221) by OUI: `00:50:F2` Microsoft (type 1 = WPA1, type 4 = WPS); `50:6F:9A` WFA (type 9 = P2P, type 16 = HS 2.0, type 18 = OSEN, type 28 = OWE Transition Mode).
@@ -1056,6 +1079,7 @@ Management frames (type 0). Subtypes per §9.2.4.1.3 Table 9-1:
 - **Reassociation Request (subtype 2)**: Parse RSN IE for PMKID list. Parse MDE (Element ID 54, §9.4.2.45) for MDID. Parse FTE (Element ID 55, §9.4.2.46) for R0KH-ID (subelement type 3, 1-48 B) and R1KH-ID (subelement type 1, 6 B) per Table 9-221.
 
 #### FR-80211-3
+
 Data frames (type 2):
 
 - QoS detection: bit B7 of Subtype = 1 -> QoS data frame. QoS Control field is 2 extra bytes after Sequence Control (or Address 4 in 4-address). Per §9.2.4.5. Frame body offsets: 24 (non-QoS 3-addr), 26 (QoS 3-addr), 30 (non-QoS 4-addr), 32 (QoS 4-addr).
@@ -1068,9 +1092,10 @@ Data frames (type 2):
 - Protected Frame bit (FC bit 14): set -> MPDU encrypted. Initial M1/M2/M3/M4 are clear regardless of PMF (§12.7.6 / §12.7.9). Encrypted management frames are counted in `stats.mgmt_protected_frames` (protected Action frames additionally in `stats.mgmt_protected_action_skipped`) and skipped.
 
 #### FR-80211-4
+
 EAPOL-Key frame Key Information field (2 B, offset 5 from EAPOL body start, BE) per §12.7.2 Figure 12-36:
 
-```
+```text
 B0-B2:  Key Descriptor Version (0=AKM-determined, 1=HMAC-MD5/ARC4,
                                 2=HMAC-SHA1/AES, 3=AES-CMAC/AES)
 B3:     Key Type (1=Pairwise, 0=Group)
@@ -1090,6 +1115,7 @@ Message identification per §12.7.6.2-12.7.6.5; see §5.3 for the canonical trut
 Per §12.7.2 NOTE 9: M4 Key Nonce SHALL be zero; some Supplicant implementations set it to M2's SNonce. Parser accepts both.
 
 #### FR-80211-5
+
 EAPOL frame validation:
 
 - MIC field non-zero for M2/M3/M4 (unless AKM 14/15 AEAD).
@@ -1114,12 +1140,14 @@ EAPOL frame validation:
 ### §8.4  PMKID extraction: FR-PMKID-*
 
 #### FR-PMKID-1
+
 Extract PMKID from M1 Key Data. Parse TLV: tag 0xDD, length 0x14 (20 bytes), OUI `00:0F:AC`, type `0x04`. PMKID is 16 bytes following the OUI+type. Validate: not all zeros, not all ones. PMKID derivation formula by AKM per `[IEEE 802.11-2024]` §12.7.1.3 (see §6.2). `"PMK Name"` is literal ASCII (8 bytes: `50 4D 4B 20 4E 61 6D 65`). AA = AP MAC, SPA = STA MAC.
 
 #### FR-PMKID-2
+
 Extract PMKID from M2 RSN IE in Key Data. RSN IE structure per §9.4.2.24 Figure 9-367:
 
-```
+```text
 Element ID (1, =48) | Length (1) | Version (2, =1) |
 Group Data Cipher Suite (0 or 4) | Pairwise Cipher Suite Count (0 or 2) |
 Pairwise Cipher Suite List (4*m) | AKM Suite Count (0 or 2) |
@@ -1131,34 +1159,43 @@ Group Management Cipher Suite (0 or 4)
 All fields after Version are optional; if one is absent, all subsequent are absent. Extract AKM suite selector (OUI `00:0F:AC` + type byte) per Table 9-190. The cipher-suite list (§9.4.2.24.2 Table 9-188) and RSN Capabilities field (§9.4.2.24.4 Figure 9-374) are length-walked but not tallied; neither drives hash emission, and PMF presence is already observable via the frame-level `stats.mgmt_protected_frames` counter, so no per-suite or capabilities histogram is kept.
 
 #### FR-PMKID-3
+
 Extract PMKID from Association/Reassociation Request RSN IE. Parse RSN IE from tagged parameters, extract PMKID list. For FT-PSK: also parse MDE (Element ID 54 per §9.4.2.45) for MDID (2 B) and FTE (Element ID 55 per §9.4.2.46) for R0KH-ID (subelement type 3, 1-48 B) and R1KH-ID (subelement type 1, 6 B).
 
 #### FR-PMKID-4
+
 Extract ALL PMKIDs regardless of AKM type. No filtering based on hashcat support status. Route to appropriate output format per the table in §6.4.
 
 ### §8.5  EAPOL message storage: FR-MSG-*
 
 #### FR-MSG-1
+
 Store ALL extracted EAPOL messages in a hash map keyed by `(AP_MAC, STA_MAC)`. No circular buffer. No eviction. No per-type cap on the store; the opt-in `--max-eapol-per-type` flag caps pairing fan-out only (FR-CLI-3), never what the store keeps. At 80 % of system RAM the store spills to disk (invariant 2) rather than aborting. The only in-store reduction is dedup-on-insert: a byte-identical `(msg_type, akm, eapol_frame)` retransmission is collapsed at `MessageStore::add` time (`Admission::Duplicate`). That is a dedup, not an eviction; it never drops a message that would pair differently, and the global SipHash set would have collapsed the resulting lines anyway. The index is released by `finish_ingest()` before Phase 4.
 
 #### FR-MSG-2
+
 Each stored message contains: timestamp (u64 us), msg_type (M1/M2/M3/M4), replay_counter (u64), nonce (32 B), mic (16 or 24 B per Table 12-11), KDV (0/1/2/3), eapol_frame (heap, no upper bound), pmkid (16 B optional), FT fields (boxed; MDID 2 B, R0KH-ID up to 48 B, R1KH-ID 6 B), AKM type from context, and `is_rsn` (RSN vs WPA-legacy descriptor).
 
 #### FR-MSG-3
+
 No memory ceiling. Memory scales with EAPOL message count, not file size. Typical 100 GB capture with <1M EAPOL messages: <250 MiB. The disk-backed fallback (invariant 2) is the backstop for degenerate inputs, not the OS OOM killer.
 
 #### FR-MSG-4
+
 The statistics summary is printed to stdout unconditionally after every run. stderr produces no output. wpawolf reports `peak RSS (MiB)` in the closing banner via the `sysinfo` crate and optionally prints a per-store byte-count table with `--mem-stats`. Progress lines also report current RSS. For OS-level detail, operators run `/usr/bin/time -v` or `perf stat`.
 
 ### §8.6  Pairing: FR-PAIR-*
 
 #### FR-PAIR-1
+
 After all input is parsed, iterate over each `(AP_MAC, STA_MAC)` group. Sort messages within each group by timestamp.
 
 #### FR-PAIR-2
+
 Generate all valid message pair combinations: the 6 N#E# combos documented in §5.6.
 
 #### FR-PAIR-3
+
 Pairing constraints (output filters, all off by default):
 
 - Time gap <= `--eapoltimeout` seconds when set; bare flag = 600 s.
@@ -1169,17 +1206,21 @@ Pairing constraints (output filters, all off by default):
   - M1->M4: `RC_M4 - RC_M1` within tolerance
 
 #### FR-PAIR-4
+
 By default every pair that passes the constraints is emitted (the global SipHash dedup and the optional `--dedup-hash-combos` collapse handle reduction; there is no single-pair-per-combo selection). When `--dedup-hash-combos` collapses an equivalence class, the survivor is the pair with the smallest replay-counter gap magnitude (`rc_gap_magnitude`), with authorized-combo preference as the tiebreak (N3E2 > N1E2, N2E3 > N4E3, N3E4 > N1E4). See §5.8.
 
 The optional `--max-eapol-per-type=N` cap (FR-CLI-3, default off) is the one exception: it truncates each per-type message list to N entries before the combo loops run, bounding fan-out to N**2 per combo. It changes only what pairing iterates, never the store (FR-MSG-1).
 
 #### FR-PAIR-5
+
 Hash combo deduplication. Within a single handshake session (same ANonce across M1/M3): N1E2 == N3E2 (same M2 EAPOL); N2E3 == N4E3 (same M3 EAPOL); N1E4 == N3E4 (same M4 EAPOL). When `--dedup-hash-combos` is set, emit only one hash per equivalence class. Survivor chosen by smallest RC gap then authorized combo preference (N3E2 > N1E2, N2E3 > N4E3, N3E4 > N1E4). See §5.8.
 
 #### FR-PAIR-6
+
 Detect nonce endianness from the M1/M3 **nonce** bytes (not the replay counters): when two nonces share their first 28 bytes but differ in the trailing 4, bytes 30-31 differing indicates an LE router (`0x20`) and bytes 28-29 differing a BE router (`0x40`). This detection runs unconditionally. Independently, under `--rc-drift` a replay-counter relationship that only resolves under a byte-swap also sets LE|BE together with NC. The NC flag (`0x80`) itself fires from the three-source rule in §5.7 (M1 present for the session, endianness drift detected, or a per-pair RC deviation).
 
 #### FR-PAIR-7
+
 Invalid value rejection (unconditional, not a flag). Per §4 invariant 7:
 
 - Key Nonce matching any garbage-pattern kind (`null`, `ff`, `repeat_1`, `repeat_2`, `repeat_4`): rejected at parse time on every message type including M4. M4 NULL nonce is spec-valid on the wire per §12.7.6.5 NOTE 9 but the hash line is mathematically uncrackable (the live PTK depends on M2's `SNonce`, which the M4 frame does not carry); see §5.10.
@@ -1192,18 +1233,22 @@ Counters: `null_nonce_rejected`, `ff_nonce_rejected`, `repeat_nonce_rejected`, `
 ### §8.7  ESSID and output formatting: FR-ESSID-*, FR-OUT-*, FR-DEDUP-*
 
 #### FR-ESSID-1
+
 Build an ESSID map: `AP_MAC -> Vec<(ESSID, timestamp)>`. Populated from Beacons and Probe Responses.
 
 #### FR-ESSID-2
+
 When generating a hash line, look up the AP MAC in the ESSID map. If multiple ESSIDs exist for the same AP (SSID change), use the one closest in time to the handshake.
 
 #### FR-ESSID-3
+
 If no ESSID is found for an AP, **drop** the would-have-been-emitted hash line and account for it via the `[essid_not_found_summary]` log category in `--log` (one line per affected AP with `dropped=N`, `first_seen_us=`, `last_seen_us=`). Hashcat derives the PMK from PSK + ESSID, so an empty-ESSID line can never match; emitting it would waste downstream cracking time and trigger `Salt-value exception` / `Token length exception` parser errors in mode 22000. The Phase 3 stats banner surfaces the same information as `hash lines dropped (no SSID resolved; not crackable)` with the `distinct APs dropped` sub-counter.
 
 #### FR-OUT-1
+
 Mode 22000 PMKID line shape (type 01):
 
-```
+```text
 WPA*01*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>
        32hex   12hex    12hex    0-128hex   2hex
 ```
@@ -1211,9 +1256,10 @@ WPA*01*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>
 Trailing `***` = three empty fields (reserved, maintain field count). See §7.2.
 
 #### FR-OUT-2
+
 Mode 22000 EAPOL line shape (type 02):
 
-```
+```text
 WPA*02*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>
        32hex 12hex    12hex    0-128hex 64hex   var hex 2hex
 ```
@@ -1221,9 +1267,10 @@ WPA*02*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>
 `<MIC>` is the original Key MIC extracted before zeroing. `<NONCE>` is the **external** nonce. `<EAPOL>` is the raw frame with the Key MIC field zeroed at offset 77..(77+MIC_len). MIC length is AKM-dependent per Table 12-11; current hashcat 22000 only accepts 16 B. `<MP>` per §5.7. See §7.3.
 
 #### FR-OUT-3
+
 Mode 22000 FT PMKID line (type 03, 12 tokens):
 
-```
+```text
 WPA*03*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>*<MDID>*<R0KHID>*<R1KHID>
        32hex   12hex    12hex    0-128hex  2hex 4hex  var hex   12hex
 ```
@@ -1231,45 +1278,55 @@ WPA*03*<PMKID>*<MAC_AP>*<MAC_STA>*<ESSID>***<MP>*<MDID>*<R0KHID>*<R1KHID>
 Three empty fields (nonce, eapol, empty for PMKID). See §7.2.
 
 #### FR-OUT-4
+
 Mode 22000 FT EAPOL line (type 04, 12 tokens):
 
-```
+```text
 WPA*04*<MIC>*<MAC_AP>*<MAC_STA>*<ESSID>*<NONCE>*<EAPOL>*<MP>*<MDID>*<R0KHID>*<R1KHID>
 ```
 
 FT-PSK M2 EAPOL frames often exceed 255 bytes (real captures: 256-510) because of embedded FT IEs. wpawolf emits without truncation.
 
 #### FR-OUT-5
+
 No EAPOL size gating. All valid EAPOL frames are emitted regardless of length.
 
 #### FR-OUT-6
+
 All hex output is lowercase. Consistent encoding for deduplication and downstream tool compatibility.
 
 #### FR-OUT-7
+
 ESSID field is always hex-encoded because IEEE 802.11 defines SSIDs as arbitrary 0-32 byte sequences, not strings. Use field length / 2 as the ESSID byte length when parsing. Do not call `strlen()` on decoded bytes.
 
 #### FR-OUT-8
+
 EAPOL frame MIC zeroing for output. The EAPOL-Key frame stored in `<EAPOL>` must have the Key MIC field zeroed at offset 77..(77+MIC_len). Original MIC preserved in the `<MIC>` line field. See §7.4 for the full byte layout and AKM-dependent MIC length table.
 
 #### FR-DEDUP-1
+
 Before writing any hash line, check it against a global deduplication set (§4 invariant 5).
 
 #### FR-DEDUP-2
+
 Dedup key is a 64-bit SipHash of the significant fields. PMKID lines: `PMKID || MAC_AP || MAC_STA || ESSID`. EAPOL lines: `MIC || MAC_AP || MAC_STA || NONCE || EAPOL || ESSID || MESSAGE_PAIR`. Both prefixed by the line-kind byte to prevent cross-pipeline aliasing.
 
 #### FR-DEDUP-3
+
 If two hash lines differ only in ESSID (AP changed SSID), both are emitted (different ESSID = different salt = different hash).
 
 #### FR-DEDUP-4
+
 If two hash lines differ only in message_pair bits 3-7 (flags), keep the one with the most informative flags (prefer LE/BE detection over NC-mandatory).
 
 #### FR-DEDUP-5
-Disk-backed dedup (`src/output/disk_dedup.rs`). When the in-memory `PerSinkDedup` would exceed the memory threshold (the pre-Phase-4 `would_spill` byte estimate, or a mid-emission `disk_trip` from the `MemWatcher`), dedup spills to disk: each hash line is written through to its output file immediately and its `(0-based line number, u64 fingerprint)` is appended to one of 256 per-sink bucket files (`fingerprint % 256`, 16 bytes/record LE). After emission, a cleaning pass loads each bucket, groups by fingerprint, and rewrites every output file keeping only the first occurrence of each. Fingerprints already deduped in memory before a mid-emission switch are flushed as `line_number == u64::MAX` sentinels and count as the first occurrence, so their later write-through duplicates are removed; the new `DiskDedup` is seeded with each sink's current line count so the cleaning pass indexes absolute file lines correctly. Output is set-identical to memory-mode dedup; only line order may differ (hashcat is order-insensitive). Bucket directories are temp files deleted on drop.
 
+Disk-backed dedup (`src/output/disk_dedup.rs`). When the in-memory `PerSinkDedup` would exceed the memory threshold (the pre-Phase-4 `would_spill` byte estimate, or a mid-emission `disk_trip` from the `MemWatcher`), dedup spills to disk: each hash line is written through to its output file immediately and its `(0-based line number, u64 fingerprint)` is appended to one of 256 per-sink bucket files (`fingerprint % 256`, 16 bytes/record LE). After emission, a cleaning pass loads each bucket, groups by fingerprint, and rewrites every output file keeping only the first occurrence of each. Fingerprints already deduped in memory before a mid-emission switch are flushed as `line_number == u64::MAX` sentinels and count as the first occurrence, so their later write-through duplicates are removed; the new `DiskDedup` is seeded with each sink's current line count so the cleaning pass indexes absolute file lines correctly. Output is set-identical to memory-mode dedup; only line order may differ (hashcat is order-insensitive). Bucket directories are temp files deleted on drop.
 
 ### §8.8  CLI: FR-CLI-*
 
 #### FR-CLI-1
+
 Positional arguments: input capture file path(s) and/or directory path(s). Directories are walked recursively; every regular file whose first 4 bytes match a supported capture-file magic is added to the input set. File extensions are never consulted: a `.bin` or extensionless file with valid magic is included; a `.pcap` file with text content is skipped. Accepted magics:
 
 - pcap microsecond `0xA1B2C3D4` (`TCPDUMP_MAGIC`), nanosecond `0xA1B23C4D` (`NSEC_TCPDUMP_MAGIC`), and Kuznetzov `0xA1B2CD34` (`KUZNETZOV_TCPDUMP_MAGIC`), each accepted in either byte order (6 byte-sequences total), exactly the set libpcap's `pcap_check_header()` accepts;
@@ -1282,53 +1339,56 @@ Files named explicitly on the command line are passed through verbatim; `open_re
 Magics defined but never accepted by libpcap (`FMESQUITA_TCPDUMP_MAGIC`, `NAVTEL_TCPDUMP_MAGIC`, `CBPF_SAVEFILE_MAGIC`) are not accepted here either.
 
 #### FR-CLI-2
+
 Output flags:
 
 | Flag | Long | Description |
-|------|------|-------------|
-|            | `--prefix PREFIX`         | derive a default path for every hash + auxiliary sink (`PREFIX.22000`, the seven per-type sinks, `PREFIX.essid` ... `PREFIX.log`); an explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool `--prefix` |
-| `-o FILE`  | `--out FILE`              | all crackable hashes (types 1-7), mode 22000 format (`WPA*01*`-`WPA*04*`) |
-|            | `--wpa1-eapol FILE`       | type 1 only (`WPA*02*`) |
-|            | `--wpa2-pmkid FILE`       | type 2 only (`WPA*01*`) |
-|            | `--wpa2-eapol FILE`       | type 3 only (`WPA*02*`) |
-|            | `--sha256-pmkid FILE`     | type 4 only (`WPA*01*`) |
-|            | `--sha256-eapol FILE`     | type 5 only (`WPA*02*`) |
-|            | `--ft-pmkid FILE`         | type 6 only (`WPA*03*`, FT extras) |
-|            | `--ft-eapol FILE`         | type 7 only (`WPA*04*`, FT extras) |
-| `-E FILE` | `--essid-output`    | unique ESSIDs from AP-side frames (autohex) |
-| `-R FILE` | `--probe-output`    | unique ESSIDs from client-side frames (Probe Requests, Action MR) |
+| ------ | ------ | ------------- |
+| | `--prefix PREFIX` | derive a default path for every hash + auxiliary sink (`PREFIX.22000`, the seven per-type sinks, `PREFIX.essid` ... `PREFIX.log`); an explicit per-sink flag overrides its prefix-derived path. Mirrors hcxpcapngtool `--prefix` |
+| `-o FILE` | `--out FILE` | all crackable hashes (types 1-7), mode 22000 format (`WPA*01*`-`WPA*04*`) |
+| | `--wpa1-eapol FILE` | type 1 only (`WPA*02*`) |
+| | `--wpa2-pmkid FILE` | type 2 only (`WPA*01*`) |
+| | `--wpa2-eapol FILE` | type 3 only (`WPA*02*`) |
+| | `--sha256-pmkid FILE` | type 4 only (`WPA*01*`) |
+| | `--sha256-eapol FILE` | type 5 only (`WPA*02*`) |
+| | `--ft-pmkid FILE` | type 6 only (`WPA*03*`, FT extras) |
+| | `--ft-eapol FILE` | type 7 only (`WPA*04*`, FT extras) |
+| `-E FILE` | `--essid-output` | unique ESSIDs from AP-side frames (autohex) |
+| `-R FILE` | `--probe-output` | unique ESSIDs from client-side frames (Probe Requests, Action MR) |
 | `-W FILE` | `--wordlist-output` | leaked-text wordlist (superset of -E and -R, plus WPS strings, EAP identities, country codes, etc.) |
 | `-I FILE` | `--identity-output` | EAP identities (autohex, sorted) |
 | `-U FILE` | `--username-output` | EAP usernames (autohex, sorted) |
-| `-D FILE` | `--device-output`   | WPS device info (deduped by MAC, sorted by manufacturer) |
-|       | `--wordlist-scan FILE` | printable-ASCII runs (>= 8 B) from plaintext management-frame IE bodies; standalone, not folded into -W |
-|       | `--log FILE`            | structured processing log |
+| `-D FILE` | `--device-output` | WPS device info (deduped by MAC, sorted by manufacturer) |
+| | `--wordlist-scan FILE` | printable-ASCII runs (>= 8 B) from plaintext management-frame IE bodies; standalone, not folded into -W |
+| | `--log FILE` | structured processing log |
 
 All string outputs (-E, -R, -W, -I, -U, and string fields of -D) use hashcat / hcxtools autohex format: bytes in printable ASCII range 0x20-0x7E are written as-is; all other byte sequences are encoded as `$HEX[<lowercase hex>]`.
 
 Two sinks pointed at the same real file are rejected up front (silent data loss), but any output may target a `/dev/*` special file (`/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/N`) and several sinks may share one -- `wpawolf -o /dev/stdout -E /dev/stdout capture.pcap` streams both formats to stdout. `/dev/*` targets are exempt from both the duplicate-path rejection and the parent-directory writability probe (whose parent, `/dev`, is not a normal writable directory).
 
 #### FR-CLI-3
+
 Output-filter and runtime flags (unfiltered defaults):
 
 | Long | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--eapoltimeout` [*s*] | off | session time window in seconds; bare flag = 600 s -- **(!) FILTER: drops a MIC whose only in-window pairing exceeds the window** |
-| `--rc-drift` [*n*]    | off | require RC consistency, tolerance n (default 8 if bare) -- **(!) FILTER: drops a MIC whose only RC-consistent pairing exceeds the tolerance** |
+| `--rc-drift` [*n*] | off | require RC consistency, tolerance n (default 8 if bare) -- **(!) FILTER: drops a MIC whose only RC-consistent pairing exceeds the tolerance** |
 | `--dedup-hash-combos` | false | 6 combos -> 3 unique per session (never-miss fold) |
-| `--nc-dedup`          | false | cluster near-identical nonces, keep one survivor with FLAG_NC (§5.8.1) (never-miss fold) |
-| `--nc-tolerance` *n*  | 8 | cluster span tolerance for `--nc-dedup`; ignored unless `--nc-dedup` set |
+| `--nc-dedup` | false | cluster near-identical nonces, keep one survivor with FLAG_NC (§5.8.1) (never-miss fold) |
+| `--nc-tolerance` *n* | 8 | cluster span tolerance for `--nc-dedup`; ignored unless `--nc-dedup` set |
 | `--max-eapol-per-type` *n* | 0 (off) | cap pairing to the first n messages of each type per (AP, STA); bounds rotating-ANonce fan-out -- **(!) CAP: when n > 0 discards messages before pairing, can drop a MIC's true ANonce (loud alarm fires)** |
-| `--smart`             | false | handshake-instance attribution (Phase A/B/C in `pair/combos.rs`): prune the uncrackable nonce x MIC cross-product per `(AP, STA)` group without ever dropping a crackable line; implies `--dedup-hash-combos` + `--nc-dedup`. See `docs/smart-pairing-design.md` and `tests/integration/smart_subset_wide.rs`. |
-| `--strict`            | false | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` -- **(!) bundles the MIC-dropping `--eapoltimeout` / `--rc-drift` filters and the `--max-eapol-per-type` cap; prefer `--smart` for a never-miss reduction** |
-| `--threads` *n*       | CPU count | Phase 4 worker thread count |
+| `--smart` | false | handshake-instance attribution (Phase A/B/C in `pair/combos.rs`): prune the uncrackable nonce x MIC cross-product per `(AP, STA)` group without ever dropping a crackable line; implies `--dedup-hash-combos` + `--nc-dedup`. See `docs/smart-pairing-design.md` and `tests/integration/smart_subset_wide.rs`. |
+| `--strict` | false | bundle: `--eapoltimeout=5 --rc-drift=8 --nc-tolerance=8 --max-eapol-per-type=500 --dedup-hash-combos --nc-dedup --collapse-message-pair` -- **(!) bundles the MIC-dropping `--eapoltimeout` / `--rc-drift` filters and the `--max-eapol-per-type` cap; prefer `--smart` for a never-miss reduction** |
+| `--threads` *n* | CPU count | Phase 4 worker thread count |
 | `--essid-collapse-min` *n* | 3 | multi-SSID collapse guard: minimum distinct SSIDs before collapse fires |
 | `--essid-collapse-ratio` *n* | 10 | multi-SSID collapse guard: top-count / second-count ratio threshold |
-| `--quiet`             | false | suppress periodic `[progress]` lines; closing banner unaffected |
-| `--mem-stats`         | false | print per-store entry/byte table after closing banner |
-| `--debug`             | false | emit timestamped phase/file/group/memory diagnostic lines to stdout |
+| `--quiet` | false | suppress periodic `[progress]` lines; closing banner unaffected |
+| `--mem-stats` | false | print per-store entry/byte table after closing banner |
+| `--debug` | false | emit timestamped phase/file/group/memory diagnostic lines to stdout |
 
 #### FR-CLI-4
+
 Info flags: `-h` / `--help`, `-v` / `--version` provided by `clap`. The summary statistics are printed unconditionally to stdout on every run. stderr produces no output.
 
 `--log` is a **triage tool** (`src/log.rs`): it records events where wpawolf dropped, skipped, or rejected data for non-obvious reasons. Obvious high-volume events (null-kind nonce / MIC / PMKID rejections, out-of-sequence timestamps, FCS outcomes, recovery tiers) are stats-banner-only and produce no log lines.
@@ -1356,63 +1416,83 @@ Format: `[category] key=value key=value ...`. Per-category field layout matches 
 ### §8.9  Correctness, performance, dependencies, build, threading
 
 #### FR-CORRECT-1
+
 Output is a strict content-superset of any conformant reference extractor running on the same capture with filters disabled, after stripping the trailing `message_pair` byte. The oracle lives in `tests/integration/superset_test.rs`.
 
 #### FR-CORRECT-2
+
 Zero duplicate hash lines in output. Verified by `sort | uniq -d` producing empty output.
 
 #### FR-CORRECT-3
+
 Every emitted hash line must be format-valid per the hashcat mode 22000 specification.
 
 #### FR-PERF-1
+
 Process pcapng input at >= 200 MB/s on a single core (bounded by I/O, not CPU). Parser must not be the bottleneck.
 
 #### FR-PERF-2
+
 Total processing time for a 100 GB file should be dominated by I/O read time, not pairing or dedup.
 
 #### FR-PERF-3
+
 Phase 4 (pairing) runs multi-threaded by default via rayon work-stealing. The `--threads N` flag selects worker count (default = available CPU cores; `--threads=1` reproduces the serial path for deterministic test output). Pairs are streamed per-group through a `Mutex<EmitState>` callback so peak memory is bounded to one group's output at a time. All shared structures are `Send + Sync` (§4 invariant 9).
 
 #### FR-MEM-1
+
 No artificial memory ceiling. Memory scales with EAPOL message count.
 
 #### FR-MEM-2
+
 I/O buffer: one read buffer (default 64 KiB). No full-file buffering. Streaming parser reads one block/record at a time.
 
 #### FR-MEM-3
+
 Estimated memory for typical captures; see §4 memory budget table.
 
 #### FR-MEM-4
+
 wpawolf reports peak RSS (MiB) in the closing banner via `sysinfo` and optionally prints a per-store byte-count table with `--mem-stats`. For OS-level detail, operators run `/usr/bin/time -v` or `perf stat`.
 
 #### FR-DEP-1
+
 Direct dependency count: 5 crates (`flate2` + `crc32fast` + `clap` + `rayon` + `sysinfo`). `flate2` pulls `miniz_oxide` and already pulled `crc32fast` transitively (promoting it to direct adds zero new supply-chain surface); `clap` pulls its derive/builder proc-macro ecosystem; `rayon` pulls `crossbeam-deque`/`crossbeam-epoch`; `sysinfo` is self-contained on Linux (adds `core-foundation-sys` on macOS).
 
 #### FR-DEP-2
+
 No large async / serialisation frameworks. All hex encoding, pcap / pcapng / 802.11 / EAPOL parsing is implemented inline.
 
 #### FR-DEP-3
+
 If cryptographic primitives are needed in future versions, prefer battle-tested libraries (RustCrypto) over inline implementations.
 
 #### FR-DEP-4
+
 pcap / pcapng parsing implemented inline. No pcap library dependencies. The formats are simple and total ~500 lines.
 
 #### FR-BUILD-1
+
 Single static binary. No runtime dependencies.
 
 #### FR-BUILD-2
+
 Cross-compile targets: x86_64-linux, aarch64-linux at minimum.
 
 #### FR-BUILD-3
+
 Release binary <= 5 MiB stripped.
 
 #### FR-THREAD-1
+
 Phase 1 (parsing) is I/O-bound and sequential for a single file. Multi- file ingest still runs serially in v1; pipeline parallelism (reader thread + parser thread) and parallel-file processing are deferred.
 
 #### FR-THREAD-2
+
 **Shipped.** Phase 4 (pairing) runs each `(AP, STA)` group in parallel via rayon work-stealing. `--threads N` selects worker count (default = CPU cores). Pairs stream through a per-group fan-out callback (no all-pairs Vec materialization).
 
 #### FR-THREAD-3
+
 **Shipped.** Per-sink output writers serialise on a single `Mutex<HashSet<u64>>` dedup set keyed by SipHash-1-3 fingerprints over the significant fields. Pairing threads compute fingerprints in parallel; only the cross-thread set membership check + line write sequence is locked.
 
 ---
@@ -1438,7 +1518,7 @@ The verification pins three invariants:
 ### §10.1  Specifications
 
 | Spec | Sections used |
-|------|---------------|
+| ------ | --------------- |
 | **IEEE 802.11-2024** | §9.2.4 (Frame Control), §9.3.2 (Address mapping, Table 9-60), §9.4.2.2 (SSID), §9.4.2.24 (RSNE, Table 9-190 AKM selectors, Figure 9-374 RSN Caps), §9.4.2.45 (MDE), §9.4.2.46 (FTE, Table 9-221 subelements), §9.6.7 (FT Action frames), §9.6.15 (Mesh Peering Action frames), §11.52 (Beacon protection), §12.6.1.3 (PMKID derivation), §12.6.8 (PMKSA caching), §12.7.1.2 (PRF), §12.7.1.3 (PMKID derivation), §12.7.1.6 (FT key hierarchy), §12.7.2 (EAPOL-Key frame, Table 12-10 message types, Table 12-11 MIC lengths), §12.7.6 (4-way handshake), §12.11 (FILS auth), §12.13 (PASN), §13.4 (FT Initial Association), §13.8 (FT over-the-DS), §14.3.5 (AMPE), §35 (MLO) |
 | **IEEE 802.11-2020** | Same sections, prior numbering |
 | **IEEE 802.11-2012** | §8.2.4.1 (Frame Control), §8.3.2.1 (Address mapping, Table 8-19), §11.6.2 (EAPOL-Key), Annex P Table P-2 (LLC/SNAP) |
@@ -1465,7 +1545,7 @@ The verification pins three invariants:
 
 ### §10.3  Repository layout
 
-```
+```text
 src/
   main.rs        entry point, arg parsing, orchestration
   lib.rs         public API for integration tests
@@ -1545,4 +1625,3 @@ pub struct DiskDedup { /* 256 bucket files per sink; mid-stream fallback for Per
 Rust 2024 edition, stable toolchain pinned in `rust-toolchain.toml`. `Cargo.toml` enforces `unsafe_code = "forbid"`; `lib.rs` re-states `#![forbid(unsafe_code)]`. Clippy: `all` at `deny`, `pedantic` / `nursery` / `cargo` at `warn`. `unwrap_used`, `expect_used`, `panic`, `indexing_slicing` at `warn`. `dbg_macro`, `todo`, `unimplemented`, `mem_forget` at `deny`. Cast lints (`cast_possible_truncation`, `cast_sign_loss`, `cast_precision_loss`, `cast_possible_wrap`) at `warn`. `wildcard_imports` at `deny` (tests may `#[allow]`). `.cargo/config.toml` sets `rustflags = ["-D", "warnings"]`.
 
 `make check-all` runs `fmt`, `lint` (clippy zero warnings), `audit` (cargo deny), `audit-citations` (hcxpcapngtool line-citation check), `audit-stats` (§9 banner-contract vs `src/stats.rs` drift gate), `check`, `test`, `doc` (rustdoc `-D warnings`), `hygiene` (ASCII + LF), `machete` (unused deps).
-
